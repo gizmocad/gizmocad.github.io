@@ -2021,8 +2021,13 @@ function renderPropertiesPanel() {
   // A flat sketch has no solid yet, so nothing to round, cut or sculpt.
   const flat = f.kind === "sketch" && f.params.operation === "flat";
   if (FINISHABLE.includes(f.kind) && !flat) {
-    items.push(...edgeSection(f, update));
-    items.push(...shellSection(f, update));
+    if (f.kind === "text") {
+      // The geometry kernel can't reliably round or bevel font outlines (it fails on most letters).
+      items.push(section("Edges"), hint("Letters can't be rounded or bevelled: font outlines are too complex for the geometry kernel. For softer letters, pick a bolder font or make them taller."));
+    } else {
+      items.push(...edgeSection(f, update));
+      items.push(...shellSection(f, update));
+    }
     const sculpt = button("✋ Sculpt this object", () => void convertToSculpt(f.id), "wide");
     sculpt.title = "Turn this object into clay you can sculpt with brushes (Ctrl+Z to undo)";
     items.push(section("Sculpt"), sculpt, hint(f.kind === "group" ? "The group's merged shape becomes one piece of clay." : "Turns the exact shape into clay; dimensions and fillets stop being editable."));

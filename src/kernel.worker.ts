@@ -230,8 +230,10 @@ function applyEdgeOps(shape: Shape3D, ops: EdgeOp[]): Shape3D {
 /** The feature's own geometry with its fillets/chamfers, in its local frame. */
 function buildOwn(f: Feature): Shape3D | null {
   let shape = buildBase(f);
-  if (shape && f.kind !== "group" && f.edgeOps.length) shape = applyEdgeOps(shape, f.edgeOps);
-  if (shape && f.kind !== "group" && f.shell) shape = applyShell(shape, f.shell);
+  // Text takes neither: OpenCascade can't round or hollow font outlines reliably (see the Text panel).
+  const finished = f.kind !== "group" && f.kind !== "text";
+  if (shape && finished && f.edgeOps.length) shape = applyEdgeOps(shape, f.edgeOps);
+  if (shape && finished && f.shell) shape = applyShell(shape, f.shell);
   return shape && f.clips?.length ? applyClips(shape, f.clips) : shape;
 }
 
