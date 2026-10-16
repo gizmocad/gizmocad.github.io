@@ -16,6 +16,9 @@ import { ViewCube } from "./viewCube";
 
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
 
+/** Width of the floor grid, in mm. */
+const FLOOR_SIZE = 500;
+
 const COLORS = {
   solid: 0x3ddc97,
   selected: 0x4aa3ff,
@@ -385,8 +388,9 @@ export class Viewport {
     }
     // Everything on the floor is drawn in a fixed order without depth writes, instead of at nearly the
     // same height: lines that close together flicker as the depth buffer can't tell which is in front.
-    const fine = floorLayer(makeGrid(200, 200, pal.gridFine, pal.gridFine, 0), -4);
-    const major = floorLayer(makeGrid(200, 20, pal.gridMajor, pal.gridMinor, 0), -3);
+    // 500 mm across: 10 mm squares, with 1 mm lines between.
+    const fine = floorLayer(makeGrid(FLOOR_SIZE, FLOOR_SIZE, pal.gridFine, pal.gridFine, 0), -4);
+    const major = floorLayer(makeGrid(FLOOR_SIZE, FLOOR_SIZE / 10, pal.gridMajor, pal.gridMinor, 0), -3);
     this.grids.add(fine, major, floorLayer(new THREE.AxesHelper(30), -1));
     this.sketchGrid.add(makeGrid(400, 40, pal.gridMajor, pal.gridMinor, -0.02, true), makeGrid(400, 400, pal.gridFine, pal.gridFine, -0.03, true));
     this.root.traverse((o) => {
