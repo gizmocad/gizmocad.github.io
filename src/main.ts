@@ -2279,7 +2279,8 @@ function renderSketchPanel(panel: HTMLElement, s: SketchFeature, ed: SketchEdito
     items.push(lengthField("Brush width", ed.brushWidth, (v) => ((ed.brushWidth = v), ed.render(), renderProperties()), { min: 0 }));
   }
   if (ed.tool === "ngon") {
-    items.push(lengthField("Sides", ed.ngonSides, (v) => ((ed.ngonSides = Math.max(3, Math.min(64, Math.round(v)))), renderProperties()), { min: 2, plain: true }));
+    const setSides = (v: number) => ((ed.ngonSides = clampSides(v)), renderProperties());
+    items.push(lengthField("Sides", ed.ngonSides, setSides, { min: 3, plain: true }), sidePresets(ed.ngonSides, setSides));
   }
   if (!["select", "point", "line"].includes(ed.tool)) {
     items.push(labeled("New shapes", segmented(MODE_OPTIONS, ed.newMode, (m) => ((ed.newMode = m), sketchStateChanged(), ed.render()), "entity")));
@@ -2444,6 +2445,14 @@ function constraintList(s: SketchFeature, updateSketch: (mutate: (f: Feature) =>
   return items;
 }
 
+const clampSides = (v: number) => Math.max(3, Math.min(64, Math.round(v)));
+
+/** One-click side counts for N-gons (the Sides field takes any count up to 64). */
+function sidePresets(current: number, onPick: (sides: number) => void) {
+  const options = [3, 4, 5, 6, 8, 10, 12].map((n) => ({ value: String(n), label: String(n), title: `${n} sides` }));
+  return segmented(options, String(current), (v) => onPick(Number(v)));
+}
+
 /** Numeric fields for one sketch entity. */
 function entityFields(e: SketchEntity, updateEntity: (id: string, mutate: (e: SketchEntity) => void) => void): HTMLElement[] {
   type Num = { [k: string]: number };
@@ -2458,7 +2467,14 @@ function entityFields(e: SketchEntity, updateEntity: (id: string, mutate: (e: Sk
     case "ellipse":
       return [num("Centre U", "x"), num("Centre V", "y"), num("Radius U", "rx", { min: 0 }), num("Radius V", "ry", { min: 0 }), num("Angle", "angle", deg)];
     case "ngon":
-      return [num("Centre U", "x"), num("Centre V", "y"), num("Radius", "radius", { min: 0 }), num("Sides", "sides", { min: 2, plain: true }), num("Angle", "angle", deg)];
+      return [
+        num("Centre U", "x"),
+        num("Centre V", "y"),
+        num("Radius", "radius", { min: 0 }),
+        lengthField("Sides", e.sides, (v) => updateEntity(e.id, (t) => t.type === "ngon" && (t.sides = clampSides(v))), { min: 3, plain: true }),
+        sidePresets(e.sides, (v) => updateEntity(e.id, (t) => t.type === "ngon" && (t.sides = v))),
+        num("Angle", "angle", deg),
+      ];
     case "slot":
       return [num("Start U", "x1"), num("Start V", "y1"), num("End U", "x2"), num("End V", "y2"), num("Radius", "radius", { min: 0 })];
     case "point":
