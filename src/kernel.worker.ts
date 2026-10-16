@@ -2,14 +2,50 @@
 
 import opencascade from "replicad-opencascadejs";
 import wasmUrl from "replicad-opencascadejs/wasm?url";
-import { assembleWire, draw, drawCircle, drawEllipse, genericSweep, getOC, makeBaseBox, makeBox, makeCircle, makeCylinder, makeHelix, makeLine, makeEllipsoid, makeSphere, setOC, type Drawing, type Shape3D } from "replicad";
-import { PLANE_ROTATIONS, childrenOf, insideMergedGroup, isMergedGroup, type Clip, clipNormal, type SpringParams, jointMatrix, type EdgeOp, type Feature, type SketchEntity, type SketchParams } from "./model";
+import { assembleWire, cast, draw, drawCircle, drawEllipse, drawText, genericSweep, getOC, loadFont, makeBaseBox, makeBox, makeCircle, makeCylinder, makeHelix, makeLine, makeEllipsoid, makeSphere, setOC, type Drawing, type Shape3D } from "replicad";
+import {
+  PLANE_ROTATIONS,
+  SCREW_SIZES,
+  childrenOf,
+  insideMergedGroup,
+  isMergedGroup,
+  type Clip,
+  clipNormal,
+  type ScrewParams,
+  type Shell,
+  type SpringParams,
+  type TextParams,
+  jointMatrix,
+  type EdgeOp,
+  type Feature,
+  type SketchEntity,
+  type SketchParams,
+} from "./model";
+import sans400 from "@fontsource/roboto/files/roboto-latin-400-normal.woff?url";
+import sans700 from "@fontsource/roboto/files/roboto-latin-700-normal.woff?url";
+import serif400 from "@fontsource/roboto-slab/files/roboto-slab-latin-400-normal.woff?url";
+import serif700 from "@fontsource/roboto-slab/files/roboto-slab-latin-700-normal.woff?url";
+import mono400 from "@fontsource/roboto-mono/files/roboto-mono-latin-400-normal.woff?url";
+import mono700 from "@fontsource/roboto-mono/files/roboto-mono-latin-700-normal.woff?url";
 import { entityPath, gearPath, isProfile, prismPoints, starPoints, strokePieces, type Path } from "./sketchGeometry";
 import type { KernelRequest, KernelResponse, MeshData } from "./kernel";
+
+/** Fonts for text, bundled with the app (Roboto family, OFL/Apache licensed). */
+const FONT_FILES: Record<string, string> = {
+  "sans-400": sans400,
+  "sans-700": sans700,
+  "serif-400": serif400,
+  "serif-700": serif700,
+  "mono-400": mono400,
+  "mono-700": mono700,
+};
+type Font = Awaited<ReturnType<typeof loadFont>>;
+const fonts: Record<string, Font> = {};
 
 const ready = (async () => {
   const oc = await opencascade({ locateFile: () => wasmUrl });
   setOC(oc as Parameters<typeof setOC>[0]);
+  await Promise.all(Object.entries(FONT_FILES).map(async ([name, url]) => (fonts[name] = await loadFont(url, name))));
 })();
 
 function pathDrawing(path: Path): Drawing {
@@ -195,7 +231,39 @@ function applyEdgeOps(shape: Shape3D, ops: EdgeOp[]): Shape3D {
 function buildOwn(f: Feature): Shape3D | null {
   let shape = buildBase(f);
   if (shape && f.kind !== "group" && f.edgeOps.length) shape = applyEdgeOps(shape, f.edgeOps);
+  if (shape && f.kind !== "group" && f.shell) shape = applyShell(shape, f.shell);
   return shape && f.clips?.length ? applyClips(shape, f.clips) : shape;
+}
+
+/**
+ * Hollow a solid: walls `thickness` thick. Open at the top or bottom, the face
+ * there is removed (a cup or box); closed, the inside is an empty pocket.
+ */
+function applyShell(shape: Shape3D, s: Shell): Shape3D {
+  if (s.thickness <= 0) return shape;
+  const [[, , zMin], [, , zMax]] = shape.boundingBox.bounds;
+  try {
+    if (s.open !== "none") {
+      const z = s.open === "top" ? zMax : zMin;
+      const result = shape.shell(s.thickness, (f) => f.inPlane("XY", z)); // Positive: walls go inward, outside size kept.
+      if (isValidShape(result)) return result;
+      throw new Error("invalid");
+    }
+    const oc = getOC() as unknown as { BRepOffsetAPI_MakeOffsetShape: new () => { PerformByJoin(s: unknown, offset: number, tol: number): void; Shape(): unknown; IsDone(): boolean; delete(): void } };
+    const maker = new oc.BRepOffsetAPI_MakeOffsetShape();
+    try {
+      maker.PerformByJoin((shape as unknown as { wrapped: unknown }).wrapped, -s.thickness, 1e-3);
+      if (!maker.IsDone()) throw new Error("offset failed");
+      const inner = cast(maker.Shape() as Parameters<typeof cast>[0]) as Shape3D;
+      const result = shape.cut(inner);
+      if (isValidShape(result)) return result;
+      throw new Error("invalid");
+    } finally {
+      maker.delete();
+    }
+  } catch {
+    throw new Error(`Couldn't hollow this shape with ${s.thickness} mm walls: try thinner walls${s.open === "none" ? ", or open it at the top" : ""}.`);
+  }
 }
 
 /** A big box filling one side of a tilted cut plane, around the shape's bounds lo..hi. */
@@ -359,6 +427,69 @@ function zigzagStruts(width: number, t: number, pitch: number, height: number, d
   return parts.reduce((a, b) => a.fuse(b));
 }
 
+/**
+ * Lettering: each line drawn in the chosen font, lined up left/centre/right,
+ * then the whole block centred on the origin and extruded up by `height`.
+ */
+function buildText(p: TextParams): Shape3D {
+  const font = fonts[`${p.font}-${p.bold ? 700 : 400}`];
+  if (!font) throw new Error("The font isn't loaded yet.");
+  if (p.size <= 0 || p.height <= 0) throw new Error("Text needs a size and height above 0.");
+  const family = `${p.font}-${p.bold ? 700 : 400}`;
+  // `size` is the capital height; the font is drawn by its em size.
+  const os2 = (font.tables as { os2?: { sCapHeight?: number } }).os2;
+  const capRatio = (os2?.sCapHeight || 0.7 * font.unitsPerEm) / font.unitsPerEm;
+  const em = p.size / capRatio;
+  const lines = p.text.split("\n");
+  let result: Drawing | null = null;
+  lines.forEach((line, i) => {
+    const y = -i * em * 1.25;
+    // Letter by letter when spaced out, else the whole line (keeps the font's kerning).
+    const pieces: { text: string; x: number }[] = [];
+    if (p.spacing) {
+      let x = 0;
+      for (const ch of line) {
+        pieces.push({ text: ch, x });
+        x += font.getAdvanceWidth(ch, em) + p.spacing;
+      }
+    } else pieces.push({ text: line, x: 0 });
+    const width = p.spacing ? pieces.reduce((w, c) => Math.max(w, c.x + font.getAdvanceWidth(c.text, em)), 0) : font.getAdvanceWidth(line, em);
+    const shift = p.align === "left" ? 0 : p.align === "right" ? -width : -width / 2;
+    for (const piece of pieces) {
+      if (!piece.text.trim()) continue;
+      const d = drawText(piece.text, { startX: piece.x + shift, startY: y, fontSize: em, fontFamily: family });
+      result = result ? result.fuse(d) : d;
+    }
+  });
+  if (!result) throw new Error("Type some text to make letters.");
+  const drawing = result as Drawing;
+  // Centre the block on the origin (left/right align keep their edge at x = 0).
+  const [[x0, y0], [x1, y1]] = drawing.boundingBox.bounds;
+  const dx = p.align === "center" ? -(x0 + x1) / 2 : 0;
+  const placed = drawing.translate(dx, -(y0 + y1) / 2);
+  return (placed.sketchOnPlane("XY") as unknown as Solidifiable).extrude(p.height);
+}
+
+/** A screw hole going down from z = 0 (with a little above it, so it cuts the face cleanly). */
+function buildScrewHole(p: ScrewParams): Shape3D {
+  const size = SCREW_SIZES[p.size];
+  if (!size) throw new Error(`Unknown screw size ${p.size}.`);
+  if (p.depth <= 0) throw new Error("A screw hole needs a depth above 0.");
+  const r = size[p.fit] / 2;
+  const top = 0.5;
+  const pts: [number, number][] = [[0, -p.depth], [r, -p.depth]];
+  if (p.head === "counterbore") {
+    const depth = Math.min(size.boreDepth, p.depth);
+    pts.push([r, -depth], [size.bore / 2, -depth], [size.bore / 2, top]);
+  } else if (p.head === "countersink") {
+    const R = size.sink / 2;
+    const depth = Math.min(R - r, p.depth); // 90°: as deep as it is wide (per side).
+    pts.push([r, -depth], [R, 0], [R + top, top]);
+  } else pts.push([r, top]);
+  pts.push([0, top]);
+  return revolveUpright(polygonDrawing(pts));
+}
+
 function polygonDrawing(points: [number, number][]): Drawing {
   const pen = draw(points[0]);
   for (const p of points.slice(1)) pen.lineTo(p);
@@ -441,6 +572,10 @@ function buildBase(f: Feature): Shape3D | null {
       if (radius <= 0 || inner <= 0 || height <= 0) throw new Error("A star needs sizes above 0.");
       return (polygonDrawing(starPoints(points, radius, inner)).sketchOnPlane("XY") as unknown as Solidifiable).extrude(height);
     }
+    case "text":
+      return buildText(f.params);
+    case "screw":
+      return buildScrewHole(f.params);
     case "sketch":
       return buildSketch(f.params);
     case "group":
@@ -451,6 +586,8 @@ function buildBase(f: Feature): Shape3D | null {
 }
 
 function place(f: Feature, shape: Shape3D): Shape3D {
+  // A mirrored object flips across its own YZ plane first (see Feature.mirrored).
+  if (f.mirrored) shape = shape.mirror("YZ", [0, 0, 0]);
   const r = f.rotation;
   if (r.x) shape = shape.rotate(r.x, [0, 0, 0], [1, 0, 0]);
   if (r.y) shape = shape.rotate(r.y, [0, 0, 0], [0, 1, 0]);
@@ -507,6 +644,7 @@ function branch(features: Feature[], self: Feature | null): Shape3D | null {
   if (self && isMergedGroup(self)) {
     try {
       result = applyEdgeOps(result, self.edgeOps);
+      if (self.shell) result = applyShell(result, self.shell);
     } catch (err) {
       failures[self.id] = message(err); // Keep the unfinished shape so the rest still builds.
     }
@@ -545,7 +683,7 @@ function toMesh(id: string, shape: Shape3D, kind?: Feature["kind"]): MeshData {
 const meshCache = new Map<string, { mesh: MeshData | null; adjusted: Record<string, number> }>();
 
 function ownMesh(f: Feature): MeshData | null {
-  const key = JSON.stringify([f.kind, f.params, f.edgeOps, f.clips ?? []]);
+  const key = JSON.stringify([f.kind, f.params, f.edgeOps, f.clips ?? [], f.shell ?? null]);
   if (!meshCache.has(key)) {
     const outer = adjusted;
     adjusted = {};
@@ -639,6 +777,25 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
         ? { id: req.id, vertices: new Float32Array(m.vertices), normals: new Float32Array(m.normals), triangles: new Uint32Array(m.triangles), edges: new Float32Array(), edgeGroups: new Int32Array() }
         : null;
       post({ type: "mesh", requestId: req.requestId, mesh });
+    } else if (req.type === "parts") {
+      // One mesh per top-level object (holes at the top level cut each of them), for 3MF.
+      failures = {};
+      const top = childrenOf(req.features, null);
+      const holes = top.filter((f) => f.mode === "hole").map((f) => {
+        const s = branch(req.features, f);
+        return s ? place(f, s) : null;
+      });
+      const parts: MeshData[] = [];
+      for (const f of top) {
+        if (f.mode === "hole") continue;
+        let shape = branch(req.features, f);
+        if (!shape) continue;
+        shape = place(f, shape);
+        for (const h of holes) if (h) shape = shape.cut(h);
+        const m = shape.mesh({ tolerance: 0.01, angularTolerance: 0.1 });
+        parts.push({ id: f.id, vertices: new Float32Array(m.vertices), normals: new Float32Array(), triangles: new Uint32Array(m.triangles), edges: new Float32Array(), edgeGroups: new Int32Array() });
+      }
+      post({ type: "parts", requestId: req.requestId, parts }, parts.flatMap((m) => [m.vertices.buffer, m.triangles.buffer]));
     } else if (req.type === "export") {
       failures = {};
       const shape = branch(req.features, null);

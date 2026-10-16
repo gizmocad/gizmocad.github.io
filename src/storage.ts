@@ -37,3 +37,25 @@ export async function openTextFile(input: HTMLInputElement): Promise<string | nu
     input.click();
   });
 }
+
+/** Pick a file to import (by extension); returns its name and bytes, or null if cancelled. */
+export async function openImportFile(input: HTMLInputElement, extensions: string[], filterName: string): Promise<{ name: string; data: ArrayBuffer } | null> {
+  if (isTauri) {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const { readFile } = await import("@tauri-apps/plugin-fs");
+    const path = await open({ multiple: false, filters: [{ name: filterName, extensions }] });
+    if (typeof path !== "string") return null;
+    const bytes = await readFile(path);
+    return { name: path.split(/[\\/]/).pop() ?? path, data: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer };
+  }
+  return new Promise((resolve) => {
+    input.value = "";
+    input.accept = extensions.map((e) => `.${e}`).join(",");
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      resolve(file ? { name: file.name, data: await file.arrayBuffer() } : null);
+    };
+    input.oncancel = () => resolve(null);
+    input.click();
+  });
+}

@@ -347,3 +347,119 @@ button.link:hover:not(:disabled) { background: none; }
 
 /* Toolbar controls hide when they don't apply (their own display rules would override [hidden]). */
 header [hidden] { display: none !important; }
+
+/* Shift-drag selection box in the 3D view. */
+.select-box {
+  position: absolute;
+  border: 1px dashed #4aa3ff;
+  background: rgb(74 163 255 / 0.12);
+  pointer-events: none;
+  z-index: 5;
+}
+
+/* Measure tool reading. */
+.measure-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  white-space: pre;
+  font: 600 12px ui-monospace, monospace;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: #ff3d9a;
+  color: #fff;
+  z-index: 5;
+}
+
+/* Text and screw-hole shape buttons. */
+.ico.text, .ico.screw { background: none; color: var(--accent); font-size: 18px; line-height: 22px; text-align: center; font-weight: 800; }
+
+/* Print bed choice in the GizmoCAD menu. */
+.menu-field { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; }
+.menu-field select { max-width: 150px; }
+
+/* Buttons under the view cube. */
+.view-tools { position: absolute; top: 106px; right: 10px; display: flex; flex-direction: column; gap: 4px; width: 90px; align-items: stretch; }
+.view-tools button { padding: 4px 0; font-size: 14px; background: var(--overlay); }
+body.sketching .view-tools { display: none; }
+
+.float-panel {
+  position: absolute;
+  background: var(--overlay);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 14px var(--shadow);
+  padding: 6px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.float-panel[hidden] { display: none; }
+.section-panel { right: 110px; top: 10px; }
+.section-panel input[type="range"] { width: 160px; }
+.section-panel .segmented button.active { background: var(--active-bg); color: var(--active-fg); }
+#section-value { min-width: 64px; font-variant-numeric: tabular-nums; color: var(--muted); }
+
+#bed-warning {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  background: var(--warn-soft);
+  color: var(--warn-text);
+  border-radius: 6px;
+  padding: 4px 10px;
+  pointer-events: none;
+}
+#bed-warning[hidden] { display: none; }
+
+/* History strip along the bottom of the view. */
+.history {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  background: var(--overlay);
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+.history > button { padding: 2px 7px; }
+.history-title { font-weight: 700; border: none; background: none; }
+#history-count { color: var(--muted); white-space: nowrap; }
+#history-steps { display: flex; align-items: center; gap: 4px; overflow-x: auto; flex: 1; min-width: 0; scrollbar-width: thin; }
+.history.collapsed #history-steps, .history.collapsed > button:not(.history-title) { display: none; }
+.history.rolled-back { background: var(--warn-soft); }
+.step { white-space: nowrap; padding: 2px 7px; border-radius: 5px; font-size: 12px; }
+.step.selected { border-color: var(--select); background: var(--select-soft); }
+.step.future { opacity: 0.45; border-style: dashed; }
+.step.off { text-decoration: line-through; opacity: 0.6; }
+.history-marker { flex: none; width: 3px; height: 20px; border-radius: 2px; background: #ff8a00; }
+#viewport #status { bottom: 48px; }
+#object-list li.suppressed .name { text-decoration: line-through; opacity: 0.55; }
+
+/* Colour swatches. */
+.swatches { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-bottom: 8px; }
+.swatch { width: 22px; height: 22px; padding: 0; border-radius: 50%; border: 2px solid var(--border); }
+.swatch.active { outline: 2px solid var(--select); outline-offset: 1px; }
+.swatch.none { background: conic-gradient(var(--accent) 0 50%, var(--panel) 0); }
+.swatches input[type="color"] { width: 28px; height: 24px; padding: 0; border: 1px solid var(--border); border-radius: 5px; background: none; }
+
+/* Align rows for several selected objects. */
+.align-row { display: grid; grid-template-columns: 16px 1fr 1fr 1fr; gap: 4px; align-items: center; margin-bottom: 4px; }
+.align-row span { color: var(--muted); font-weight: 700; }
+.align-row button { padding: 4px 2px; font-size: 12px; }
+
+.text-input { width: 100%; font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; resize: vertical; margin-bottom: 4px; }
+
+/* Sketch constraints list. */
+.constraint-row { display: grid; grid-template-columns: 1fr auto auto; gap: 4px; align-items: center; margin-bottom: 4px; font-size: 12px; }
+.constraint-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.constraint-row input { width: 70px; border: 1px solid var(--border); border-radius: 5px; padding: 3px 6px; text-align: right; background: var(--panel); }
+.field.stacked { grid-template-columns: 1fr; gap: 4px; }
+.field.stacked .segmented { display: flex; }
+.field.stacked .segmented button { flex: 1; padding-left: 4px; padding-right: 4px; }
+.view-tools button.on { background: var(--active-bg); color: var(--active-fg); border-color: var(--active-bg); }

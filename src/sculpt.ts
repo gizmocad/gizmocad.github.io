@@ -182,6 +182,14 @@ export function meshToSculpt(vertices: Float32Array, triangles: Uint32Array, det
   return { base: "converted", size: Math.round(size * 100) / 100, detail, positions: encodeFloats(fine.positions), indices: encodeIndices(fine.indices) };
 }
 
+/** An imported mesh (e.g. an STL) as a sculpt, kept as it is (only duplicate corners merged). */
+export function importedMesh(vertices: Float32Array, triangles: Uint32Array): SculptParams {
+  const welded = weld(vertices, triangles);
+  const box = new THREE.Box3().setFromArray(welded.positions);
+  const size = Math.max(...box.getSize(new THREE.Vector3()).toArray());
+  return { base: "converted", size: Math.round(size * 100) / 100, detail: "normal", positions: encodeFloats(welded.positions), indices: encodeIndices(welded.indices) };
+}
+
 /** Make an existing sculpt's mesh about twice as dense, keeping its shape. */
 export function addDetail(p: SculptParams): Pick<SculptParams, "positions" | "indices"> | null {
   const pos = decodeFloats(p.positions);
@@ -372,8 +380,11 @@ export function sculptTriangles(p: SculptParams, world: THREE.Matrix4): Float32A
   const idx = decodeIndices(p.indices);
   const out = new Float32Array(idx.length * 3);
   const v = new THREE.Vector3();
+  // A mirrored placement turns triangles inside out; swap two corners to keep them facing outwards.
+  const flip = world.determinant() < 0;
   for (let i = 0; i < idx.length; i++) {
-    v.fromArray(pos, 3 * idx[i]).applyMatrix4(world);
+    const corner = flip ? i - (i % 3) + [0, 2, 1][i % 3] : i;
+    v.fromArray(pos, 3 * idx[corner]).applyMatrix4(world);
     out.set([v.x, v.y, v.z], 3 * i);
   }
   return out;

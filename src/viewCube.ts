@@ -97,6 +97,7 @@ export class ViewCube {
 
   set visible(v: boolean) {
     this.element.hidden = !v;
+    this.element.style.display = v ? "block" : "none"; // three.js sets an inline display that beats [hidden].
   }
 
   /** Turn the cube to match the main camera (looking from `camera` towards `target`). */

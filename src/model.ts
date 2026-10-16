@@ -2,7 +2,7 @@
 // rebuilt from this list by the kernel, which keeps dimensions exact and makes
 // undo, saving and (later) parametric history straightforward.
 //
-import { Euler, Matrix4, Quaternion, Vector3 } from "three";
+import { Euler, Matrix3, Matrix4, Quaternion, Vector3 } from "three";
 import { defaultSculpt, type SculptParams } from "./sculpt";
 
 // Features form a tree through `parentId`. A feature's position and rotation
@@ -22,6 +22,8 @@ export type ShapeKind =
   | "gear"
   | "spring"
   | "star"
+  | "text"
+  | "screw"
   | "sketch"
   | "group"
   | "plane"
@@ -119,6 +121,41 @@ export interface StarParams {
   inner: number;
   height: number;
 }
+/** Raised (or, as a hole, engraved) lettering. `size` is the height of capital letters. */
+export interface TextParams {
+  text: string;
+  font: "sans" | "serif" | "mono";
+  bold: boolean;
+  size: number;
+  /** How far the letters stand up (Z). */
+  height: number;
+  /** Extra space between letters, in mm. */
+  spacing: number;
+  align: "left" | "center" | "right";
+}
+/**
+ * A hole for a metric screw, going down into the face it sits on (Z ≤ 0).
+ * `fit` picks the shaft size: "tap" for the screw to cut its own thread,
+ * "close"/"normal"/"loose" clearance. `head` adds a counterbore or countersink.
+ */
+export interface ScrewParams {
+  size: ScrewSize;
+  fit: "tap" | "close" | "normal" | "loose";
+  head: "none" | "counterbore" | "countersink";
+  depth: number;
+}
+export type ScrewSize = "M2" | "M2.5" | "M3" | "M4" | "M5" | "M6" | "M8" | "M10";
+/** Shaft diameters for each fit, and the head recess (counterbore Ø × depth, countersink Ø at 90°). ISO 273 / 4762 / 10642. */
+export const SCREW_SIZES: Record<ScrewSize, { tap: number; close: number; normal: number; loose: number; bore: number; boreDepth: number; sink: number }> = {
+  M2: { tap: 1.6, close: 2.2, normal: 2.4, loose: 2.6, bore: 4.4, boreDepth: 2.3, sink: 4.4 },
+  "M2.5": { tap: 2.05, close: 2.7, normal: 2.9, loose: 3.1, bore: 5.5, boreDepth: 2.8, sink: 5.5 },
+  M3: { tap: 2.5, close: 3.2, normal: 3.4, loose: 3.6, bore: 6.5, boreDepth: 3.3, sink: 6.7 },
+  M4: { tap: 3.3, close: 4.3, normal: 4.5, loose: 4.8, bore: 8, boreDepth: 4.4, sink: 9 },
+  M5: { tap: 4.2, close: 5.3, normal: 5.5, loose: 5.8, bore: 10, boreDepth: 5.4, sink: 11.2 },
+  M6: { tap: 5, close: 6.4, normal: 6.6, loose: 7, bore: 11, boreDepth: 6.4, sink: 13.4 },
+  M8: { tap: 6.8, close: 8.4, normal: 9, loose: 10, bore: 15, boreDepth: 8.6, sink: 17.9 },
+  M10: { tap: 8.5, close: 10.5, normal: 11, loose: 12, bore: 18, boreDepth: 10.8, sink: 22.4 },
+};
 /** A straight prism on a regular polygon; `radius` is centre to corner. */
 export interface PrismParams {
   radius: number;
@@ -206,6 +243,26 @@ export type SketchEntity = { id: string; mode: EntityMode } & (
 
 export type SketchEntityType = SketchEntity["type"];
 
+/**
+ * A piece of sketch geometry a constraint refers to: a point (a corner,
+ * centre or end), an edge (a straight side or line) or a circle.
+ * `index` numbers the points/edges of the entity (see constraints.ts).
+ */
+export interface SketchRef {
+  entity: string;
+  kind: "point" | "edge" | "circle";
+  index: number;
+}
+export type ConstraintType = "horizontal" | "vertical" | "parallel" | "perpendicular" | "equal" | "tangent" | "coincident" | "distance" | "length" | "diameter" | "angle" | "fix";
+export interface SketchConstraint {
+  id: string;
+  type: ConstraintType;
+  refs: SketchRef[];
+  /** Dimensions: the length (mm), diameter (mm) or angle (degrees). Fix: the point's [u, v]. */
+  value?: number;
+  at?: Point2;
+}
+
 export interface SketchParams {
   plane: SketchPlane;
   /** Shift of the sketch plane along its normal. */
@@ -217,6 +274,8 @@ export interface SketchParams {
   /** Revolve angle in degrees, around the sketch's vertical (V) axis. */
   angle: number;
   entities: SketchEntity[];
+  /** Dimensions and geometric rules the drawing keeps to (see constraints.ts). */
+  constraints?: SketchConstraint[];
 }
 
 /**
@@ -251,7 +310,13 @@ export interface EdgeOp {
 }
 
 /** Kinds that can have fillets/chamfers. A group's apply to its merged result. */
-export const FINISHABLE: ShapeKind[] = ["box", "cylinder", "sphere", "cone", "tube", "torus", "wedge", "pyramid", "prism", "gear", "star", "sketch", "group"];
+export const FINISHABLE: ShapeKind[] = ["box", "cylinder", "sphere", "cone", "tube", "torus", "wedge", "pyramid", "prism", "gear", "star", "text", "sketch", "group"];
+
+/** Hollow it out: walls `thickness` thick, optionally open at the top or bottom. */
+export interface Shell {
+  thickness: number;
+  open: "none" | "top" | "bottom";
+}
 
 // ---- Features ------------------------------------------------------------
 
@@ -272,6 +337,17 @@ interface FeatureBase {
   clips?: Clip[];
   /** Connected to its parent by a hinge or slider. */
   joint?: Joint;
+  /** Display (and 3MF) colour, e.g. "#3ddc97". Unset: the default colour. */
+  color?: string;
+  /**
+   * Mirrored: flipped across its own YZ plane (X → −X) before it's turned and
+   * placed. Mirroring along any axis is this plus a turn, so one flag covers all.
+   */
+  mirrored?: boolean;
+  /** Hollowed out (after fillets, before splits). */
+  shell?: Shell;
+  /** Left out of the model (and exports) without deleting it: a switched-off history step. */
+  suppressed?: boolean;
 }
 
 export type Feature =
@@ -288,6 +364,8 @@ export type Feature =
   | (FeatureBase & { kind: "gear"; params: GearParams })
   | (FeatureBase & { kind: "spring"; params: SpringParams })
   | (FeatureBase & { kind: "star"; params: StarParams })
+  | (FeatureBase & { kind: "text"; params: TextParams })
+  | (FeatureBase & { kind: "screw"; params: ScrewParams })
   | (FeatureBase & { kind: "sketch"; params: SketchParams })
   | (FeatureBase & { kind: "group"; params: Record<string, never> })
   /** A reference plane (its local XY). Sketches placed inside it are drawn on it. */
@@ -342,6 +420,10 @@ function defaultParams(kind: ShapeKind): Feature["params"] {
       return { style: "coil", diameter: 20, wire: 2, pitch: 6, height: 30, section: "round", ends: true, depth: 8, bends: "round" };
     case "star":
       return { points: 5, radius: 15, inner: 7, height: 5 };
+    case "text":
+      return { text: "Text", font: "sans", bold: true, size: 10, height: 2, spacing: 0, align: "center" };
+    case "screw":
+      return { size: "M3", fit: "normal", head: "none", depth: 10 };
     case "sketch":
       return { plane: "XY", offset: 0, operation: "flat", depth: 10, direction: "normal", angle: 360, entities: [] };
     case "group":
@@ -355,12 +437,13 @@ function defaultParams(kind: ShapeKind): Feature["params"] {
 
 export function createFeature(kind: ShapeKind, existing: Feature[], parentId: string | null = null): Feature {
   const n = existing.filter((f) => f.kind === kind).length + 1;
-  const label = kind === "torus" ? "Ring" : kind[0].toUpperCase() + kind.slice(1);
+  const label = kind === "torus" ? "Ring" : kind === "screw" ? "Screw hole" : kind[0].toUpperCase() + kind.slice(1);
   return {
     id: newId(),
     name: `${label} ${n}`,
     kind,
-    mode: "solid",
+    // A screw hole is for cutting; everything else starts solid.
+    mode: kind === "screw" ? "hole" : "solid",
     parentId,
     position: { x: 0, y: 0, z: 0 },
     rotation: { x: 0, y: 0, z: 0 },
@@ -443,7 +526,7 @@ export const PARAM_FIELDS: Partial<Record<ShapeKind, { key: string; label: strin
 
 /** A group with fillets/chamfers is shown and picked as one merged shape. */
 export function isMergedGroup(f: Feature): boolean {
-  return f.kind === "group" && f.edgeOps.length > 0;
+  return f.kind === "group" && (f.edgeOps.length > 0 || !!f.shell);
 }
 
 /** Is `id` inside a merged group (so its own mesh isn't shown)? */
@@ -481,7 +564,12 @@ const DEG = Math.PI / 180;
 /** Where the feature sits relative to its parent before any joint motion: rotate X, then Y, then Z, then translate. */
 export function baseMatrix(f: Feature): Matrix4 {
   const r = new Euler(f.rotation.x * DEG, f.rotation.y * DEG, f.rotation.z * DEG, "ZYX");
-  return new Matrix4().compose(new Vector3(f.position.x, f.position.y, f.position.z), new Quaternion().setFromEuler(r), new Vector3(1, 1, 1));
+  return new Matrix4().compose(new Vector3(f.position.x, f.position.y, f.position.z), new Quaternion().setFromEuler(r), new Vector3(f.mirrored ? -1 : 1, 1, 1));
+}
+
+/** The flip of a mirrored feature (X → −X in its own frame); its own inverse. */
+export function mirrorMatrix(f: Feature): Matrix4 {
+  return new Matrix4().makeScale(f.mirrored ? -1 : 1, 1, 1);
 }
 
 /**
@@ -531,6 +619,8 @@ export function reparent(features: Feature[], id: string, newParentId: string | 
   if (newParentId && subtreeIds(features, id).has(newParentId)) return false;
 
   const local = worldMatrix(features, newParentId).invert().multiply(worldMatrix(features, id));
+  f.mirrored = local.determinant() < 0 || undefined;
+  if (!f.mirrored) delete f.mirrored;
   setPlacement(f, local);
   f.parentId = newParentId;
   delete f.joint; // A joint belongs to the old parent; the object stays where it is now.
@@ -540,7 +630,8 @@ export function reparent(features: Feature[], id: string, newParentId: string | 
 function setPlacement(f: Feature, local: Matrix4) {
   const pos = new Vector3();
   const quat = new Quaternion();
-  local.decompose(pos, quat, new Vector3());
+  // The mirror stays a flag; only the turn and position are stored.
+  local.clone().multiply(mirrorMatrix(f)).decompose(pos, quat, new Vector3());
   const rot = new Euler().setFromQuaternion(quat, "ZYX");
   f.position = { x: round6(pos.x), y: round6(pos.y), z: round6(pos.z) };
   f.rotation = { x: round6(rot.x / DEG), y: round6(rot.y / DEG), z: round6(rot.z / DEG) };
@@ -583,7 +674,7 @@ export function placeFeature(features: Feature[], id: string, position: Vec3, ro
     return;
   }
   const r = new Euler(rotation.x * DEG, rotation.y * DEG, rotation.z * DEG, "ZYX");
-  const target = new Matrix4().compose(new Vector3(position.x, position.y, position.z), new Quaternion().setFromEuler(r), new Vector3(1, 1, 1));
+  const target = new Matrix4().compose(new Vector3(position.x, position.y, position.z), new Quaternion().setFromEuler(r), new Vector3(f.mirrored ? -1 : 1, 1, 1));
   // The change, in the parent's frame, applied to the joint too.
   const delta = target.clone().multiply(localMatrix(f).invert());
   const o = new Vector3(j.origin.x, j.origin.y, j.origin.z).applyMatrix4(delta);
@@ -633,15 +724,64 @@ export function setWorldPlacement(features: Feature[], id: string, position: Vec
   const f = features.find((x) => x.id === id);
   if (!f) return;
   delete f.joint;
+  // A mirrored object stays mirrored where it lands.
+  const flipped = worldMatrix(features, id).determinant() < 0;
   const r = new Euler(rotation.x * DEG, rotation.y * DEG, rotation.z * DEG, "ZYX");
-  const world = new Matrix4().compose(new Vector3(position.x, position.y, position.z), new Quaternion().setFromEuler(r), new Vector3(1, 1, 1));
+  const world = new Matrix4().compose(new Vector3(position.x, position.y, position.z), new Quaternion().setFromEuler(r), new Vector3(flipped ? -1 : 1, 1, 1));
+  setWorldMatrix(features, id, world);
+}
+
+/** Move an object by a distance given in world terms (whatever its parent's turn). */
+export function translateWorld(features: Feature[], id: string, delta: Vec3) {
+  const f = features.find((x) => x.id === id);
+  if (!f) return;
+  // Frames only turn (and maybe mirror), so the rotation part converts a distance exactly.
+  const toParent = new Matrix3().setFromMatrix4(worldMatrix(features, f.parentId).invert());
+  const d = new Vector3(delta.x, delta.y, delta.z).applyMatrix3(toParent);
+  f.position = { x: round6(f.position.x + d.x), y: round6(f.position.y + d.y), z: round6(f.position.z + d.z) };
+  if (f.joint) f.joint.origin = { x: round6(f.joint.origin.x + d.x), y: round6(f.joint.origin.y + d.y), z: round6(f.joint.origin.z + d.z) };
+}
+
+/**
+ * Set an object's whole world transform (it and everything inside it follow).
+ * `world` may be mirrored; a connected object keeps its connection, carried along.
+ */
+export function setWorldMatrix(features: Feature[], id: string, world: Matrix4) {
+  const f = features.find((x) => x.id === id);
+  if (!f) return;
   const local = worldMatrix(features, f.parentId).invert().multiply(world);
-  const pos = new Vector3();
-  const quat = new Quaternion();
-  local.decompose(pos, quat, new Vector3());
-  const rot = new Euler().setFromQuaternion(quat, "ZYX");
-  f.position = { x: round6(pos.x), y: round6(pos.y), z: round6(pos.z) };
-  f.rotation = { x: round6(rot.x / DEG), y: round6(rot.y / DEG), z: round6(rot.z / DEG) };
+  // The change, worked out before the mirror flag (part of the current placement) changes.
+  const delta = local.clone().multiply(localMatrix(f).invert());
+  f.mirrored = local.determinant() < 0 || undefined;
+  if (!f.mirrored) delete f.mirrored;
+  if (f.joint) {
+    const o = new Vector3(f.joint.origin.x, f.joint.origin.y, f.joint.origin.z).applyMatrix4(delta);
+    const a = new Vector3(f.joint.axis.x, f.joint.axis.y, f.joint.axis.z).transformDirection(delta);
+    f.joint.origin = { x: round6(o.x), y: round6(o.y), z: round6(o.z) };
+    f.joint.axis = { x: round6(a.x), y: round6(a.y), z: round6(a.z) };
+    rebase(f, local);
+    return;
+  }
+  setPlacement(f, local);
+}
+
+/**
+ * Mirror an object (and everything in it) across a world plane through `center`
+ * square to `axis`. Each part flips its own geometry and gets the placement that
+ * puts the flipped copy where the mirror image is.
+ */
+export function mirrorFeature(features: Feature[], id: string, axis: "x" | "y" | "z", center: Vec3) {
+  const f = features.find((x) => x.id === id);
+  if (!f) return;
+  const s = new Vector3(axis === "x" ? -1 : 1, axis === "y" ? -1 : 1, axis === "z" ? -1 : 1);
+  const reflect = new Matrix4()
+    .makeTranslation(center.x, center.y, center.z)
+    .multiply(new Matrix4().makeScale(s.x, s.y, s.z))
+    .multiply(new Matrix4().makeTranslation(-center.x, -center.y, -center.z));
+  // Its own connection can't be mirrored onto the same parent, so it comes off; the object stays put first.
+  if (f.joint) removeJoint(features, id);
+  // Everything inside sits in its frame, so it follows (mirrored) by itself.
+  setWorldMatrix(features, id, reflect.multiply(worldMatrix(features, id)));
 }
 
 // ---- Files ---------------------------------------------------------------

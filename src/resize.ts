@@ -2,7 +2,7 @@
 // X/Y/Z; instead of storing a stretch, we bake them into the object's real
 // dimensions so every size stays exact and editable.
 
-import { subtreeIds, type Feature, type SketchEntity, type SketchPlane, type Vec3 } from "./model";
+import { SCREW_SIZES, subtreeIds, type Feature, type SketchEntity, type SketchPlane, type Vec3 } from "./model";
 import { decodeFloats, encodeFloats } from "./sculpt";
 import { gearOuterRadius, prismPoints, round, starPoints } from "./sketchGeometry";
 
@@ -23,7 +23,7 @@ export function roundFactor(s: Vec3): number {
 }
 
 /** Kinds whose X and Y always resize together. */
-const ROUND_KINDS = new Set(["cone", "tube", "torus", "prism", "thread", "gear", "spring", "star"]);
+const ROUND_KINDS = new Set(["cone", "tube", "torus", "prism", "thread", "gear", "spring", "star", "text", "screw"]);
 
 /** Does this object stay round across X/Y when resized (so X and Y change together)? */
 export function staysRound(f: Feature): boolean {
@@ -163,6 +163,16 @@ function scaleOwn(f: Feature, s: Vec3, snap: number) {
       break;
     case "plane":
       f.params.size = snapLength(f.params.size * dominantFactor(s), snap);
+      break;
+    case "text":
+      // Letters keep their proportions: the size follows X/Y, the height Z.
+      f.params.size = round(f.params.size * roundFactor(s));
+      f.params.spacing = round(f.params.spacing * roundFactor(s));
+      f.params.height = snapLength(f.params.height * s.z, snap);
+      break;
+    case "screw":
+      // Screw sizes are standard; only the depth changes.
+      f.params.depth = snapLength(f.params.depth * s.z, snap);
       break;
     case "sketch": {
       const [ua, va, na] = PLANE_AXES[f.params.plane];
@@ -331,6 +341,11 @@ function baseExtents(f: Feature): [Vec3, Vec3] | null {
       const r = f.params.diameter / 2;
       if (f.params.style === "flat") return [{ x: -r, y: 0, z: 0 }, { x: r, y: f.params.height, z: f.params.depth }];
       return [{ x: -r, y: -r, z: 0 }, { x: r, y: r, z: f.params.height }];
+    }
+    case "screw": {
+      const size = SCREW_SIZES[f.params.size];
+      const r = Math.max(size[f.params.fit], f.params.head === "counterbore" ? size.bore : f.params.head === "countersink" ? size.sink + 1 : 0) / 2;
+      return [{ x: -r, y: -r, z: -f.params.depth }, { x: r, y: r, z: 0.5 }];
     }
     case "star": {
       const pts = starPoints(f.params.points, f.params.radius, f.params.inner);

@@ -2,9 +2,12 @@
 
 3D CAD that's as easy as Tinkercad but precise enough for real parts. It runs in the browser and also as a desktop app.
 
-- Drag shapes in (box, cylinder, sphere, cone, tube, ring, wedge, pyramid, polygon prism, thread, gear, spring, star),
+- Drag shapes in (box, cylinder, sphere, cone, tube, ring, wedge, pyramid, polygon prism, thread, gear, spring, star, text, screw hole),
   then type exact sizes. A thread set to Hole makes a threaded hole (nut); gears have real involute teeth.
   Springs come as coils (round or square wire, open or flat ends) or flat zigzag springs (rounded or sharp bends) that print lying down.
+  **Text** comes in sans, serif or mono (bold or not, any alignment, several lines); make it a Hole to engrave it.
+  **Screw holes** (M2–M10) go down into the face you put them on, with a tap, close, normal or loose fit and an optional
+  counterbore or countersink.
   Fields accept units and maths (`1in`, `2.5cm`, `40/3`).
 - **Placing shapes:** click a shape button (or drag it into the view) and a preview follows the mouse. Click to put it
   on the face under the mouse, standing out from that face and snapped to its grid, centre and corners, or on the ground grid.
@@ -17,6 +20,15 @@
   it together with its connection, and Pivot (P) moves just the connection (it snaps to object points).
 - **Onto face** (F): move the selected object onto another object's face (or the grid) the same way.
 - **Show/hide** objects with the eye in the object list (or H). Hidden objects still count in the model and exports.
+- **Select several objects:** Shift/Ctrl-click (in the view or the list), Shift-drag a box in the view, or Ctrl+A. Then move or
+  turn them together with the gizmo, **align** their sides or centres, **space them evenly**, colour, mirror, duplicate,
+  delete, or **group** them (Ctrl+G).
+- **Copy and paste** (Ctrl+C / Ctrl+X / Ctrl+V), also between GizmoCAD windows.
+- **Mirror** any object (or several) along X, Y or Z, in place.
+- **Repeat:** copies in a row, a grid, or around a circle (e.g. holes round a flange), previewed before they're added.
+- **Hollow:** turn a solid into walls of a set thickness, open at the top or bottom, or closed.
+- **Colours** per object, shown in the view and saved into 3MF exports.
+- **Measure** (M): click two points (corners and edges snap) for the distance and its X/Y/Z parts; two faces also give their angle.
 - Mark any shape as a **hole**. **Show result** shows the true boolean result, computed by the OpenCascade kernel.
 - **Sketches:** points, guide lines, rectangles (rounded corners, any angle), circles, ellipses,
   regular polygons, slots, polygons with arc edges, smooth curves (closer points make tighter bends), and freehand brush strokes, on the XY/XZ/YZ plane or any
@@ -29,6 +41,9 @@
   In sketches, the Trim tool (T) merges shapes where you click an edge inside another shape, trims off the part of a shape sticking out
   of another when you click its outside edge, cuts a shape along a guide line (dropping the side you click), or trims a guide line back
   to its crossings, and "Trim overlaps" merges all selected overlapping shapes. The Split tool (X) cuts a line or brush stroke in two, or adds a corner to a shape's edge.
+- **Sketch constraints:** with the Constrain tool (K), click one or two points, edges or circles and pick horizontal,
+  vertical, parallel, perpendicular, equal, tangent, coincident or fixed, or a length, distance, diameter or angle
+  dimension. The drawing then keeps to them as you edit it, and the values can be changed in the panel.
 - **Fillets & chamfers:** round or bevel all, top, bottom or vertical edges, or edges you click.
   On a group they act on the merged result (e.g. the rim of a hole). A size that's too big for
   the shape is automatically reduced to the largest safe size, and the panel shows the size used.
@@ -46,8 +61,15 @@
   Drag an object near another's point and it snaps there, so faces and edges line up exactly.
   The Points menu can hide the dots (snapping still works) or turn point snapping off.
 - **View cube** in the corner of the 3D view turns with the camera; click a face, edge or corner to look from that side.
+  Below it: fit everything in view (Home), zoom to the selection (.), a flat orthographic view (O), a **section view**
+  that cuts the model open along X, Y or Z, and Measure.
+- **History** along the bottom: every object is a step. Roll back to see (and edit) the model as it was at any step;
+  new objects go in at the marker, and changes flow through to the later steps. Right-click a step to switch it off.
+- **Autosave:** your work is kept in the browser/app and comes back next time you open GizmoCAD.
+- **Print bed:** pick your printer in the GizmoCAD menu to see its bed and get a warning when the model doesn't fit.
 - Snap to the grid, undo/redo. New, Open, Save, Export and Theme are in the menu under the GizmoCAD logo.
-- Export **STEP** (for other CAD programs) and **STL** (for 3D printing).
+- Export **STEP** (for other CAD programs), **STL** (for 3D printing) and **3MF** (for slicers, one object per part,
+  with colours). **Import** STL meshes and SVG drawings (closed shapes become a sketch, holes included).
 
 ## Development
 
@@ -77,6 +99,9 @@ npm run tauri dev      # desktop app (needs Rust + system WebKit)
 | `src/sketcher.ts` | Sketch tools, selection, handles, snapping, context menu. |
 | `src/sculpt.ts` | Sculpt meshes, brushes, and adding them to STL exports. |
 | `src/sketchGeometry.ts` | Exact outlines of sketch shapes, shared by the kernel and the editor. |
+| `src/constraints.ts` | Sketch constraints and the solver that keeps drawings to them. |
+| `src/fileFormats.ts` | 3MF export, STL and SVG import, autosave. |
+| `src/viewCube.ts` | The view orientation cube. |
 | `src/main.ts` | UI: panels, undo/redo, commands, keyboard shortcuts. |
 | `src/storage.ts` | Save/open: native dialogs in the desktop app, downloads on the web. |
 | `src-tauri/` | Desktop wrapper and installer config. |
@@ -85,6 +110,10 @@ npm run tauri dev      # desktop app (needs Rust + system WebKit)
 
 1. ~~Primitives, exact dimensions, snapping, holes, STEP/STL export~~
 2. ~~Sketches (extrude/revolve) and parent/child objects~~
-3. Sketch constraints (equal, parallel, tangent, dimensions)
-4. Multi-select, alignment and measuring tools
-5. Editable history tree (parametric rebuild)
+3. ~~Sketch constraints (equal, parallel, tangent, dimensions)~~
+4. ~~Multi-select, alignment and measuring tools~~
+5. ~~Editable history (roll back, switch steps off)~~
+
+## Credits
+
+Text uses the Roboto, Roboto Slab (SIL Open Font License 1.1) and Roboto Mono (Apache 2.0) fonts, bundled via Fontsource.

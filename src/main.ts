@@ -1,5 +1,5 @@
 import { Kernel } from "./kernel";
-import { resizeFeature, sizeReadout } from "./resize";
+import { featureExtents, resizeFeature, sizeReadout } from "./resize";
 import {
   childrenOf,
   createFeature,
@@ -30,11 +30,23 @@ import {
   type SculptFeature,
   type Vec3,
   worldMatrix,
+  mirrorFeature,
+  setWorldMatrix,
+  translateWorld,
+  localMatrix,
+  SCREW_SIZES,
+  type ScrewSize,
+  type SketchConstraint,
+  type SketchRef,
+  type ConstraintType,
 } from "./model";
+import { Box3, Matrix4, Vector3 } from "three";
+import { CONSTRAINT_LABEL, constraintFits, measure as measureConstraint, refPoints as refPointsOf, solveSketch } from "./constraints";
+import { autosave, build3mf, loadAutosave, parseStl, svgToEntities, type MeshPart } from "./fileFormats";
 import { SketchEditor, type MenuItem, type SketchTool } from "./sketcher";
 import { gearOuterRadius, removePoint } from "./sketchGeometry";
-import { addDetail, appendToStl, baseMesh, meshToSculpt, scaleSculpt, sculptTriangles, vertexCount, type BrushKind, type BrushSettings, type SculptBase } from "./sculpt";
-import { openTextFile, saveFile } from "./storage";
+import { addDetail, appendToStl, baseMesh, importedMesh, meshToSculpt, scaleSculpt, sculptTriangles, vertexCount, type BrushKind, type BrushSettings, type SculptBase } from "./sculpt";
+import { openImportFile, openTextFile, saveFile } from "./storage";
 import { formatLength, parseLength } from "./units";
 import { onThemeChange, setThemeSetting, themeSetting, type ThemeSetting } from "./theme";
 import { Viewport, type GizmoMode, type PreviewSpec } from "./viewport";
@@ -44,7 +56,17 @@ const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as
 // ---- State ---------------------------------------------------------------
 
 let doc: CadDocument = emptyDocument();
+/** The main selected object (it gets the gizmo and the panel); `selectedIds` is everything selected. */
 let selectedId: string | null = null;
+let selectedIds: string[] = [];
+/**
+ * History: the model is shown as it was after the first `historyMarker` steps
+ * (objects in the order they were made); null shows everything. New objects
+ * go in at the marker.
+ */
+let historyMarker: number | null = null;
+/** Copied objects (as JSON), for pasting here or in another window. */
+let clipboard: string | null = null;
 let showCombined = false;
 /** The toolbar's Move / Rotate / Resize choice. */
 let gizmoMode: GizmoMode = "translate";
@@ -89,16 +111,52 @@ function commit(mutate: (features: Feature[]) => void) {
   undoBytes += snapshot.length;
   while (undoStack.length > UNDO_LIMIT.steps || (undoBytes > UNDO_LIMIT.bytes && undoStack.length > 1)) undoBytes -= undoStack.shift()!.length;
   redoStack.length = 0;
+  // Sketches with constraints: note their drawing before the change, so the solver can tell what was edited.
+  const before = new Map(doc.features.flatMap((f) => (f.kind === "sketch" && f.params.constraints?.length ? [[f.id, structuredClone(f.params.entities)] as const] : [])));
   mutate(doc.features);
+  for (const f of doc.features) {
+    if (f.kind !== "sketch" || !f.params.constraints?.length) continue;
+    const result = solveSketch(f.params.entities, f.params.constraints, before.get(f.id));
+    if (result.dead.length) f.params.constraints = f.params.constraints.filter((c) => !result.dead.includes(c.id));
+    if (result.error > 1e-3) setNotice("These constraints can't all be met at once: remove one, or change a dimension.");
+  }
   refresh();
 }
+
+/** Add new objects at the history marker (or the end), moving the marker past them. */
+function insertFeatures(features: Feature[], items: Feature[]) {
+  if (historyMarker === null || historyMarker >= features.length) {
+    features.push(...items);
+    if (historyMarker !== null) historyMarker = features.length;
+    return;
+  }
+  features.splice(historyMarker, 0, ...items);
+  historyMarker += items.length;
+}
+
+/**
+ * The objects that make up the model right now: up to the history marker, and
+ * not switched off (suppressed). Something inside a missing object moves to the top level.
+ */
+function activeFeatures(features: Feature[]): Feature[] {
+  const upTo = historyMarker === null ? features : features.slice(0, historyMarker);
+  const off = new Set<string>();
+  for (const f of features) if (f.suppressed) subtreeIds(features, f.id).forEach((id) => off.add(id));
+  const kept = upTo.filter((f) => !off.has(f.id));
+  const ids = new Set(kept.map((f) => f.id));
+  return kept.map((f) => (f.parentId && !ids.has(f.parentId) ? { ...f, parentId: null, joint: undefined } : f));
+}
+
+const isActive = (id: string) => activeFeatures(doc.features).some((f) => f.id === id);
 
 function restore(from: string[], to: string[]) {
   const snapshot = from.pop();
   if (!snapshot) return;
   to.push(JSON.stringify(doc));
   doc = JSON.parse(snapshot);
-  if (selectedId && !findFeature(selectedId)) selectedId = null;
+  selectedIds = selectedIds.filter((id) => findFeature(id));
+  if (selectedId && !findFeature(selectedId)) selectedId = selectedIds[0] ?? null;
+  if (historyMarker !== null && historyMarker > doc.features.length) historyMarker = doc.features.length;
   if (editingSketchId && !findFeature(editingSketchId)) stopSketchEdit();
   if (edgePick && !pickedOp()) stopEdgePick();
   if (sculptingId && findFeature(sculptingId)?.kind !== "sculpt") stopSculpt();
@@ -134,11 +192,29 @@ function setStatus(text: string, error = false) {
 
 const kernel = new Kernel();
 const viewport = new Viewport($("#viewport"), {
-  onSelect(id) {
-    selectObject(id);
+  onSelect(id, additive) {
+    selectObject(id, additive);
+  },
+  onBoxSelect(ids) {
+    if (!ids.length) return;
+    selectedIds = [...new Set([...selectedIds, ...ids])];
+    selectedId = selectedId && selectedIds.includes(selectedId) ? selectedId : ids[0];
+    renderPanels();
+    viewport.select(selectedId, selectedIds);
+  },
+  onMeasure(text) {
+    setStatus(text ?? (viewport.measuring ? MEASURE_HINT : ""));
   },
   onTransformed(id, position, rotation) {
-    commit((features) => placeFeature(features, id, position, rotation));
+    // Other selected objects move by the same amount (turned about this one's origin).
+    const others = topSelected().filter((x) => x !== id);
+    const before = new Map(others.map((x) => [x, worldMatrix(doc.features, x)]));
+    const start = worldMatrix(doc.features, id);
+    commit((features) => {
+      placeFeature(features, id, position, rotation);
+      const delta = worldMatrix(features, id).multiply(start.invert());
+      for (const x of others) setWorldMatrix(features, x, delta.clone().multiply(before.get(x)!));
+    });
   },
   onResizing(id, scale) {
     const f = findFeature(id);
@@ -176,7 +252,7 @@ const viewport = new Viewport($("#viewport"), {
 let buildToken = 0;
 async function rebuild() {
   const token = ++buildToken;
-  const features = structuredClone(doc.features);
+  const features = structuredClone(activeFeatures(doc.features));
   try {
     await kernel.ready;
     const combined = showCombined && !editingSketchId && !edgePick && !sculptingId;
@@ -186,11 +262,13 @@ async function rebuild() {
     const adjustmentsChanged = JSON.stringify(adjusted) !== JSON.stringify(edgeAdjustments);
     if (!edgePick) edgeAdjustments = adjusted;
     viewport.setScene(meshes, features, combined);
-    viewport.select(combined ? null : selectedId);
+    viewport.select(combined ? null : selectedId, combined ? [] : selectedIds);
     if (editingSketchId && viewport.sketchId !== editingSketchId) viewport.enterSketch(editingSketchId, (e) => sketchEditor?.handle(e));
     renderObjectList();
     if (adjustmentsChanged && !edgePick && !editingSketchId) renderProperties();
 
+    checkBed();
+    renderHistory();
     const failed = Object.keys(errors).map((id) => features.find((f) => f.id === id)?.name ?? id);
     if (failed.length) setStatus(`Couldn't build ${failed.join(", ")}: ${Object.values(errors)[0]}`, true);
     else if (editingSketchId) setStatus(notice);
@@ -211,17 +289,34 @@ function refresh() {
   renderPanels();
   sketchEditor?.render();
   void rebuild();
+  scheduleAutosave();
   ($("#undo") as HTMLButtonElement).disabled = undoStack.length === 0;
   ($("#redo") as HTMLButtonElement).disabled = redoStack.length === 0;
 }
 
-function selectObject(id: string | null) {
+/** Select an object; `additive` (Shift/Ctrl-click) adds it to the selection, or takes it out again. */
+function selectObject(id: string | null, additive = false) {
+  if (additive && id) {
+    if (selectedIds.includes(id)) {
+      selectedIds = selectedIds.filter((x) => x !== id);
+      id = selectedId === id ? (selectedIds.at(-1) ?? null) : selectedId;
+    } else selectedIds = [...selectedIds, id];
+  } else selectedIds = id ? [id] : [];
   if (sculptingId && id !== sculptingId) stopSculpt();
   if (editingSketchId && id !== editingSketchId) stopSketchEdit();
   if (edgePick && id !== edgePick.featureId) stopEdgePick();
   selectedId = id;
   renderPanels();
-  viewport.select(id);
+  viewport.select(id, selectedIds);
+}
+
+/** The selected objects, minus any inside another selected one (those move with it). */
+function topSelected(): string[] {
+  const set = new Set(selectedIds);
+  return selectedIds.filter((id) => {
+    for (let p = findFeature(id)?.parentId ?? null; p; p = findFeature(p)?.parentId ?? null) if (set.has(p)) return false;
+    return !!findFeature(id);
+  });
 }
 
 // ---- Sculpting ------------------------------------------------------------
@@ -417,6 +512,7 @@ function startSketchEdit(id: string) {
   selectedId = id;
   sketchEditor = new SketchEditor(viewport.sketchLayer, {
     entities: () => editingSketch()?.params.entities ?? [],
+    constraints: () => editingSketch()?.params.constraints ?? [],
     commit: (mutate) =>
       commit((features) => {
         const s = features.find((f) => f.id === id);
@@ -473,7 +569,7 @@ function renderPanels() {
 function updateToolbar() {
   const f = selected();
   // Moving things around: an object is selected in the normal 3D view.
-  const transforming = !!f && !editingSketchId && !sculptingId && !edgePick && !showCombined && !viewport.placing;
+  const transforming = !!f && !editingSketchId && !sculptingId && !edgePick && !showCombined && !viewport.placing && !viewport.measuring;
   const show = (sel: string, on: boolean) => document.querySelectorAll<HTMLElement>(sel).forEach((el) => (el.hidden = !on));
   // Spin/Slide only applies to connected objects; anything else just moves in that mode.
   const mode = (gizmoMode === "joint" || gizmoMode === "pivot") && !f?.joint ? "translate" : gizmoMode;
@@ -504,6 +600,8 @@ const KIND_ICON: Record<ShapeKind, string> = {
   gear: "⚙",
   spring: "➰",
   star: "★",
+  text: "T",
+  screw: "⊚",
   sketch: "✎",
   group: "▤",
   plane: "◇",
@@ -513,13 +611,16 @@ const KIND_ICON: Record<ShapeKind, string> = {
 const EYE_OPEN = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>`;
 const EYE_SHUT = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3l18 18"/><path d="M10.6 5.1A10.8 10.8 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-3.2 4M6.6 6.6A17.6 17.6 0 0 0 2 12s3.6 7 10 7a9.7 9.7 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>`;
 
-/** Show or hide an object (and everything inside it) in the view. */
-function toggleHidden(id: string) {
+/** Show or hide objects (and everything inside them) in the view; several go the way the first one goes. */
+function toggleHidden(id: string, more: string[] = []) {
+  const hide = !findFeature(id)?.hidden;
   commit((features) => {
-    const f = features.find((x) => x.id === id);
-    if (!f) return;
-    if (f.hidden) delete f.hidden;
-    else f.hidden = true;
+    for (const x of [id, ...more]) {
+      const f = features.find((y) => y.id === x);
+      if (!f) continue;
+      if (hide) f.hidden = true;
+      else delete f.hidden;
+    }
   });
 }
 
@@ -529,7 +630,7 @@ function hiddenInView(f: Feature): boolean {
   return false;
 }
 
-const panelKey = (ed: SketchEditor) => `${ed.tool}|${ed.newMode}|${ed.ngonSides}|${ed.brushWidth}|${[...ed.selected].join(",")}`;
+const panelKey = (ed: SketchEditor) => `${ed.tool}|${ed.newMode}|${ed.ngonSides}|${ed.brushWidth}|${[...ed.selected].join(",")}|${JSON.stringify(ed.picked)}`;
 
 // ---- Context menu --------------------------------------------------------
 
@@ -568,8 +669,12 @@ window.addEventListener("pointerdown", (e) => !menuEl.contains(e.target as Node)
 function renderObjectList() {
   const list = $("#object-list");
   const rows: HTMLLIElement[] = [];
+  // Rolled-back history steps aren't part of the model right now, so they're left out.
+  const upTo = historyMarker === null ? doc.features : doc.features.slice(0, historyMarker);
+  const listed = new Set(upTo.map((f) => f.id));
+  const shown = upTo.map((f) => (f.parentId && !listed.has(f.parentId) ? { ...f, parentId: null } : f));
   const walk = (parentId: string | null, depth: number) => {
-    for (const f of childrenOf(doc.features, parentId)) {
+    for (const f of childrenOf(shown, parentId)) {
       rows.push(objectRow(f, depth));
       walk(f.id, depth + 1);
     }
@@ -582,7 +687,7 @@ let draggingId: string | null = null;
 
 function objectRow(f: Feature, depth: number) {
   const li = document.createElement("li");
-  li.className = [f.id === selectedId ? "selected" : "", buildErrors[f.id] ? "failed" : "", hiddenInView(f) ? "hidden-obj" : ""].join(" ");
+  li.className = [selectedIds.includes(f.id) ? "selected" : "", buildErrors[f.id] ? "failed" : "", hiddenInView(f) ? "hidden-obj" : "", f.suppressed ? "suppressed" : ""].join(" ");
   li.style.paddingLeft = `${8 + depth * 16}px`;
   li.draggable = true;
   li.innerHTML = `<span class="name"><span class="kind"></span><span></span></span><span class="row-end"><span class="tag ${f.mode}">${f.kind === "group" ? "group" : f.mode}</span><button class="eye"></button></span>`;
@@ -599,7 +704,7 @@ function objectRow(f: Feature, depth: number) {
   li.querySelector(".kind")!.textContent = KIND_ICON[f.kind];
   li.querySelector(".name > span:last-child")!.textContent = f.name;
   if (buildErrors[f.id]) li.title = buildErrors[f.id];
-  li.onclick = () => selectObject(f.id);
+  li.onclick = (e) => selectObject(f.id, e.shiftKey || e.ctrlKey || e.metaKey);
   li.ondblclick = () => f.kind === "sketch" && startSketchEdit(f.id);
 
   // Drag onto another object to make it the parent.
@@ -719,6 +824,13 @@ function segmented<T extends string>(options: { value: T; label: string; title?:
     el.append(b);
   }
   return el;
+}
+
+/** A label over a full-width control (for rows of buttons too wide to sit beside their label). */
+function stacked(label: string, control: HTMLElement) {
+  const row = labeled(label, control);
+  row.classList.add("stacked");
+  return row;
 }
 
 function labeled(label: string, control: HTMLElement) {
@@ -965,6 +1077,551 @@ function startConnect(id: string, type: "hinge" | "orbit" | "slider") {
   );
 }
 
+
+// ---- Text and screw holes -----------------------------------------------------
+
+function textFields(f: Extract<Feature, { kind: "text" }>, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
+  const p = f.params;
+  const set = (mutate: (p: typeof f.params) => void) => update((t) => t.kind === "text" && mutate(t.params));
+  const box = document.createElement("textarea");
+  box.className = "text-input";
+  box.rows = Math.min(4, Math.max(1, p.text.split("\n").length));
+  box.value = p.text;
+  box.spellcheck = false;
+  box.onkeydown = (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      box.blur();
+    }
+  };
+  box.onblur = () => box.value !== p.text && set((t) => (t.text = box.value));
+  const bold = document.createElement("label");
+  bold.className = "toggle";
+  bold.innerHTML = `<input type="checkbox" /> Bold`;
+  const check = bold.querySelector("input")!;
+  check.checked = p.bold;
+  check.onchange = () => set((t) => (t.bold = check.checked));
+  return [
+    box,
+    hint("Shift+Enter starts a new line."),
+    labeled(
+      "Font",
+      segmented(
+        [
+          { value: "sans", label: "Sans" },
+          { value: "serif", label: "Serif" },
+          { value: "mono", label: "Mono" },
+        ],
+        p.font,
+        (v) => set((t) => (t.font = v)),
+      ),
+    ),
+    bold,
+    labeled(
+      "Align",
+      segmented(
+        [
+          { value: "left", label: "Left" },
+          { value: "center", label: "Centre" },
+          { value: "right", label: "Right" },
+        ],
+        p.align,
+        (v) => set((t) => (t.align = v)),
+      ),
+    ),
+    lengthField("Letter height", p.size, (v) => set((t) => (t.size = v)), { min: 0 }),
+    lengthField("Thickness (Z)", p.height, (v) => set((t) => (t.height = v)), { min: 0 }),
+    lengthField("Letter spacing", p.spacing, (v) => set((t) => (t.spacing = v))),
+    hint("Make it a <b>Hole</b> and sink it into a face to engrave the text instead. Letters under about 5 mm tall are hard to print."),
+  ];
+}
+
+function screwFields(f: Extract<Feature, { kind: "screw" }>, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
+  const p = f.params;
+  const set = (mutate: (p: typeof f.params) => void) => update((t) => t.kind === "screw" && mutate(t.params));
+  const size = document.createElement("select");
+  for (const k of Object.keys(SCREW_SIZES)) size.add(new Option(k, k));
+  size.value = p.size;
+  size.onchange = () => set((t) => (t.size = size.value as ScrewSize));
+  const d = SCREW_SIZES[p.size];
+  return [
+    labeled("Screw", size),
+    stacked(
+      "Fit",
+      segmented(
+        [
+          { value: "tap", label: "Tap", title: `${d.tap} mm: the screw cuts its own thread (plastic or wood)` },
+          { value: "close", label: "Close", title: `${d.close} mm clearance` },
+          { value: "normal", label: "Normal", title: `${d.normal} mm clearance` },
+          { value: "loose", label: "Loose", title: `${d.loose} mm clearance` },
+        ],
+        p.fit,
+        (v) => set((t) => (t.fit = v)),
+      ),
+    ),
+    stacked(
+      "Head",
+      segmented(
+        [
+          { value: "none", label: "None" },
+          { value: "counterbore", label: "Counterbore", title: `A ${d.bore} mm pocket ${d.boreDepth} mm deep, so a socket head sits flush` },
+          { value: "countersink", label: "Countersink", title: `A 90° cone ${d.sink} mm wide, for flat (countersunk) heads` },
+        ],
+        p.head,
+        (v) => set((t) => (t.head = v)),
+      ),
+    ),
+    lengthField("Depth", p.depth, (v) => set((t) => (t.depth = v)), { min: 0 }),
+    hint(`Hole ${d[p.fit]} mm. It goes down into the face it's placed on. For 3D printing, holes come out a little small: Normal or Loose fit allows for that.`),
+  ];
+}
+
+// ---- Colour, hollow, mirror, repeat ---------------------------------------------
+
+const SWATCHES = ["#3ddc97", "#4aa3ff", "#ff6b6b", "#ffb020", "#a77bff", "#ff7ac6", "#f2f2f2", "#555b66"];
+
+/** Colour swatches (plus a picker) for one or more objects. */
+function colourRow(ids: string[], current: string | undefined): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "swatches";
+  const setColour = (c: string | undefined) =>
+    commit((features) => {
+      for (const id of ids) {
+        const t = features.find((x) => x.id === id);
+        if (!t) continue;
+        if (c) t.color = c;
+        else delete t.color;
+      }
+    });
+  const plain = button("", () => setColour(undefined), `swatch none${current ? "" : " active"}`);
+  plain.title = "Default colour";
+  row.append(plain);
+  for (const c of SWATCHES) {
+    const b = button("", () => setColour(c), `swatch${current === c ? " active" : ""}`);
+    b.style.background = c;
+    b.title = c;
+    row.append(b);
+  }
+  const pick = document.createElement("input");
+  pick.type = "color";
+  pick.value = current ?? "#3ddc97";
+  pick.title = "Any colour";
+  pick.onchange = () => setColour(pick.value);
+  row.append(pick);
+  return row;
+}
+
+function shellSection(f: Feature, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
+  const items: HTMLElement[] = [section("Hollow")];
+  const sh = f.shell;
+  items.push(
+    segmented(
+      [
+        { value: "off", label: "Solid" },
+        { value: "on", label: "Hollow", title: "Hollow it out, keeping walls of a set thickness" },
+      ],
+      sh ? "on" : "off",
+      (v) => update((t) => (v === "on" ? (t.shell = { thickness: 2, open: "top" }) : delete t.shell)),
+    ),
+  );
+  if (sh) {
+    items.push(
+      lengthField("Wall thickness", sh.thickness, (v) => update((t) => t.shell && (t.shell.thickness = v)), { min: 0 }),
+      labeled(
+        "Open",
+        segmented(
+          [
+            { value: "top", label: "Top", title: "No top: a cup or open box" },
+            { value: "bottom", label: "Bottom", title: "No bottom: a cover or lid" },
+            { value: "none", label: "Closed", title: "Sealed, with an empty pocket inside" },
+          ],
+          sh.open,
+          (v) => update((t) => t.shell && (t.shell.open = v)),
+        ),
+      ),
+    );
+  }
+  return items;
+}
+
+/** The middle of some objects' combined bounds (world), e.g. to mirror them in place. */
+function centreOf(ids: string[]): Vec3 | null {
+  const box = viewport.modelBounds(new Set(ids));
+  if (!box) return null;
+  const c = box.getCenter(new Vector3());
+  return { x: c.x, y: c.y, z: c.z };
+}
+
+function mirrorSection(ids: string[]): HTMLElement[] {
+  const row = document.createElement("div");
+  row.className = "actions";
+  for (const axis of ["x", "y", "z"] as const) {
+    const b = button(`⇋ ${axis.toUpperCase()}`, () => mirrorObjects(ids, axis));
+    b.title = `Flip ${ids.length > 1 ? "them" : "it"} along ${axis.toUpperCase()}, in place`;
+    row.append(b);
+  }
+  return [section("Mirror"), row];
+}
+
+function mirrorObjects(ids: string[], axis: "x" | "y" | "z") {
+  const c = centreOf(ids);
+  if (!c) return;
+  const roots = ids.length > 1 ? topSelected() : ids;
+  const connected = roots.filter((id) => findFeature(id)?.joint).length;
+  commit((features) => roots.forEach((id) => mirrorFeature(features, id, axis, c)));
+  if (connected) setNotice("Mirroring took the connection off; add it again if it's needed.");
+}
+
+/** Repeat: copies in a row, a grid, or around a circle. */
+type PatternDraft = { id: string; type: "linear" | "grid" | "circular"; count: number; countY: number; axis: Axis; spacing: number; spacingY: number; angle: number; centre: Vec3; turn: boolean };
+let patternDraft: PatternDraft | null = null;
+
+function patternSection(f: Feature): HTMLElement[] {
+  const items: HTMLElement[] = [section("Repeat")];
+  const d = patternDraft?.id === f.id ? patternDraft : null;
+  if (!d) {
+    const open = button("⁂ Repeat…", () => {
+      const ext = viewport.objectExtents(f.id);
+      const width = ext ? ext[1].x - ext[0].x : 10;
+      // Around the parent's middle (or the origin) by default: e.g. holes round a plate.
+      patternDraft = { id: f.id, type: "linear", count: 3, countY: 2, axis: "x", spacing: Math.round((width + 5) * 100) / 100, spacingY: Math.round((width + 5) * 100) / 100, angle: 360, centre: { x: 0, y: 0, z: 0 }, turn: true };
+      renderProperties();
+    }, "wide");
+    open.title = "Make copies in a row, a grid, or around a circle (e.g. holes round a flange)";
+    items.push(open);
+    return items;
+  }
+  const re = () => renderProperties();
+  items.push(
+    segmented(
+      [
+        { value: "linear", label: "Row" },
+        { value: "grid", label: "Grid" },
+        { value: "circular", label: "Circle" },
+      ],
+      d.type,
+      (v) => ((d.type = v), re()),
+    ),
+  );
+  if (d.type === "circular") {
+    items.push(
+      lengthField("Copies (total)", d.count, (v) => ((d.count = Math.max(2, Math.min(200, Math.round(v)))), re()), { min: 1, plain: true }),
+      lengthField("Total angle", d.angle, (v) => ((d.angle = Math.max(-360, Math.min(360, v))), re()), { unit: "°" }),
+      lengthField("Centre X", d.centre.x, (v) => ((d.centre.x = v), re())),
+      lengthField("Centre Y", d.centre.y, (v) => ((d.centre.y = v), re())),
+    );
+    const turn = document.createElement("label");
+    turn.className = "toggle";
+    turn.innerHTML = `<input type="checkbox" /> Turn copies to face the centre`;
+    const box = turn.querySelector("input")!;
+    box.checked = d.turn;
+    box.onchange = () => ((d.turn = box.checked), re());
+    items.push(turn, hint("Around a vertical axis through the centre (in the parent's frame, or the world's)."));
+  } else {
+    items.push(
+      lengthField(d.type === "grid" ? "Copies along X" : "Copies (total)", d.count, (v) => ((d.count = Math.max(1, Math.min(200, Math.round(v)))), re()), { min: 0, plain: true }),
+    );
+    if (d.type === "linear") items.push(labeled("Direction", segmented(AXES, d.axis, (v) => ((d.axis = v), re()))));
+    items.push(lengthField(d.type === "grid" ? "Spacing X" : "Spacing", d.spacing, (v) => ((d.spacing = v), re())));
+    if (d.type === "grid") items.push(lengthField("Copies along Y", d.countY, (v) => ((d.countY = Math.max(1, Math.min(200, Math.round(v)))), re()), { min: 0, plain: true }), lengthField("Spacing Y", d.spacingY, (v) => ((d.spacingY = v), re())));
+  }
+  const n = patternTransforms(d).length;
+  const row = document.createElement("div");
+  row.className = "actions";
+  row.append(button(`⁂ Add ${n} cop${n === 1 ? "y" : "ies"}`, () => applyPattern(f.id, d), "primary"), button("Cancel", () => ((patternDraft = null), re())));
+  items.push(row, hint("The blue copies show where they go. Each copy is a normal object you can still edit (holes keep cutting)."));
+  return items;
+}
+
+/** Where each copy goes, as a move in the parent's frame (the original, at 0, isn't included). */
+function patternTransforms(d: PatternDraft): Matrix4[] {
+  const out: Matrix4[] = [];
+  if (d.type === "circular") {
+    const full = Math.abs(Math.abs(d.angle) - 360) < 1e-9;
+    const step = (d.angle / (full ? d.count : Math.max(1, d.count - 1))) * (Math.PI / 180);
+    const c = d.centre;
+    const f = findFeature(d.id);
+    const at = f ? new Vector3(f.position.x, f.position.y, f.position.z) : new Vector3();
+    for (let i = 1; i < d.count; i++) {
+      if (d.turn) {
+        out.push(new Matrix4().makeTranslation(c.x, c.y, 0).multiply(new Matrix4().makeRotationZ(step * i)).multiply(new Matrix4().makeTranslation(-c.x, -c.y, 0)));
+      } else {
+        // Only the position goes round; it keeps facing the same way.
+        const p = at.clone().sub(new Vector3(c.x, c.y, 0)).applyAxisAngle(new Vector3(0, 0, 1), step * i).add(new Vector3(c.x, c.y, 0));
+        out.push(new Matrix4().makeTranslation(p.x - at.x, p.y - at.y, 0));
+      }
+    }
+    return out;
+  }
+  const ny = d.type === "grid" ? d.countY : 1;
+  for (let j = 0; j < ny; j++) {
+    for (let i = 0; i < d.count; i++) {
+      if (!i && !j) continue;
+      const v = new Vector3();
+      if (d.type === "grid") v.set(i * d.spacing, j * d.spacingY, 0);
+      else v[d.axis] = i * d.spacing;
+      out.push(new Matrix4().makeTranslation(v.x, v.y, v.z));
+    }
+  }
+  return out;
+}
+
+/** The copies' placements in the object's own frame (for the preview). */
+function patternPreview(d: PatternDraft): Matrix4[] {
+  const f = findFeature(d.id);
+  if (!f) return [];
+  const L = localMatrix(f);
+  return patternTransforms(d).map((t) => L.clone().invert().multiply(t).multiply(L));
+}
+
+function applyPattern(id: string, d: PatternDraft) {
+  const f = findFeature(id);
+  if (!f) return;
+  const parentWorld = worldMatrix(doc.features, f.parentId);
+  const transforms = patternTransforms(d);
+  const copies = transforms.map((t, i) => {
+    const clones = cloneSubtree(f);
+    clones[0].name = `${f.name} (${i + 2})`;
+    return { clones, world: parentWorld.clone().multiply(t).multiply(localMatrix(f)) };
+  });
+  commit((features) => {
+    for (const c of copies) {
+      insertFeatures(features, c.clones);
+      setWorldMatrix(features, c.clones[0].id, c.world);
+    }
+  });
+  patternDraft = null;
+  renderProperties();
+  setNotice(`Added ${copies.length} cop${copies.length === 1 ? "y" : "ies"} of ${f.name}.`);
+}
+
+// ---- Several objects selected ---------------------------------------------------
+
+function multiPanel(): HTMLElement[] {
+  const ids = topSelected();
+  const title = document.createElement("h3");
+  title.textContent = `${selectedIds.length} objects selected`;
+  const items: HTMLElement[] = [title, section("Align")];
+  const AX = [
+    { axis: "x" as const, labels: ["⇤ Left", "Centre", "Right ⇥"] },
+    { axis: "y" as const, labels: ["Front", "Centre", "Back"] },
+    { axis: "z" as const, labels: ["Bottom", "Middle", "Top"] },
+  ];
+  for (const { axis, labels } of AX) {
+    const row = document.createElement("div");
+    row.className = "align-row";
+    const tag = document.createElement("span");
+    tag.textContent = axis.toUpperCase();
+    row.append(tag, ...(["min", "mid", "max"] as const).map((where, i) => {
+      const b = button(labels[i], () => alignObjects(ids, axis, where));
+      b.title = `Line up their ${labels[i].replace(/[⇤⇥ ]/g, "").toLowerCase()} ${axis === "z" ? "" : "sides "}along ${axis.toUpperCase()}`;
+      return b;
+    }));
+    items.push(row);
+  }
+  if (ids.length >= 3) {
+    const row = document.createElement("div");
+    row.className = "actions";
+    for (const axis of ["x", "y", "z"] as const) {
+      const b = button(`Space ${axis.toUpperCase()}`, () => distributeObjects(ids, axis));
+      b.title = `Even gaps between them along ${axis.toUpperCase()} (the outer two stay put)`;
+      row.append(b);
+    }
+    items.push(section("Distribute"), row);
+  }
+  items.push(section("Colour"), colourRow(selectedIds, findFeature(selectedId)?.color), ...mirrorSection(selectedIds));
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  const group = button("▤ Group", groupSelected);
+  group.title = "Put them in a new group (Ctrl+G)";
+  actions.append(group, button("Duplicate", duplicateSelected), button(`Delete ${selectedIds.length}`, deleteSelected, "danger"));
+  items.push(section("Selection"), actions, hint("Drag the gizmo to move them all together. Shift-click adds or removes one; Esc clears the selection."));
+  return items;
+}
+
+/** World bounds of one object (and what's inside it): exact for a plain primitive, else from its mesh. */
+function boundsOf(id: string) {
+  const f = findFeature(id);
+  const ext = f && !childrenOf(doc.features, id).length ? featureExtents(f) : null;
+  if (!ext) return viewport.modelBounds(new Set([id]));
+  const world = worldMatrix(doc.features, id);
+  const box = new Box3();
+  for (let i = 0; i < 8; i++) box.expandByPoint(new Vector3(i & 1 ? ext[1].x : ext[0].x, i & 2 ? ext[1].y : ext[0].y, i & 4 ? ext[1].z : ext[0].z).applyMatrix4(world));
+  return box;
+}
+
+function alignObjects(ids: string[], axis: Axis, where: "min" | "mid" | "max") {
+  const boxes = ids.map((id) => ({ id, box: boundsOf(id) })).filter((x) => x.box);
+  if (boxes.length < 2) return;
+  const pick = (b: NonNullable<ReturnType<typeof boundsOf>>) => (where === "min" ? b.min[axis] : where === "max" ? b.max[axis] : (b.min[axis] + b.max[axis]) / 2);
+  const all = boxes.map((x) => x.box!);
+  const target = where === "min" ? Math.min(...all.map((b) => b.min[axis])) : where === "max" ? Math.max(...all.map((b) => b.max[axis])) : (Math.min(...all.map((b) => b.min[axis])) + Math.max(...all.map((b) => b.max[axis]))) / 2;
+  commit((features) => {
+    for (const { id, box } of boxes) {
+      const d = Math.round((target - pick(box!)) * 1e4) / 1e4;
+      if (Math.abs(d) > 1e-9) translateWorld(features, id, { x: axis === "x" ? d : 0, y: axis === "y" ? d : 0, z: axis === "z" ? d : 0 });
+    }
+  });
+}
+
+function distributeObjects(ids: string[], axis: Axis) {
+  const boxes = ids.map((id) => ({ id, box: boundsOf(id)! })).filter((x) => x.box).sort((a, b) => a.box.min[axis] + a.box.max[axis] - (b.box.min[axis] + b.box.max[axis]));
+  if (boxes.length < 3) return;
+  const span = boxes.at(-1)!.box.max[axis] - boxes[0].box.min[axis];
+  const sizes = boxes.reduce((s, x) => s + (x.box.max[axis] - x.box.min[axis]), 0);
+  const gap = (span - sizes) / (boxes.length - 1);
+  commit((features) => {
+    let at = boxes[0].box.max[axis] + gap;
+    for (const { id, box } of boxes.slice(1, -1)) {
+      const d = Math.round((at - box.min[axis]) * 1e4) / 1e4;
+      translateWorld(features, id, { x: axis === "x" ? d : 0, y: axis === "y" ? d : 0, z: axis === "z" ? d : 0 });
+      at += box.max[axis] - box.min[axis] + gap;
+    }
+  });
+}
+
+/** Put the selected objects into a new group (they stay where they are). */
+function groupSelected() {
+  const ids = topSelected();
+  if (!ids.length) return;
+  const parents = new Set(ids.map((id) => findFeature(id)?.parentId ?? null));
+  const parentId = parents.size === 1 ? [...parents][0] : null;
+  const group = createFeature("group", doc.features, parentId);
+  const box = viewport.modelBounds(new Set(ids));
+  commit((features) => {
+    insertFeatures(features, [group]);
+    if (box) {
+      const c = box.getCenter(new Vector3());
+      setWorldMatrix(features, group.id, new Matrix4().makeTranslation(Math.round(c.x * 100) / 100, Math.round(c.y * 100) / 100, Math.round(box.min.z * 100) / 100));
+    }
+    for (const id of ids) reparent(features, id, group.id);
+  });
+  selectedIds = [group.id];
+  selectedId = group.id;
+  renderPanels();
+  setNotice(`Grouped ${ids.length} objects.`);
+}
+
+// ---- Copy and paste --------------------------------------------------------------
+
+const CLIP_MARK = "gizmocad-clipboard";
+
+function copySelected() {
+  const ids = topSelected();
+  if (!ids.length) return;
+  // Each copied object with everything inside it; tops keep their place in the world.
+  const items = ids.flatMap((id) => {
+    const sub = subtreeIds(doc.features, id);
+    return doc.features.filter((f) => sub.has(f.id)).map((f) => ({ feature: f, world: f.id === id ? worldMatrix(doc.features, id).toArray() : null }));
+  });
+  clipboard = JSON.stringify({ [CLIP_MARK]: 1, items });
+  navigator.clipboard?.writeText(clipboard).catch(() => {});
+  setNotice(`Copied ${ids.length} object${ids.length > 1 ? "s" : ""}. Ctrl+V pastes (in this or another GizmoCAD window).`);
+}
+
+async function paste() {
+  let text = clipboard;
+  try {
+    const sys = await navigator.clipboard?.readText();
+    if (sys && sys.includes(CLIP_MARK)) text = sys;
+  } catch {
+    // No permission to read the system clipboard: use our own copy.
+  }
+  if (!text) return;
+  let data: { items: { feature: Feature; world: number[] | null }[] };
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return;
+  }
+  const idMap = new Map(data.items.map((x) => [x.feature.id, newId()]));
+  const roots: { id: string; world: Matrix4 }[] = [];
+  const features = data.items.map(({ feature, world }) => {
+    const f = structuredClone(feature);
+    f.id = idMap.get(feature.id)!;
+    if (world) {
+      // A top: pasted at the top level, a little to the side of the original.
+      f.parentId = null;
+      delete f.joint;
+      const m = new Matrix4().fromArray(world);
+      m.premultiply(new Matrix4().makeTranslation(10, 10, 0));
+      roots.push({ id: f.id, world: m });
+      f.name = findFeature(feature.id) ? `${feature.name} copy` : feature.name;
+    } else f.parentId = idMap.get(f.parentId!) ?? null;
+    return f;
+  });
+  commit((all) => {
+    insertFeatures(all, features);
+    for (const r of roots) setWorldMatrix(all, r.id, r.world);
+  });
+  // Next paste goes further along.
+  clipboard = JSON.stringify({ [CLIP_MARK]: 1, items: data.items.map((x) => ({ ...x, world: x.world ? new Matrix4().fromArray(x.world).premultiply(new Matrix4().makeTranslation(10, 10, 0)).toArray() : null })) });
+  selectedIds = roots.map((r) => r.id);
+  selectedId = selectedIds[0] ?? null;
+  renderPanels();
+}
+
+// ---- History ------------------------------------------------------------------------
+
+/** The strip of steps under the view: roll back to see (and edit) the model as it was, switch steps off. */
+function renderHistory() {
+  const bar = $("#history-steps");
+  const chips: HTMLElement[] = [];
+  const end = historyMarker ?? doc.features.length;
+  doc.features.forEach((f, i) => {
+    if (i === end && historyMarker !== null) chips.push(markerEl());
+    const chip = document.createElement("button");
+    chip.className = ["step", i >= end ? "future" : "", f.suppressed ? "off" : "", selectedIds.includes(f.id) ? "selected" : ""].join(" ");
+    chip.textContent = `${KIND_ICON[f.kind]} ${f.name}`;
+    chip.title = `${i + 1}. ${f.name}${f.suppressed ? " (switched off)" : ""}${i >= end ? " (after the marker: not in the model right now)" : ""}. Right-click for options.`;
+    chip.onclick = () => (i < end ? selectObject(f.id) : setNotice(`${f.name} comes after the history marker; roll forward to see it.`));
+    chip.oncontextmenu = (e) => {
+      e.preventDefault();
+      showMenu(
+        [
+          { label: "Roll back to here", action: () => setHistoryMarker(i + 1) },
+          { label: "Roll back to before this", action: () => setHistoryMarker(i) },
+          { label: f.suppressed ? "Switch on" : "Switch off (suppress)", action: () => commit((fs) => {
+            const t = fs.find((x) => x.id === f.id);
+            if (t) t.suppressed = !t.suppressed || undefined;
+            if (t && !t.suppressed) delete t.suppressed;
+          }) },
+          { label: "Delete", danger: true, action: () => ((selectedIds = [f.id]), (selectedId = f.id), deleteSelected()) },
+        ],
+        e.clientX,
+        e.clientY,
+      );
+    };
+    chips.push(chip);
+  });
+  if (historyMarker === null || historyMarker >= doc.features.length) chips.push(markerEl());
+  bar.replaceChildren(...chips);
+  ($("#history-back") as HTMLButtonElement).disabled = end === 0;
+  ($("#history-forward") as HTMLButtonElement).disabled = historyMarker === null;
+  ($("#history-end") as HTMLButtonElement).disabled = historyMarker === null;
+  $("#history").classList.toggle("rolled-back", historyMarker !== null);
+  const n = doc.features.length;
+  $("#history-count").textContent = historyMarker === null ? `${n} step${n === 1 ? "" : "s"}` : `Step ${historyMarker} of ${n}`;
+}
+
+function markerEl() {
+  const m = document.createElement("span");
+  m.className = "history-marker";
+  m.title = "The model is shown as it is at this point. New objects go here.";
+  return m;
+}
+
+function setHistoryMarker(at: number | null) {
+  historyMarker = at === null || at >= doc.features.length ? null : Math.max(0, at);
+  // Objects after the marker can't stay selected.
+  const active = new Set(activeFeatures(doc.features).map((f) => f.id));
+  selectedIds = selectedIds.filter((id) => active.has(id));
+  if (selectedId && !active.has(selectedId)) selectedId = selectedIds[0] ?? null;
+  if (historyMarker !== null) setNotice(`Rolled back to step ${historyMarker}: later steps are hidden until you roll forward. Edits here flow through to them.`);
+  refresh();
+}
+
 // ---- Split & dividers -----------------------------------------------------
 
 const AXES: { value: Axis; label: string }[] = [
@@ -1203,10 +1860,11 @@ function splitObject(id: string, d: NonNullable<typeof splitDraft>) {
     const orig = features.find((x) => x.id === id)!;
     orig.name = `${name} A`;
     orig.clips = [...(orig.clips ?? []), clip(cuts[0], "below")];
-    for (const clones of pieces) features.push(...clones);
+    for (const clones of pieces) insertFeatures(features, clones);
   });
   splitDraft = null;
   selectedId = pieces[0][0].id;
+  selectedIds = [selectedId];
   renderPanels();
   setNotice(`Split ${name} into ${cuts.length + 1} pieces (A–${letter(cuts.length)}). Move any piece to pull them apart.`);
 }
@@ -1233,13 +1891,14 @@ function addDividers(id: string) {
     return w;
   });
   commit((features) => {
-    features.push(group, ...walls);
+    insertFeatures(features, [group, ...walls]);
     let host = f.parentId;
     while (host && childrenOf(features, host).some((c) => c.mode === "hole")) host = features.find((x) => x.id === host)?.parentId ?? null;
     if (host !== f.parentId) reparent(features, group.id, host);
   });
   dividerDraft = null;
   selectedId = group.id;
+  selectedIds = [group.id];
   renderPanels();
   setNotice(`Added ${walls.length} divider${walls.length > 1 ? "s" : ""}.`);
 }
@@ -1249,11 +1908,13 @@ const round4 = (v: number) => Math.round(v * 1e4) / 1e4 + 0;
 // ---- Properties ----------------------------------------------------------
 
 function renderProperties() {
-  // The split/divider tools close when another object (or none) is selected.
+  // The split/divider/repeat tools close when another object (or none) is selected.
   if (splitDraft && splitDraft.id !== selectedId) splitDraft = null;
   if (dividerDraft && dividerDraft.id !== selectedId) dividerDraft = null;
+  if (patternDraft && (patternDraft.id !== selectedId || selectedIds.length > 1)) patternDraft = null;
   renderPropertiesPanel();
-  viewport.setPreview(editingSketchId || sculptingId ? null : cutPreviewBoxes());
+  const preview = patternDraft ? { id: patternDraft.id, style: "add" as const, boxes: [], copies: patternPreview(patternDraft).map((m) => m.toArray()) } : cutPreviewBoxes();
+  viewport.setPreview(editingSketchId || sculptingId ? null : preview);
   // While splitting, an arrow on the highlighted cut drags it.
   syncCutHandle();
 }
@@ -1264,11 +1925,13 @@ function renderPropertiesPanel() {
   if (editingSketchId && sketchEditor && editingSketch()) return renderSketchPanel(panel, editingSketch()!, sketchEditor);
   const sculpting = findFeature(sculptingId);
   if (sculpting?.kind === "sculpt") return panel.replaceChildren(...sculptPanel(sculpting));
+  if (f && selectedIds.length > 1) return panel.replaceChildren(...multiPanel());
   if (!f) {
     panel.innerHTML = `<p class="hint">Select an object to edit its exact dimensions.</p>`;
     panel.append(
       hint("Fields accept units and maths, e.g. <code>1in</code>, <code>2.5cm</code>, <code>40/3</code>."),
       hint("Drag objects onto each other in the list to make parent/child groups. Children move with their parent, and a child hole only cuts its parent."),
+      hint("Shift-click or Shift-drag a box to select several objects, then align, group or move them together."),
     );
     return;
   }
@@ -1309,6 +1972,10 @@ function renderPropertiesPanel() {
     items.push(section("Sketch"), ...sketchSettings(f, update), button("✎ Edit sketch", () => startSketchEdit(f.id), "primary wide"));
   } else if (f.kind === "spring") {
     items.push(section("Spring"), ...springFields(f, update));
+  } else if (f.kind === "text") {
+    items.push(section("Text"), ...textFields(f, update));
+  } else if (f.kind === "screw") {
+    items.push(section("Screw hole"), ...screwFields(f, update));
   } else if (PARAM_FIELDS[f.kind]) {
     items.push(
       section("Size"),
@@ -1345,10 +2012,12 @@ function renderPropertiesPanel() {
     section("Parent"),
     parentSelect(f),
   );
+  if (f.kind !== "plane" && f.kind !== "group") items.push(section("Colour"), colourRow([f.id], f.color));
   // A flat sketch has no solid yet, so nothing to round, cut or sculpt.
   const flat = f.kind === "sketch" && f.params.operation === "flat";
   if (FINISHABLE.includes(f.kind) && !flat) {
     items.push(...edgeSection(f, update));
+    items.push(...shellSection(f, update));
     const sculpt = button("✋ Sculpt this object", () => void convertToSculpt(f.id), "wide");
     sculpt.title = "Turn this object into clay you can sculpt with brushes (Ctrl+Z to undo)";
     items.push(section("Sculpt"), sculpt, hint(f.kind === "group" ? "The group's merged shape becomes one piece of clay." : "Turns the exact shape into clay; dimensions and fillets stop being editable."));
@@ -1356,6 +2025,7 @@ function renderPropertiesPanel() {
 
   items.push(...connectionSection(f, update));
   if (!["group", "plane", "sculpt"].includes(f.kind) && !flat) items.push(...cutSection(f));
+  if (f.kind !== "plane") items.push(...mirrorSection([f.id]), ...patternSection(f));
 
   const kids = childrenOf(doc.features, f.id).length;
   const actions = document.createElement("div");
@@ -1542,6 +2212,7 @@ const TOOLS: { value: SketchTool; label: string; key: string; title: string }[] 
   { value: "spline", label: "∿ Curve", key: "U", title: "Smooth curve through the points you click. Click the first point again to close it (or double-click / Enter). The dashed part shows how it closes. Put points closer together for tighter bends; hold Alt to place a point off the grid." },
   { value: "brush", label: "≋ Brush", key: "B", title: "Paint freehand: hold and drag. The stroke becomes a shape as wide as the brush." },
   { value: "trim", label: "✂ Trim", key: "T", title: "Click a guide line to cut it back to where it crosses. Click a shape's edge where it runs inside another shape to merge them (or trim it back, if one adds and one cuts); click the part sticking out to trim that off; click a shape's edge on one side of a guide line crossing it to cut that side away." },
+  { value: "constrain", label: "📐 Constrain", key: "K", title: "Click points, edges or circles (one or two), then pick a rule or dimension in the panel: horizontal, parallel, equal, tangent, a length…" },
   { value: "split", label: "⫽ Split", key: "X", title: "Click a line or brush stroke to cut it in two there; click a shape's edge to add a corner there (rectangles and N-gons become editable polygons)" },
 ];
 
@@ -1604,6 +2275,8 @@ function renderSketchPanel(panel: HTMLElement, s: SketchFeature, ed: SketchEdito
     items.push(labeled("New shapes", segmented(MODE_OPTIONS, ed.newMode, (m) => ((ed.newMode = m), sketchStateChanged(), ed.render()), "entity")));
   }
   items.push(cursor);
+  if (ed.tool === "constrain") items.push(...constrainPicker(s, ed, updateSketch));
+  items.push(...constraintList(s, updateSketch));
 
   // Shape list.
   const entities = s.params.entities;
@@ -1662,6 +2335,103 @@ function renderSketchPanel(panel: HTMLElement, s: SketchFeature, ed: SketchEdito
   items.push(hint("Right-click a shape for options, or empty space to select all. Drag dots to reshape; orange dots bend polygon edges into arcs. Right-drag pans, scroll zooms. Esc cancels."));
   panel.replaceChildren(...items);
   sketchStateChanged();
+}
+
+// ---- Sketch constraints ---------------------------------------------------------
+
+const REF_KIND_LABEL = { point: "point", edge: "edge", circle: "circle" } as const;
+
+/** "Rectangle 1 edge 2", for lists and hints. */
+function refLabel(s: SketchFeature, r: SketchRef): string {
+  const entities = s.params.entities;
+  const e = entities.find((x) => x.id === r.entity);
+  if (!e) return "?";
+  const n = entities.filter((x) => x.type === e.type).indexOf(e) + 1;
+  const single = (e.type === "line" && r.kind === "edge") || (e.type === "circle" && r.kind === "circle") || (e.type === "point" && r.kind === "point");
+  return `${ENTITY_LABEL[e.type]} ${n}${single ? "" : ` ${REF_KIND_LABEL[r.kind]} ${r.index + 1}`}`;
+}
+
+const CONSTRAINT_TYPES: { type: ConstraintType; title: string }[] = [
+  { type: "horizontal", title: "Make the edge (or the line between two points) horizontal" },
+  { type: "vertical", title: "Make the edge (or the line between two points) vertical" },
+  { type: "parallel", title: "Make two edges parallel" },
+  { type: "perpendicular", title: "Make two edges square to each other" },
+  { type: "equal", title: "Make two edges the same length, or two circles the same size" },
+  { type: "tangent", title: "Make an edge (or circle) just touch a circle" },
+  { type: "coincident", title: "Join two points, or put a point on an edge or circle" },
+  { type: "length", title: "Set an edge's length" },
+  { type: "distance", title: "Set the distance between two points (or a point and an edge)" },
+  { type: "diameter", title: "Set a circle's diameter" },
+  { type: "angle", title: "Set the angle between two edges" },
+  { type: "fix", title: "Pin a point where it is" },
+];
+
+/** With the Constrain tool: what's picked, and the rules that fit it. */
+function constrainPicker(s: SketchFeature, ed: SketchEditor, updateSketch: (mutate: (f: Feature) => void) => void): HTMLElement[] {
+  const items: HTMLElement[] = [section("Constrain")];
+  if (!ed.picked.length) {
+    items.push(hint("Click one or two points, edges or circles in the drawing (orange when picked)."));
+    return items;
+  }
+  items.push(hint(`Picked: ${ed.picked.map((r) => refLabel(s, r)).join(" + ")}`));
+  const fits = CONSTRAINT_TYPES.filter((c) => constraintFits(c.type, ed.picked));
+  if (!fits.length) {
+    items.push(hint("No rule fits these. Try two edges, an edge and a circle, or two points."));
+    return items;
+  }
+  const grid = document.createElement("div");
+  grid.className = "tool-grid";
+  for (const c of fits) {
+    const b = button(CONSTRAINT_LABEL[c.type], () => {
+      const refs = ed.picked;
+      const value = measureConstraint(c.type, refs, s.params.entities);
+      const constraint: SketchConstraint = { id: newId(), type: c.type, refs, ...(value !== undefined ? { value } : {}) };
+      if (c.type === "fix") {
+        // Pinned where it is now.
+        const at = fixPoint(s, refs[0]);
+        if (at) constraint.at = at;
+      }
+      ed.picked = [];
+      updateSketch((t) => t.kind === "sketch" && (t.params.constraints = [...(t.params.constraints ?? []), constraint]));
+    });
+    b.title = c.title;
+    grid.append(b);
+  }
+  items.push(grid);
+  return items;
+}
+
+function fixPoint(s: SketchFeature, ref: SketchRef): Point2 | undefined {
+  const e = s.params.entities.find((x) => x.id === ref.entity);
+  return e ? refPointsOf(e)[ref.index] : undefined;
+}
+
+/** The constraints on this sketch, with their values to edit and a ✕ to remove each. */
+function constraintList(s: SketchFeature, updateSketch: (mutate: (f: Feature) => void) => void): HTMLElement[] {
+  const list = s.params.constraints ?? [];
+  if (!list.length) return [];
+  const items: HTMLElement[] = [section(`Constraints (${list.length})`)];
+  const setConstraints = (mutate: (cs: SketchConstraint[]) => void) => updateSketch((t) => t.kind === "sketch" && mutate((t.params.constraints ??= [])));
+  for (const c of list) {
+    const row = document.createElement("div");
+    row.className = "constraint-row";
+    const label = document.createElement("span");
+    label.textContent = `${CONSTRAINT_LABEL[c.type]}: ${c.refs.map((r) => refLabel(s, r)).join(", ")}`;
+    label.title = label.textContent;
+    row.append(label);
+    if (["distance", "length", "diameter", "angle"].includes(c.type)) {
+      const input = lengthInput(c.value ?? 0, (v) => setConstraints((cs) => {
+        const t = cs.find((x) => x.id === c.id);
+        if (t) t.value = v;
+      }), c.type === "angle" ? { unit: "°" } : { min: 0 });
+      row.append(input);
+    }
+    const remove = button("✕", () => setConstraints((cs) => cs.splice(cs.findIndex((x) => x.id === c.id), 1)), "icon");
+    remove.title = "Remove this constraint";
+    row.append(remove);
+    items.push(row);
+  }
+  return items;
 }
 
 /** Numeric fields for one sketch entity. */
@@ -1763,14 +2533,16 @@ function addShape(kind: ShapeKind) {
   setPlacingButton(kind);
   viewport.startPlacement({
     feature: f,
-    onPlace(position, rotation) {
+    onPlace(position, rotation, targetId) {
       setPlacingButton(null);
       f.position = position;
       f.rotation = rotation;
+      // A screw hole goes beside the object it's put on (in the same group), so it cuts it.
+      const into = kind === "screw" && targetId ? (findFeature(targetId)?.parentId ?? null) : parentId;
       // Placed in world terms; moving it into the group keeps it where it was put.
-      if (parentId) {
+      if (into) {
         const probe = [...structuredClone(doc.features), structuredClone(f)];
-        reparent(probe, f.id, parentId);
+        reparent(probe, f.id, into);
         Object.assign(f, probe.at(-1));
       }
       finishAdd(f);
@@ -1826,8 +2598,9 @@ function setPlacingButton(kind: ShapeKind | null) {
 }
 
 function finishAdd(f: Feature) {
-  commit((features) => features.push(f));
+  commit((features) => insertFeatures(features, [f]));
   selectedId = f.id;
+  selectedIds = [f.id];
   // Until the kernel has built it, show its size where it goes (threads and springs take a few seconds).
   viewport.showPending(f, worldMatrix(doc.features, f.parentId));
   if (f.kind === "thread" || f.kind === "spring") setStatus(`Building ${f.name}…`);
@@ -1847,26 +2620,38 @@ function cloneSubtree(f: Feature): Feature[] {
 }
 
 function duplicateSelected() {
-  const f = selected();
-  if (!f) return;
-  const clones = cloneSubtree(f);
-  const root = clones[0];
-  root.name = `${f.name} copy`;
-  root.position.x += 10;
-  root.position.y += 10;
-  commit((features) => features.push(...clones));
-  selectedId = root.id;
+  const roots = topSelected().map((id) => findFeature(id)!).filter(Boolean);
+  if (!roots.length) return;
+  const all = roots.map((f) => {
+    const clones = cloneSubtree(f);
+    const root = clones[0];
+    root.name = `${f.name} copy`;
+    return { clones, world: new Matrix4().makeTranslation(10, 10, 0).multiply(worldMatrix(doc.features, f.id)) };
+  });
+  commit((features) => {
+    for (const c of all) {
+      insertFeatures(features, c.clones);
+      setWorldMatrix(features, c.clones[0].id, c.world);
+    }
+  });
+  selectedIds = all.map((c) => c.clones[0].id);
+  selectedId = selectedIds[0];
   renderPanels();
 }
 
 function deleteSelected() {
-  if (!selectedId) return;
-  const ids = subtreeIds(doc.features, selectedId);
+  if (!selectedIds.length && selectedId) selectedIds = [selectedId];
+  if (!selectedIds.length) return;
+  const ids = new Set(selectedIds.flatMap((id) => [...subtreeIds(doc.features, id)]));
   if (editingSketchId && ids.has(editingSketchId)) stopSketchEdit();
   selectedId = null;
+  selectedIds = [];
   commit((features) => {
+    const before = features.length;
     const keep = features.filter((f) => !ids.has(f.id));
-    features.splice(0, features.length, ...keep);
+    // Steps removed before the history marker move it back.
+    if (historyMarker !== null) historyMarker -= features.slice(0, historyMarker).filter((f) => ids.has(f.id)).length;
+    features.splice(0, before, ...keep);
   });
 }
 
@@ -1985,6 +2770,243 @@ $("#open").onclick = () => void openDocument();
 $("#export-stl").onclick = () => void exportModel("stl");
 $("#export-step").onclick = () => void exportModel("step");
 
+
+// ---- Measure, section, camera ------------------------------------------------------
+
+const MEASURE_HINT = "Measure: click two points (corners and edges snap). Faces give their angle too. Esc or M to stop.";
+
+function setMeasuring(on: boolean) {
+  if (on) {
+    stopSketchEdit();
+    stopEdgePick();
+    stopSculpt();
+    if (viewport.placing) viewport.cancelPlacement();
+  }
+  viewport.setMeasuring(on);
+  $("#measure").classList.toggle("on", on);
+  setStatus(on ? MEASURE_HINT : "");
+  updateToolbar();
+}
+
+/** Section view: on/off, which axis, where, and which side is cut away. */
+let sectionView: { axis: Axis; at: number; flip: boolean } | null = null;
+
+function setSectionView(next: typeof sectionView) {
+  sectionView = next;
+  viewport.setSection(sectionView);
+  $("#section").classList.toggle("on", !!sectionView);
+  const panel = $("#section-panel");
+  panel.hidden = !sectionView;
+  if (!sectionView) return;
+  const box = viewport.modelBounds();
+  const [lo, hi] = box ? [box.min[sectionView.axis], box.max[sectionView.axis]] : [-50, 50];
+  const slider = $("#section-at") as HTMLInputElement;
+  slider.min = String(Math.floor(lo - 1));
+  slider.max = String(Math.ceil(hi + 1));
+  slider.step = "0.1";
+  slider.value = String(sectionView.at);
+  $("#section-value").textContent = `${fmt(sectionView.at)} mm`;
+  panel.querySelectorAll<HTMLButtonElement>("[data-section-axis]").forEach((b) => b.classList.toggle("active", b.dataset.sectionAxis === sectionView!.axis));
+}
+
+function toggleSection() {
+  if (sectionView) return setSectionView(null);
+  const box = viewport.modelBounds();
+  const c = box ? box.getCenter(new Vector3()) : new Vector3();
+  setSectionView({ axis: "y", at: Math.round(c.y * 10) / 10, flip: nearSide("y", c.y) });
+}
+
+/** Cut away the side facing the camera, so the inside shows. */
+const nearSide = (axis: Axis, at: number) => viewport.cameraPosition[axis] < at;
+
+$("#section").onclick = toggleSection;
+$("#section-close").onclick = () => setSectionView(null);
+($("#section-at") as HTMLInputElement).oninput = (e) => sectionView && setSectionView({ ...sectionView, at: parseFloat((e.target as HTMLInputElement).value) });
+$("#section-flip").onclick = () => sectionView && setSectionView({ ...sectionView, flip: !sectionView.flip });
+document.querySelectorAll<HTMLButtonElement>("[data-section-axis]").forEach((b) => {
+  b.onclick = () => {
+    if (!sectionView) return;
+    const axis = b.dataset.sectionAxis as Axis;
+    const box = viewport.modelBounds();
+    const at = box ? Math.round(box.getCenter(new Vector3())[axis] * 10) / 10 : 0;
+    setSectionView({ ...sectionView, axis, at, flip: nearSide(axis, at) });
+  };
+});
+$("#measure").onclick = () => setMeasuring(!viewport.measuring);
+$("#fit-all").onclick = () => viewport.fitView();
+$("#fit-selected").onclick = () => viewport.fitView(true);
+$("#ortho").onclick = () => {
+  viewport.setOrthographic(!viewport.orthographic);
+  $("#ortho").classList.toggle("on", viewport.orthographic);
+  $("#ortho").textContent = viewport.orthographic ? "Flat" : "3D";
+};
+
+// ---- Print bed ----------------------------------------------------------------------
+
+const BEDS: Record<string, { label: string; size: [number, number, number] | null }> = {
+  none: { label: "None", size: null },
+  ender3: { label: "Creality Ender 3 (220 × 220 × 250)", size: [220, 220, 250] },
+  mk4: { label: "Prusa MK4 (250 × 210 × 220)", size: [250, 210, 220] },
+  mini: { label: "Prusa Mini (180 × 180 × 180)", size: [180, 180, 180] },
+  bambu: { label: "Bambu X1 / P1 / A1 (256 × 256 × 256)", size: [256, 256, 256] },
+  a1mini: { label: "Bambu A1 mini (180 × 180 × 180)", size: [180, 180, 180] },
+  custom: { label: "Custom…", size: null },
+};
+const BED_KEY = "gizmocad.bed";
+let bed: [number, number, number] | null = null;
+
+function loadBed() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(BED_KEY) ?? "null") as { key: string; size: [number, number, number] | null } | null;
+    if (saved) {
+      ($("#bed") as HTMLSelectElement).value = saved.key;
+      bed = saved.size;
+    }
+  } catch {
+    // Unreadable or no storage: no bed.
+  }
+  viewport.setBed(bed && { width: bed[0], depth: bed[1], height: bed[2] });
+}
+
+const bedSelect = $("#bed") as HTMLSelectElement;
+for (const [key, b] of Object.entries(BEDS)) bedSelect.add(new Option(b.label, key));
+bedSelect.onchange = () => {
+  let size = BEDS[bedSelect.value]?.size ?? null;
+  if (bedSelect.value === "custom") {
+    const answer = prompt("Bed size in mm: width × depth × height", bed ? bed.join(" x ") : "200 x 200 x 200");
+    const nums = answer?.split(/[x×*, ]+/).map(Number).filter((v) => v > 0);
+    size = nums && nums.length >= 2 ? [nums[0], nums[1], nums[2] ?? 200] : null;
+    if (!size) bedSelect.value = "none";
+  }
+  bed = size;
+  try {
+    localStorage.setItem(BED_KEY, JSON.stringify({ key: bedSelect.value, size }));
+  } catch {
+    // Not saved, but still shown.
+  }
+  viewport.setBed(bed && { width: bed[0], depth: bed[1], height: bed[2] });
+  checkBed();
+};
+
+/** Warn when the model doesn't fit the chosen printer. */
+function checkBed() {
+  const warn = $("#bed-warning");
+  const box = bed ? viewport.modelBounds() : null;
+  if (!bed || !box) return void (warn.hidden = true);
+  const [w, d, h] = bed;
+  const e = 1e-6;
+  const fits = box.min.x >= -w / 2 - e && box.max.x <= w / 2 + e && box.min.y >= -d / 2 - e && box.max.y <= d / 2 + e && box.min.z >= -e && box.max.z <= h + e;
+  warn.hidden = fits;
+  const size = box.getSize(new Vector3());
+  warn.textContent = `⚠ Outside the print bed: the model is ${fmt(size.x)} × ${fmt(size.y)} × ${fmt(size.z)} mm${box.min.z < -e ? " and goes below the bed" : ""}.`;
+}
+
+// ---- Autosave ----------------------------------------------------------------------
+
+let autosaveTimer = 0;
+let autosaveReady = false;
+function scheduleAutosave() {
+  if (!autosaveReady) return; // Not before the last session has been checked, or it'd be overwritten.
+  clearTimeout(autosaveTimer);
+  autosaveTimer = window.setTimeout(() => autosave(JSON.stringify(doc)).catch(() => {}), 800);
+}
+
+/** Bring back the last session's model (if this one is still empty). */
+async function restoreAutosave() {
+  try {
+    const saved = await loadAutosave();
+    if (saved && !doc.features.length) {
+      const parsed: unknown = JSON.parse(saved.json);
+      if (isCadDocument(parsed) && parsed.features.length) {
+        doc = normalizeDocument(parsed);
+        setNotice(`Restored your work from ${new Date(saved.at).toLocaleString()}. (New in the GizmoCAD menu starts over.)`);
+        refresh();
+      }
+    }
+  } catch {
+    // No storage (private window): nothing to restore.
+  }
+  autosaveReady = true;
+}
+
+// ---- Import and 3MF -------------------------------------------------------------------
+
+async function importFile() {
+  const file = await openImportFile($("#import-input"), ["stl", "svg"], "STL mesh or SVG drawing");
+  if (!file) return;
+  try {
+    if (/\.svg$/i.test(file.name)) {
+      const entities = svgToEntities(new TextDecoder().decode(file.data), newId);
+      const f = createFeature("sketch", doc.features) as SketchFeature;
+      f.name = file.name.replace(/\.svg$/i, "");
+      f.params.entities = entities;
+      f.params.operation = "extrude";
+      f.params.depth = 3;
+      finishImport(f);
+      setNotice(`Imported ${entities.length} shape${entities.length === 1 ? "" : "s"} from ${file.name} as a sketch, extruded 3 mm (change it in the panel; double-click to edit the drawing).`);
+    } else {
+      const { vertices, triangles } = parseStl(file.data);
+      const f = createFeature("sculpt", doc.features) as SculptFeature;
+      f.name = file.name.replace(/\.stl$/i, "");
+      f.params = importedMesh(vertices, triangles);
+      // Sit it on the grid, centred.
+      const v = new Float32Array(vertices);
+      let [minX, minY, minZ, maxX, maxY] = [Infinity, Infinity, Infinity, -Infinity, -Infinity];
+      for (let i = 0; i < v.length; i += 3) {
+        minX = Math.min(minX, v[i]);
+        maxX = Math.max(maxX, v[i]);
+        minY = Math.min(minY, v[i + 1]);
+        maxY = Math.max(maxY, v[i + 1]);
+        minZ = Math.min(minZ, v[i + 2]);
+      }
+      f.position = { x: -(minX + maxX) / 2, y: -(minY + maxY) / 2, z: -minZ };
+      finishImport(f);
+      setNotice(`Imported ${file.name} (${(triangles.length / 3).toLocaleString()} triangles) as a mesh: move, sculpt and export it to STL or 3MF. Meshes can't be holes or take fillets.`);
+    }
+  } catch (err) {
+    setStatus(`Couldn't import ${file.name}: ${(err as Error).message}`, true);
+  }
+}
+
+function finishImport(f: Feature) {
+  stopSketchEdit();
+  commit((features) => insertFeatures(features, [f]));
+  selectedId = f.id;
+  selectedIds = [f.id];
+  renderPanels();
+  viewport.fitView();
+}
+
+async function export3mf() {
+  setStatus("Exporting 3MF…");
+  try {
+    const features = structuredClone(activeFeatures(doc.features));
+    const meshes = await kernel.parts(features);
+    const parts: MeshPart[] = meshes.map((m) => {
+      const f = features.find((x) => x.id === m.id)!;
+      return { name: f.name, color: f.color ?? "#3ddc97", vertices: m.vertices, triangles: m.triangles };
+    });
+    // Sculpts (meshes) go in as their own objects.
+    for (const f of features) {
+      if (f.kind !== "sculpt") continue;
+      const tris = sculptTriangles(f.params, worldMatrix(features, f.id));
+      parts.push({ name: f.name, color: f.color ?? "#3ddc97", vertices: tris, triangles: new Uint32Array(tris.length / 3).map((_, i) => i) });
+    }
+    if (!parts.length) throw new Error("Nothing to export: add at least one solid shape.");
+    await saveFile(build3mf(parts), "gizmocad-model.3mf", "3MF", "3mf");
+    setStatus("");
+  } catch (err) {
+    setStatus(`Export failed: ${(err as Error).message}`, true);
+  }
+}
+
+$("#import").onclick = () => void importFile();
+$("#export-3mf").onclick = () => void export3mf();
+$("#history-back").onclick = () => setHistoryMarker((historyMarker ?? doc.features.length) - 1);
+$("#history-forward").onclick = () => setHistoryMarker((historyMarker ?? doc.features.length) + 1);
+$("#history-end").onclick = () => setHistoryMarker(null);
+$("#history-toggle").onclick = () => $("#history").classList.toggle("collapsed");
+
 const SKETCH_KEYS: Record<string, SketchTool> = Object.fromEntries(TOOLS.map((t) => [t.key.toLowerCase(), t.value]));
 
 function setGizmoMode(mode: GizmoMode) {
@@ -2018,6 +3040,10 @@ window.addEventListener("keydown", (e) => {
   const key = e.key.toLowerCase();
   if (e.key === "Escape" && viewport.placing) {
     viewport.cancelPlacement();
+    return;
+  }
+  if (viewport.measuring && (e.key === "Escape" || (!mod && key === "m"))) {
+    setMeasuring(false);
     return;
   }
   if (viewport.placing && !mod && key === "f") {
@@ -2066,6 +3092,32 @@ window.addEventListener("keydown", (e) => {
     } else if (!mod && SKETCH_KEYS[key]) sketchEditor.setTool(SKETCH_KEYS[key]);
     return;
   }
+  if (!mod && key === "m") return setMeasuring(true);
+  if (e.key === "Home") return viewport.fitView();
+  if (e.key === "." && !mod) return viewport.fitView(true);
+  if (!mod && key === "o") return $("#ortho").click();
+  if (mod && key === "a") {
+    e.preventDefault();
+    const active = activeFeatures(doc.features);
+    selectedIds = active.filter((f) => !f.parentId).map((f) => f.id);
+    selectedId = selectedIds[0] ?? null;
+    renderPanels();
+    viewport.select(selectedId, selectedIds);
+    return;
+  }
+  if (mod && key === "g") {
+    e.preventDefault();
+    return groupSelected();
+  }
+  if (mod && key === "c") return copySelected();
+  if (mod && key === "x") {
+    copySelected();
+    return deleteSelected();
+  }
+  if (mod && key === "v") {
+    e.preventDefault();
+    return void paste();
+  }
   if (!mod && key === "w") setGizmoMode("translate");
   if (!mod && key === "e") setGizmoMode("rotate");
   if (!mod && key === "r") setGizmoMode("scale");
@@ -2078,7 +3130,7 @@ window.addEventListener("keydown", (e) => {
   } else if (!mod && key === "f" && selectedId) {
     snapToFace();
   } else if (!mod && key === "h" && selectedId) {
-    toggleHidden(selectedId);
+    toggleHidden(selectedId, selectedIds.filter((x) => x !== selectedId));
   } else if (e.key === "Delete" || e.key === "Backspace") {
     deleteSelected();
   } else if (e.key === "Escape") {
@@ -2088,4 +3140,6 @@ window.addEventListener("keydown", (e) => {
 });
 
 kernel.ready.catch((err: Error) => setStatus(err.message, true));
+loadBed();
 refresh();
+void restoreAutosave();

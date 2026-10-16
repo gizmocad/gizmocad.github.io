@@ -24,7 +24,12 @@ const COLORS = {
 };
 
 export interface ViewportEvents {
-  onSelect(id: string | null): void;
+  /** A click picked an object (or empty space: null). `additive`: Shift/Ctrl-click, toggling it in the selection. */
+  onSelect(id: string | null, additive?: boolean): void;
+  /** Shift-drag drew a box: the objects inside it. */
+  onBoxSelect(ids: string[]): void;
+  /** Measure tool: a new reading (or null when cleared). */
+  onMeasure(text: string | null): void;
   /** Called once when a gizmo drag finishes, with the snapped placement relative to the parent. */
   onTransformed(id: string, position: Vec3, rotation: Vec3): void;
   /** Double-click on an object. */
@@ -89,6 +94,8 @@ export interface PreviewSpec {
   boxes: [Vec3, Vec3][];
   /** Planes where normal · point = at, in the object's frame. */
   planes?: { normal: Vec3; at: number; active?: boolean }[];
+  /** See-through copies of the object, placed by these matrices (elements) in its own frame: a Repeat preview. */
+  copies?: number[][];
 }
 
 /** An arrow that drags a planned cut along its normal (in the object's frame). */
@@ -154,7 +161,9 @@ interface SketchSession {
 export class Viewport {
   private renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
-  private camera: THREE.PerspectiveCamera;
+  private camera: THREE.PerspectiveCamera | THREE.OrthographicCamera;
+  private perspCamera: THREE.PerspectiveCamera;
+  private orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, -20000, 20000);
   private orbit: OrbitControls;
   private gizmo: TransformControls;
   private root = new THREE.Group();
@@ -162,7 +171,21 @@ export class Viewport {
   private grids = new THREE.Group();
   private raycaster = new THREE.Raycaster();
   private features = new Map<string, Feature>();
+  /** The main selected object (it carries the gizmo); `selectedIds` holds every selected one. */
   private selectedId: string | null = null;
+  private selectedIds = new Set<string>();
+  /** While dragging the gizmo with several objects selected: where each of the others started (world). */
+  private groupDrag: { start: THREE.Matrix4; others: { node: THREE.Object3D; world: THREE.Matrix4 }[] } | null = null;
+  /** Measure tool: picked points (world) with the face normal there, the drawing, and its label. */
+  private measure: { points: { p: THREE.Vector3; n: THREE.Vector3 | null }[]; group: THREE.Group; label: HTMLDivElement } | null = null;
+  /** Section view: a plane cutting everything, showing the inside. */
+  private section: { plane: THREE.Plane; axis: "x" | "y" | "z"; at: number; flip: boolean } | null = null;
+  private sectionGroup = new THREE.Group();
+  /** The print bed outline. */
+  private bedGroup = new THREE.Group();
+  /** Camera flying to fit objects in view. */
+  private viewFly: { from: THREE.Vector3; to: THREE.Vector3; fromDist: number; toDist: number; fromZoom: number; toZoom: number; start: number } | null = null;
+  private boxSelect: { x: number; y: number; el: HTMLDivElement } | null = null;
   private combined = false;
   private snap = 1;
   private sketch: SketchSession | null = null;
@@ -225,6 +248,7 @@ export class Viewport {
   readonly sketchLayer = new THREE.Group();
   private sketchGrid: THREE.Group;
   private viewCube: ViewCube;
+  private sketchWasOrtho = false;
   /** The camera swinging round to a view picked on the view cube. */
   private viewTurn: { from: THREE.Vector3; turn: THREE.Quaternion; distance: number; start: number } | null = null;
 
@@ -234,7 +258,8 @@ export class Viewport {
     container.appendChild(this.renderer.domElement);
 
     this.scene.background = new THREE.Color();
-    this.camera = new THREE.PerspectiveCamera(45, 1, 0.1, 10000);
+    this.perspCamera = new THREE.PerspectiveCamera(45, 1, 0.1, 10000);
+    this.camera = this.perspCamera;
     this.camera.position.set(70, -90, 70);
 
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x8899aa, 1.6));
@@ -242,7 +267,8 @@ export class Viewport {
     sun.position.set(100, -60, 200);
     this.scene.add(sun);
 
-    this.scene.add(this.grids, this.root);
+    this.scene.add(this.grids, this.root, this.sectionGroup, this.bedGroup);
+    this.renderer.localClippingEnabled = true;
 
     this.sketchLayer.matrixAutoUpdate = false;
     this.sketchLayer.visible = false;
@@ -263,10 +289,14 @@ export class Viewport {
       if (obj && obj === this.cutProxy) return this.followCut();
       if (obj && obj === this.pivotProxy) this.snapToPoints(obj);
       if (obj && this.gizmo.mode === "translate") this.snapToPoints(obj);
+      if (obj && this.gizmo.mode !== "scale") this.followGroupDrag(obj);
       if (obj && this.gizmo.mode === "scale") {
+        // A mirrored object's node has X scale −1; work with the size change only.
+        const flip = this.features.get(obj.userData.id)?.mirrored ? -1 : 1;
+        obj.scale.x *= flip;
         // The raw gizmo ratio is very twitchy (handles sit close to the centre), so soften it.
         // It's recomputed from the drag start on every move, so this doesn't compound.
-        obj.scale.set(Math.pow(obj.scale.x, 0.5), Math.pow(obj.scale.y, 0.5), Math.pow(obj.scale.z, 0.5));
+        obj.scale.set(Math.pow(Math.abs(obj.scale.x), 0.5), Math.pow(Math.abs(obj.scale.y), 0.5), Math.pow(Math.abs(obj.scale.z), 0.5));
         if (this.keepRatio !== this.shiftHeld) {
           // Keep proportions: every axis follows whichever one is being dragged.
           const k = [obj.scale.x, obj.scale.y, obj.scale.z].reduce((a, b) => (Math.abs(Math.log(b)) > Math.abs(Math.log(a)) ? b : a), 1);
@@ -283,19 +313,23 @@ export class Viewport {
           // Scaling happens about the origin; slide the object so the fixed face doesn't move.
           const local = new THREE.Vector3();
           local[anchor.axis] = anchor.at * (1 - obj.scale[anchor.axis]);
+          local.x *= flip; // Its own X points the other way when mirrored.
           obj.position.copy(anchor.start).add(local.applyQuaternion(obj.quaternion));
         }
         this.events.onResizing(obj.userData.id, { x: obj.scale.x, y: obj.scale.y, z: obj.scale.z });
+        obj.scale.x *= flip;
       }
     });
     this.gizmo.addEventListener("mouseDown", () => {
       this.startResizeAnchor();
       this.startPointDrag();
+      this.startGroupDrag();
     });
     this.gizmo.addEventListener("dragging-changed", (e) => {
       this.orbit.enabled = !e.value;
       if (!e.value) {
         this.commitDrag();
+        this.groupDrag = null;
         this.pointDrag = null;
         this.showSnapHint(null);
       }
@@ -326,13 +360,16 @@ export class Viewport {
 
     this.setupPointer();
     this.setupSculptPointer();
+    this.setupBoxSelect();
     new ResizeObserver(() => this.resize()).observe(container);
     this.resize();
     this.renderer.setAnimationLoop(() => {
       if (!this.sketch) {
         this.stepViewTurn();
+        this.stepViewFly();
         this.orbit.update();
       }
+      this.updateMeasureLabel();
       this.updateRulerLabels();
       this.renderer.render(this.scene, this.camera);
       this.viewCube.render(this.camera, this.orbit.target);
@@ -416,6 +453,7 @@ export class Viewport {
         const d = THREE.MathUtils.degToRad;
         node.rotation.set(d(f.rotation.x), d(f.rotation.y), d(f.rotation.z), "ZYX"); // X first, then Y, then Z.
         if (f.joint) localMatrix(f).decompose(node.position, node.quaternion, new THREE.Vector3()); // Where its joint has moved it.
+        if (f.mirrored) node.scale.x = -1; // Flipped across its own YZ plane (three.js flips the faces to match).
         node.userData.id = f.id;
         node.visible = !f.hidden; // Hiding a node hides everything inside it too.
         if (f.kind === "group") node.add(new THREE.AxesHelper(8));
@@ -493,6 +531,26 @@ export class Viewport {
       mesh.renderOrder = 20;
       mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color })));
       this.previewGroup.add(mesh);
+    }
+    // Copies (Repeat): the object's own meshes, see-through, at each place.
+    if (p.copies?.length) {
+      node.updateMatrixWorld(true);
+      const toNode = node.matrixWorld.clone().invert();
+      const parts: { geometry: THREE.BufferGeometry; matrix: THREE.Matrix4 }[] = [];
+      node.traverse((o) => {
+        if (o instanceof THREE.Mesh && o.userData.id && isShown(o)) parts.push({ geometry: o.geometry, matrix: toNode.clone().multiply(o.matrixWorld) });
+      });
+      for (const elements of p.copies) {
+        const at = new THREE.Matrix4().fromArray(elements);
+        for (const part of parts) {
+          const ghost = new THREE.Mesh(part.geometry, ghostMaterial());
+          ghost.matrixAutoUpdate = false;
+          ghost.matrix.copy(at).multiply(part.matrix);
+          ghost.userData.shared = true;
+          ghost.renderOrder = 20;
+          this.previewGroup.add(ghost);
+        }
+      }
     }
     // Cut planes, square or tilted: a sheet through the object (the one being dragged is brighter).
     const box = p.planes?.length ? this.localBox(p.id, node) : null;
@@ -698,9 +756,7 @@ export class Viewport {
   private edgeAt(e: MouseEvent): number {
     const lines = this.edgeLines();
     if (!lines) return -1;
-    const target = new THREE.Vector3().setFromMatrixPosition(lines.matrixWorld);
-    const distance = this.camera.position.distanceTo(target);
-    const pixel = (2 * distance * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2))) / this.renderer.domElement.clientHeight;
+    const pixel = this.pixelAt(new THREE.Vector3().setFromMatrixPosition(lines.matrixWorld));
     this.raycaster.setFromCamera(this.ndc(e), this.camera);
     this.raycaster.params.Line.threshold = pixel * 6;
     const hits = this.raycaster.intersectObject(lines, false);
@@ -713,8 +769,10 @@ export class Viewport {
     return -1;
   }
 
-  select(id: string | null) {
+  /** Select objects: `id` is the main one (with the gizmo), `others` are selected along with it. */
+  select(id: string | null, others: Iterable<string> = []) {
     this.selectedId = id;
+    this.selectedIds = new Set([...others, ...(id ? [id] : [])]);
     this.applyAppearance();
   }
 
@@ -728,6 +786,10 @@ export class Viewport {
     const f = this.features.get(id);
     if (!f || f.kind !== "sketch") return;
     this.exitSketch();
+    // Sketching zooms by moving the camera, so it needs the perspective camera.
+    this.sketchWasOrtho = this.orthographic;
+    if (this.sketchWasOrtho) this.setOrthographic(false);
+    this.setMeasuring(false);
     this.sketch = {
       id,
       planeKey: "",
@@ -753,6 +815,7 @@ export class Viewport {
     this.camera.lookAt(saved.target);
     this.orbit.enabled = true;
     this.viewCube.visible = true;
+    if (this.sketchWasOrtho) queueMicrotask(() => this.setOrthographic(true));
     this.grids.visible = true;
     this.sketchLayer.visible = false;
     this.applyAppearance();
@@ -799,8 +862,7 @@ export class Viewport {
   private toSketch(kind: SketchPointer["kind"], e: MouseEvent): SketchPointer | null {
     const p = this.rayToPlane(e);
     if (!p) return null;
-    const distance = this.camera.position.distanceTo(p);
-    const pixel = (2 * distance * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2))) / this.renderer.domElement.clientHeight;
+    const pixel = this.pixelAt(p);
     p.applyMatrix4(this.sketchLayer.matrix.clone().invert());
     return { kind, u: p.x, v: p.y, pixel, shift: e.shiftKey, alt: e.altKey, clientX: e.clientX, clientY: e.clientY };
   }
@@ -814,7 +876,10 @@ export class Viewport {
       const f = this.features.get(o.userData.id);
       const mat = o.material as THREE.MeshStandardMaterial;
       const isHole = f?.mode === "hole";
-      const selected = !this.combined && o.userData.id === this.selectedId;
+      const selected = !this.combined && this.selectedIds.has(o.userData.id);
+      const own = f?.color ? new THREE.Color(f.color).getHex() : COLORS.solid;
+      mat.clippingPlanes = this.section && !this.sketch ? [this.section.plane] : null;
+      for (const c of o.children) if (c instanceof THREE.LineSegments) (c.material as THREE.Material).clippingPlanes = mat.clippingPlanes;
       if (f?.kind === "plane") {
         mat.color.setHex(selected && !sketchId ? COLORS.selected : COLORS.plane);
         mat.opacity = sketchId ? 0.05 : 0.18;
@@ -822,12 +887,12 @@ export class Viewport {
       }
       if (o.userData.flat) {
         // A flat sketch's fill: faint, so it reads as a drawing rather than a solid.
-        mat.color.setHex(selected && !sketchId ? COLORS.selected : isHole ? COLORS.hole : COLORS.solid);
+        mat.color.setHex(selected && !sketchId ? COLORS.selected : isHole ? COLORS.hole : own);
         mat.opacity = sketchId ? 0.05 : selected ? 0.4 : 0.25;
         return;
       }
       const pickingThis = this.edgePick?.id === o.userData.id;
-      mat.color.setHex(pickingThis ? scenePalette().picking : selected && !sketchId && !this.sculpt ? COLORS.selected : isHole ? COLORS.hole : COLORS.solid);
+      mat.color.setHex(pickingThis ? scenePalette().picking : selected && !sketchId && !this.sculpt ? COLORS.selected : isHole ? COLORS.hole : own);
       let opacity = isHole ? 0.35 : 1;
       if (sketchId) opacity = o.userData.id === sketchId ? 0.3 : 0.1;
       mat.opacity = opacity;
@@ -835,7 +900,7 @@ export class Viewport {
       mat.depthWrite = opacity === 1;
     });
 
-    let target = !this.combined && !this.sketch && !this.edgePick && !this.sculpt && !this.placement && this.selectedId ? this.nodes.get(this.selectedId) : undefined;
+    let target = !this.combined && !this.sketch && !this.edgePick && !this.sculpt && !this.placement && !this.measure && this.selectedId ? this.nodes.get(this.selectedId) : undefined;
     if (target && !isShown(target)) target = undefined; // No gizmo on a hidden object.
     const f = target ? this.features.get(this.selectedId!) : undefined;
     this.jointDrag = null;
@@ -857,11 +922,429 @@ export class Viewport {
     else this.gizmo.detach();
     this.drawRuler();
     this.drawSnapDots();
+    this.drawSection();
   }
 
   setGizmoMode(mode: GizmoMode) {
     this.userMode = mode;
     this.applyAppearance(); // Re-attaches the gizmo (a connected object's depends on the mode).
+  }
+
+
+  // ---- Moving several objects -------------------------------------------------
+
+  /** The other selected objects that move with the gizmo (not ones inside another selected object). */
+  private groupFollowers(): THREE.Object3D[] {
+    const nodes: THREE.Object3D[] = [];
+    for (const id of this.selectedIds) {
+      if (id === this.selectedId) continue;
+      const node = this.nodes.get(id);
+      if (!node) continue;
+      // Inside a selected object: it moves with that one already.
+      let inside = false;
+      for (let p = node.parent; p; p = p.parent) if (p.userData.id && this.selectedIds.has(p.userData.id)) inside = true;
+      if (!inside) nodes.push(node);
+    }
+    return nodes;
+  }
+
+  private startGroupDrag() {
+    this.groupDrag = null;
+    const obj = this.gizmo.object;
+    if (!obj || obj.userData.id !== this.selectedId || this.gizmo.mode === "scale") return;
+    const others = this.groupFollowers();
+    if (!others.length) return;
+    this.root.updateMatrixWorld(true);
+    this.groupDrag = { start: obj.matrixWorld.clone(), others: others.map((node) => ({ node, world: node.matrixWorld.clone() })) };
+  }
+
+  /** The others follow the main object: the same move (and turn, about its origin). */
+  private followGroupDrag(obj: THREE.Object3D) {
+    const g = this.groupDrag;
+    if (!g) return;
+    obj.updateMatrixWorld(true);
+    const delta = obj.matrixWorld.clone().multiply(g.start.clone().invert());
+    for (const { node, world } of g.others) {
+      const local = (node.parent ? node.parent.matrixWorld.clone().invert() : new THREE.Matrix4()).multiply(delta.clone().multiply(world));
+      local.decompose(node.position, node.quaternion, node.scale);
+    }
+  }
+
+  // ---- Box select -------------------------------------------------------------
+
+  /** Shift-drag on empty space draws a selection box; Shift-click adds/removes one object. */
+  private setupBoxSelect() {
+    const el = this.renderer.domElement;
+    const free = () => !this.sketch && !this.placement && !this.edgePick && !this.sculpt && !this.measure && !this.combined;
+    this.container.addEventListener(
+      "pointerdown",
+      (e) => {
+        if (e.target !== el || e.button !== 0 || !(e.shiftKey || e.ctrlKey || e.metaKey) || !free() || this.gizmo.axis) return;
+        e.stopPropagation(); // Not an orbit.
+        const box = document.createElement("div");
+        box.className = "select-box";
+        box.hidden = true;
+        this.container.append(box);
+        this.boxSelect = { x: e.clientX, y: e.clientY, el: box };
+        el.setPointerCapture(e.pointerId);
+      },
+      true,
+    );
+    el.addEventListener("pointermove", (e) => {
+      const b = this.boxSelect;
+      if (!b) return;
+      const r = this.container.getBoundingClientRect();
+      const [x0, x1] = [Math.min(b.x, e.clientX), Math.max(b.x, e.clientX)];
+      const [y0, y1] = [Math.min(b.y, e.clientY), Math.max(b.y, e.clientY)];
+      b.el.hidden = x1 - x0 < 4 && y1 - y0 < 4;
+      Object.assign(b.el.style, { left: `${x0 - r.left}px`, top: `${y0 - r.top}px`, width: `${x1 - x0}px`, height: `${y1 - y0}px` });
+    });
+    el.addEventListener("pointerup", (e) => {
+      const b = this.boxSelect;
+      if (!b) return;
+      this.boxSelect = null;
+      b.el.remove();
+      if (Math.hypot(e.clientX - b.x, e.clientY - b.y) < 4) {
+        // A click: add or remove the object under it.
+        const id = this.pick(e);
+        if (id) this.events.onSelect(id, true);
+        return;
+      }
+      const rect = el.getBoundingClientRect();
+      const [x0, x1] = [Math.min(b.x, e.clientX) - rect.left, Math.max(b.x, e.clientX) - rect.left];
+      const [y0, y1] = [Math.min(b.y, e.clientY) - rect.top, Math.max(b.y, e.clientY) - rect.top];
+      const ids: string[] = [];
+      this.root.updateMatrixWorld(true);
+      for (const [id, node] of this.nodes) {
+        if (!isShown(node) || this.features.get(id)?.kind === "group") continue;
+        const box = this.localBox(id, node);
+        if (!box) continue;
+        // Inside when its middle is in the box on screen.
+        const c = box.getCenter(new THREE.Vector3()).applyMatrix4(node.matrixWorld).project(this.camera);
+        const sx = ((c.x + 1) / 2) * rect.width;
+        const sy = ((1 - c.y) / 2) * rect.height;
+        if (sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1 && c.z < 1) ids.push(id);
+      }
+      this.events.onBoxSelect(ids);
+    });
+  }
+
+  // ---- Measuring ---------------------------------------------------------------
+
+  get measuring() {
+    return !!this.measure;
+  }
+
+  /** Start (or stop) the measure tool: click two points to get the distance between them. */
+  setMeasuring(on: boolean) {
+    if (!on) {
+      if (this.measure) {
+        disposeTree(this.measure.group);
+        this.measure.group.removeFromParent();
+        this.measure.label.remove();
+      }
+      this.measure = null;
+      this.renderer.domElement.style.cursor = "";
+      this.events.onMeasure(null);
+      this.applyAppearance();
+      return;
+    }
+    if (this.measure) return;
+    const label = document.createElement("div");
+    label.className = "measure-label";
+    label.hidden = true;
+    this.container.append(label);
+    const group = new THREE.Group();
+    this.scene.add(group);
+    this.measure = { points: [], group, label };
+    this.renderer.domElement.style.cursor = "crosshair";
+    this.applyAppearance(); // No gizmo while measuring.
+  }
+
+  /** The point to measure from under the pointer: a snap point or edge vertex if one is close, else the surface. */
+  private measurePoint(e: MouseEvent): { p: THREE.Vector3; n: THREE.Vector3 | null } | null {
+    this.raycaster.setFromCamera(this.ndc(e), this.camera);
+    const hit = this.raycaster.intersectObject(this.root, true).find((h) => h.object instanceof THREE.Mesh && h.face && h.object.userData.id && isShown(h.object) && !this.previewGroup.getObjectById(h.object.id));
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const toScreen = (p: THREE.Vector3) => {
+      const v = p.clone().project(this.camera);
+      return Math.hypot(((v.x + 1) / 2) * rect.width - sx, ((1 - v.y) / 2) * rect.height - sy);
+    };
+    let best: THREE.Vector3 | null = null;
+    let bestPx = 12;
+    const candidates = (id: string, node: THREE.Object3D) => {
+      for (const p of this.snapPointsOf(id, node)) {
+        const w = p.applyMatrix4(node.matrixWorld);
+        const d = toScreen(w);
+        if (d < bestPx) [best, bestPx] = [w, d];
+      }
+      // Corners and points along the object's edges.
+      node.traverse((o) => {
+        if (!(o instanceof THREE.LineSegments) || !o.userData.groups || !isShown(o)) return;
+        const pos = o.geometry.getAttribute("position");
+        const v = new THREE.Vector3();
+        for (let i = 0; i < pos.count; i++) {
+          v.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld);
+          const d = toScreen(v);
+          if (d < bestPx - 2) [best, bestPx] = [v.clone(), d + 2];
+        }
+      });
+    };
+    const id = hit?.object.userData.id as string | undefined;
+    const node = id ? this.nodes.get(id) : undefined;
+    if (id && node) candidates(id, node);
+    const normal = hit ? (hit.normal ?? hit.face!.normal).clone().transformDirection(hit.object.matrixWorld) : null;
+    if (best) return { p: best, n: null };
+    if (hit) return { p: hit.point.clone(), n: normal };
+    // Nothing under the pointer: the ground.
+    const g = this.raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), new THREE.Vector3());
+    return g ? { p: g, n: new THREE.Vector3(0, 0, 1) } : null;
+  }
+
+  private measureClick(e: MouseEvent) {
+    const m = this.measure;
+    const pt = m && this.measurePoint(e);
+    if (!m || !pt) return;
+    if (m.points.length >= 2) m.points = [];
+    m.points.push(pt);
+    this.drawMeasure();
+  }
+
+  private drawMeasure(hover?: { p: THREE.Vector3; n: THREE.Vector3 | null } | null) {
+    const m = this.measure;
+    if (!m) return;
+    disposeTree(m.group);
+    m.group.clear();
+    const pts = [...m.points.map((x) => x.p), ...(hover && m.points.length === 1 ? [hover.p] : [])];
+    if (hover && m.points.length !== 1) pts.push(hover.p);
+    const dots = new THREE.Points(new THREE.BufferGeometry().setFromPoints(pts), DOT_MATERIALS.measure);
+    dots.renderOrder = 50;
+    m.group.add(dots);
+    if (pts.length >= 2) {
+      const [a, b] = pts;
+      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]), new THREE.LineBasicMaterial({ color: 0xff3d9a, depthTest: false, transparent: true }));
+      line.renderOrder = 50;
+      m.group.add(line);
+      // The X/Y/Z legs, faint.
+      const legs = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([a, new THREE.Vector3(b.x, a.y, a.z), new THREE.Vector3(b.x, b.y, a.z), b]),
+        new THREE.LineDashedMaterial({ color: 0xff3d9a, dashSize: 1, gapSize: 1, depthTest: false, transparent: true, opacity: 0.45 }),
+      );
+      legs.computeLineDistances();
+      legs.renderOrder = 49;
+      m.group.add(legs);
+    }
+    const final = m.points.length === 2;
+    const text = pts.length >= 2 ? this.measureText(pts[0], pts[1], final ? m.points[0].n : null, final ? m.points[1].n : null) : null;
+    m.label.hidden = !text;
+    if (text) m.label.textContent = text;
+    if (final || !hover) this.events.onMeasure(text);
+  }
+
+  private measureText(a: THREE.Vector3, b: THREE.Vector3, na: THREE.Vector3 | null, nb: THREE.Vector3 | null): string {
+    const f = (v: number) => String(Math.round(v * 100) / 100 + 0);
+    const d = b.clone().sub(a);
+    let text = `${f(d.length())} mm   ΔX ${f(Math.abs(d.x))}  ΔY ${f(Math.abs(d.y))}  ΔZ ${f(Math.abs(d.z))}`;
+    if (na && nb) {
+      // Two faces: the angle between them too (0° parallel, 90° square).
+      const angle = THREE.MathUtils.radToDeg(Math.acos(Math.min(1, Math.abs(na.dot(nb)))));
+      text += `   faces ${f(angle)}°`;
+    }
+    return text;
+  }
+
+  private updateMeasureLabel() {
+    const m = this.measure;
+    if (!m || m.label.hidden || m.group.children.length < 2) return;
+    const pos = (m.group.children[1] as THREE.Line).geometry.getAttribute("position");
+    const mid = new THREE.Vector3().fromBufferAttribute(pos, 0).add(new THREE.Vector3().fromBufferAttribute(pos, 1)).multiplyScalar(0.5).project(this.camera);
+    const { clientWidth: w, clientHeight: h } = this.renderer.domElement;
+    m.label.style.transform = `translate(${((mid.x + 1) / 2) * w}px, ${((1 - mid.y) / 2) * h}px) translate(-50%, -140%)`;
+  }
+
+  // ---- Section view -------------------------------------------------------------
+
+  /** Cut the view open with a plane square to `axis` at `at` (it hides the + side, or the − side when flipped). Null turns it off. */
+  setSection(section: { axis: "x" | "y" | "z"; at: number; flip: boolean } | null) {
+    if (!section) this.section = null;
+    else {
+      const n = new THREE.Vector3(section.axis === "x" ? 1 : 0, section.axis === "y" ? 1 : 0, section.axis === "z" ? 1 : 0).multiplyScalar(section.flip ? 1 : -1);
+      // Keeps points where n·p + constant ≥ 0.
+      const plane = new THREE.Plane(n, section.flip ? -section.at : section.at);
+      this.section = { plane, ...section };
+    }
+    this.applyAppearance();
+  }
+
+  /** Solid caps where the section cuts through objects (their insides drawn flat), and the cut's outline. */
+  private drawSection() {
+    disposeTree(this.sectionGroup);
+    this.sectionGroup.clear();
+    const s = this.section;
+    if (!s || this.sketch) return;
+    this.root.updateMatrixWorld(true);
+    this.root.traverse((o) => {
+      if (!(o instanceof THREE.Mesh) || !o.userData.id || o.userData.flat || !isShown(o)) return;
+      const f = this.features.get(o.userData.id);
+      if (!f || f.kind === "plane" || f.mode === "hole") return;
+      // Back faces seen through the cut read as a solid cap.
+      const cap = new THREE.Mesh(o.geometry, new THREE.MeshBasicMaterial({ color: 0xff8a3d, side: THREE.BackSide, clippingPlanes: [s.plane] }));
+      cap.matrixAutoUpdate = false;
+      cap.matrix.copy(o.matrixWorld);
+      cap.userData.shared = true; // The geometry belongs to the object.
+      this.sectionGroup.add(cap);
+    });
+    // The cut plane's outline across the model.
+    const box = new THREE.Box3();
+    this.root.traverse((o) => o instanceof THREE.Mesh && o.userData.id && isShown(o) && box.expandByObject(o));
+    if (box.isEmpty()) return;
+    const pad = 5;
+    box.expandByScalar(pad);
+    const [u, v] = s.axis === "x" ? ["y", "z"] : s.axis === "y" ? ["x", "z"] : ["x", "y"];
+    const corner = (a: number, b: number) => {
+      const p = new THREE.Vector3();
+      p[s.axis] = s.at;
+      p[u as "x"] = a ? box.max[u as "x"] : box.min[u as "x"];
+      p[v as "x"] = b ? box.max[v as "x"] : box.min[v as "x"];
+      return p;
+    };
+    const frame = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints([corner(0, 0), corner(1, 0), corner(1, 1), corner(0, 1)]), new THREE.LineDashedMaterial({ color: 0xff8a3d, dashSize: 2, gapSize: 1.5 }));
+    frame.computeLineDistances();
+    this.sectionGroup.add(frame);
+  }
+
+  /** The model's world bounds (shown objects), or null if there's nothing. */
+  modelBounds(onlyIds?: Set<string>): THREE.Box3 | null {
+    this.root.updateMatrixWorld(true);
+    const box = new THREE.Box3();
+    this.root.traverse((o) => {
+      if (!(o instanceof THREE.Mesh) || !isShown(o) || o.userData.flat) return;
+      const id = o.userData.id as string | undefined;
+      if (onlyIds && (!id || !onlyIds.has(id))) {
+        // Inside a selected object counts too.
+        let inside = false;
+        for (let p = o.parent; p; p = p.parent) if (p.userData.id && onlyIds.has(p.userData.id)) inside = true;
+        if (!inside) return;
+      }
+      if (!onlyIds && id && this.features.get(id)?.mode === "hole") return;
+      box.expandByObject(o);
+    });
+    return box.isEmpty() ? null : box;
+  }
+
+  // ---- Camera: fit, zoom, perspective/orthographic ---------------------------------
+
+  /** Where the camera is (world), e.g. to cut away the near side in a section view. */
+  get cameraPosition(): Vec3 {
+    const p = this.camera.position;
+    return { x: p.x, y: p.y, z: p.z };
+  }
+
+  get orthographic() {
+    return this.camera === this.orthoCamera;
+  }
+
+  /** Switch between perspective and a flat (orthographic) view, keeping what's on screen about the same size. */
+  setOrthographic(on: boolean) {
+    if (on === this.orthographic || this.sketch) return;
+    const target = this.orbit.target;
+    const from = this.camera;
+    const dist = from.position.distanceTo(target);
+    const halfFov = THREE.MathUtils.degToRad(this.perspCamera.fov / 2);
+    const to = on ? this.orthoCamera : this.perspCamera;
+    to.position.copy(from.position);
+    to.quaternion.copy(from.quaternion);
+    to.up.copy(from.up);
+    if (on) {
+      const halfH = dist * Math.tan(halfFov);
+      this.orthoFrustum(halfH);
+      this.orthoCamera.zoom = 1;
+    } else {
+      // The same view height as the flat view had.
+      const halfH = (this.orthoCamera.top - this.orthoCamera.bottom) / 2 / this.orthoCamera.zoom;
+      const d = halfH / Math.tan(halfFov);
+      to.position.copy(target).addScaledVector(from.position.clone().sub(target).normalize(), d);
+    }
+    to.updateProjectionMatrix();
+    this.camera = to;
+    this.orbit.object = to;
+    this.gizmo.camera = to;
+    this.orbit.update();
+    this.applyAppearance();
+  }
+
+  private orthoFrustum(halfH: number) {
+    const { clientWidth: w, clientHeight: h } = this.container;
+    const aspect = w && h ? w / h : 1;
+    Object.assign(this.orthoCamera, { top: halfH, bottom: -halfH, left: -halfH * aspect, right: halfH * aspect });
+    this.orthoCamera.updateProjectionMatrix();
+  }
+
+  /** Swing the view to fit the whole model, or just the selected objects. */
+  fitView(selectionOnly = false) {
+    if (this.sketch) return;
+    const box = this.modelBounds(selectionOnly && this.selectedIds.size ? this.selectedIds : undefined);
+    const sphere = box ? box.getBoundingSphere(new THREE.Sphere()) : new THREE.Sphere(new THREE.Vector3(), 60);
+    const r = Math.max(sphere.radius, 5) * 1.15;
+    const halfFov = THREE.MathUtils.degToRad(this.perspCamera.fov / 2);
+    const aspect = this.container.clientWidth / Math.max(1, this.container.clientHeight);
+    // Fit the narrower of height and width.
+    const fit = Math.min(Math.tan(halfFov), Math.tan(halfFov) * aspect);
+    const fromDist = this.camera.position.distanceTo(this.orbit.target);
+    this.viewFly = {
+      from: this.orbit.target.clone(),
+      to: sphere.center.clone(),
+      fromDist,
+      toDist: this.orthographic ? fromDist : r / fit,
+      fromZoom: this.orthoCamera.zoom,
+      toZoom: this.orthographic ? (this.orthoCamera.top * Math.min(1, aspect)) / r : this.orthoCamera.zoom,
+      start: performance.now(),
+    };
+  }
+
+  private stepViewFly() {
+    const v = this.viewFly;
+    if (!v) return;
+    const t = Math.min(1, (performance.now() - v.start) / 350);
+    const k = t * t * (3 - 2 * t);
+    const dir = this.camera.position.clone().sub(this.orbit.target).normalize();
+    this.orbit.target.lerpVectors(v.from, v.to, k);
+    this.camera.position.copy(this.orbit.target).addScaledVector(dir, v.fromDist + (v.toDist - v.fromDist) * k);
+    if (this.orthographic) {
+      this.orthoCamera.zoom = v.fromZoom + (v.toZoom - v.fromZoom) * k;
+      this.orthoCamera.updateProjectionMatrix();
+    }
+    if (t >= 1) this.viewFly = null;
+  }
+
+  /** World size of one screen pixel at a point (for pick tolerances). */
+  private pixelAt(p: THREE.Vector3): number {
+    const h = this.renderer.domElement.clientHeight || 1;
+    if (this.camera instanceof THREE.OrthographicCamera) return (this.camera.top - this.camera.bottom) / this.camera.zoom / h;
+    return (2 * this.camera.position.distanceTo(p) * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2))) / h;
+  }
+
+  // ---- Print bed -------------------------------------------------------------------
+
+  /** Outline the printer's bed (centred on the origin) and its build height; null hides it. */
+  setBed(bed: { width: number; depth: number; height: number } | null) {
+    disposeTree(this.bedGroup);
+    this.bedGroup.clear();
+    if (!bed) return;
+    const { width: w, depth: d, height: h } = bed;
+    const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
+    const base = [V(-w / 2, -d / 2, 0), V(w / 2, -d / 2, 0), V(w / 2, d / 2, 0), V(-w / 2, d / 2, 0)];
+    const plate = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(base), new THREE.LineBasicMaterial({ color: 0x3e7bfa }));
+    const top = base.map((p) => p.clone().setZ(h));
+    const posts = base.flatMap((p, i) => [p, top[i]]);
+    const upper = top.flatMap((p, i) => [p, top[(i + 1) % 4]]);
+    const frame = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints([...posts, ...upper]), new THREE.LineDashedMaterial({ color: 0x3e7bfa, dashSize: 3, gapSize: 3, transparent: true, opacity: 0.35 }));
+    frame.computeLineDistances();
+    const fill = new THREE.Mesh(new THREE.PlaneGeometry(w, d), new THREE.MeshBasicMaterial({ color: 0x3e7bfa, transparent: true, opacity: 0.05, depthWrite: false }));
+    fill.position.z = -0.02;
+    this.bedGroup.add(plate, frame, fill);
   }
 
   // ---- Split handle ----------------------------------------------------------
@@ -1032,7 +1515,8 @@ export class Viewport {
     if (source) {
       // A see-through copy of the object as it looks now.
       source.updateMatrixWorld(true);
-      const toLocal = source.matrixWorld.clone().invert();
+      // The ghost is placed without the mirror, so its copy carries the flip itself.
+      const toLocal = source.matrixWorld.clone().multiply(new THREE.Matrix4().makeScale(f.mirrored ? -1 : 1, 1, 1)).invert();
       source.traverse((o) => {
         if (!(o instanceof THREE.Mesh) || !o.userData.id || !isShown(o)) return;
         const copy = new THREE.Mesh(o.geometry.clone(), ghostMaterial());
@@ -1269,6 +1753,7 @@ export class Viewport {
     const selected = this.selectedId ? this.nodes.get(this.selectedId) : undefined;
     if (!this.showsSnapPoints() || !this.showPoints || !selected) return;
     const moving = this.movingIds(selected);
+    for (const n of this.groupFollowers()) this.movingIds(n).forEach((x) => moving.add(x));
     for (const [id, node] of this.nodes) {
       const own = id === this.selectedId;
       // Groups only get dots when they're the thing being moved; otherwise their children have them.
@@ -1289,6 +1774,7 @@ export class Viewport {
     if (!obj || obj === this.jointProxy || obj === this.cutProxy || !this.showsSnapPoints()) return;
     this.root.updateMatrixWorld(true);
     const moving = this.movingIds(obj);
+    for (const n of this.groupFollowers()) this.movingIds(n).forEach((x) => moving.add(x));
     const targets: THREE.Vector3[] = [];
     for (const [id, node] of this.nodes) {
       if (moving.has(id) || this.features.get(id)?.kind === "group" || !isShown(node)) continue;
@@ -1449,6 +1935,7 @@ export class Viewport {
     // Each axis has a handle on both ends; the grab point says which end this is.
     // pointStart (grab point relative to the object, world axes) is set by the gizmo but not in its types.
     const grab = (this.gizmo as unknown as { pointStart: THREE.Vector3 }).pointStart.clone().applyQuaternion(obj.getWorldQuaternion(new THREE.Quaternion()).invert());
+    if (this.features.get(obj.userData.id)?.mirrored) grab.x = -grab.x; // Into its own (flipped) frame.
     const at = grab[axis] >= 0 ? box.min[axis] : box.max[axis];
     this.resizeAnchor = { axis, at, start: obj.position.clone() };
   }
@@ -1471,14 +1958,15 @@ export class Viewport {
     }
     if (this.gizmo.mode === "scale") {
       // Sizes are baked into the object's dimensions, so the node itself never stays stretched.
-      const s = { x: obj.scale.x, y: obj.scale.y, z: obj.scale.z };
+      const flip = this.features.get(obj.userData.id)?.mirrored ? -1 : 1;
+      const s = { x: Math.abs(obj.scale.x), y: obj.scale.y, z: obj.scale.z };
       const anchor = this.resizeAnchor;
       this.resizeAnchor = null;
-      obj.scale.set(1, 1, 1);
+      obj.scale.set(flip, 1, 1);
       if (anchor) obj.position.copy(anchor.start);
       if (Math.abs(s.x - 1) > 1e-4 || Math.abs(s.y - 1) > 1e-4 || Math.abs(s.z - 1) > 1e-4) {
         const dir = new THREE.Vector3();
-        dir[anchor?.axis ?? "x"] = 1;
+        dir[anchor?.axis ?? "x"] = anchor?.axis === "x" ? flip : 1;
         dir.applyQuaternion(obj.quaternion);
         this.events.onResized(obj.userData.id, s, anchor ? { axis: anchor.axis, at: anchor.at, dir: { x: dir.x, y: dir.y, z: dir.z } } : undefined);
       }
@@ -1531,6 +2019,10 @@ export class Viewport {
         if (!e.buttons) this.placementHover(e.clientX, e.clientY);
         return;
       }
+      if (this.measure && !e.buttons) {
+        this.drawMeasure(this.measure.points.length < 2 ? this.measurePoint(e) : null);
+        return;
+      }
       if (this.edgePick) {
         const g = e.buttons ? -1 : this.edgeAt(e);
         if (g !== this.hoverEdge) {
@@ -1579,6 +2071,7 @@ export class Viewport {
       // Ignore drags (orbiting) and clicks that land on the gizmo.
       if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4 || this.gizmo.dragging || this.gizmo.axis) return;
       if (e.button !== 0 || this.sculpt) return;
+      if (this.measure) return this.measureClick(e);
       if (this.edgePick) {
         const g = this.edgeAt(e);
         const lines = this.edgeLines();
@@ -1590,7 +2083,7 @@ export class Viewport {
         return;
       }
       const id = this.combined ? null : this.pick(e);
-      this.events.onSelect(id);
+      this.events.onSelect(id, e.shiftKey || e.ctrlKey || e.metaKey);
     });
 
     el.addEventListener("dblclick", (e) => {
@@ -1624,8 +2117,9 @@ export class Viewport {
     const { clientWidth: w, clientHeight: h } = this.container;
     if (!w || !h) return;
     this.renderer.setSize(w, h);
-    this.camera.aspect = w / h;
-    this.camera.updateProjectionMatrix();
+    this.perspCamera.aspect = w / h;
+    this.perspCamera.updateProjectionMatrix();
+    this.orthoFrustum((this.orthoCamera.top - this.orthoCamera.bottom) / 2 || 60);
   }
 }
 
@@ -1773,6 +2267,7 @@ const DOT_MATERIALS = (() => {
     own: dot(0x8c8c8c, 7, 0.9, plain),
     other: dot(0xbdbdbd, 7, 0.6),
     match: dot(0xff3d9a, 14),
+    measure: dot(0xff3d9a, 11),
     guide: new THREE.LineDashedMaterial({ color: 0xff3d9a, dashSize: 1.5, gapSize: 1, depthTest: false, transparent: true }),
   };
 })();
@@ -1780,7 +2275,7 @@ const DOT_MATERIALS = (() => {
 function disposeTree(obj: THREE.Object3D) {
   obj.traverse((o) => {
     if (o instanceof THREE.Mesh || o instanceof THREE.Line) {
-      o.geometry.dispose();
+      if (!o.userData.shared) o.geometry.dispose();
       (o.material as THREE.Material).dispose();
     }
   });

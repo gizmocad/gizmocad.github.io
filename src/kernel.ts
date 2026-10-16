@@ -16,6 +16,8 @@ export interface MeshData {
 export type KernelRequest =
   | { type: "build"; requestId: number; features: Feature[]; combined: boolean }
   | { type: "export"; requestId: number; features: Feature[]; format: "stl" | "step" }
+  /** One finished mesh per top-level object, in world coordinates (for 3MF). */
+  | { type: "parts"; requestId: number; features: Feature[] }
   /** `preview`: the normal display mesh (cached, so building the same shape next is instant). */
   | { type: "meshOf"; requestId: number; features: Feature[]; id: string; preview?: boolean };
 
@@ -24,6 +26,7 @@ export type KernelResponse =
   | { type: "built"; requestId: number; meshes: MeshData[]; errors: Record<string, string>; adjusted: Record<string, number> }
   | { type: "exported"; requestId: number; blob: Blob }
   | { type: "mesh"; requestId: number; mesh: MeshData | null }
+  | { type: "parts"; requestId: number; parts: MeshData[] }
   | { type: "error"; requestId: number; message: string };
 
 export interface BuildResult {
@@ -55,6 +58,7 @@ export class Kernel {
         if (msg.type === "error") p.reject(new Error(msg.message));
         else if (msg.type === "built") p.resolve({ meshes: msg.meshes, errors: msg.errors, adjusted: msg.adjusted } as never);
         else if (msg.type === "mesh") p.resolve(msg.mesh as never);
+        else if (msg.type === "parts") p.resolve(msg.parts as never);
         else p.resolve(msg.blob as never);
       };
     });
@@ -80,6 +84,11 @@ export class Kernel {
    */
   meshOf(features: Feature[], id: string, preview = false): Promise<MeshData | null> {
     return this.request({ type: "meshOf", features, id, preview });
+  }
+
+  /** Each top-level object's finished mesh (world coordinates), with top-level holes cut from it. */
+  parts(features: Feature[]): Promise<MeshData[]> {
+    return this.request({ type: "parts", features });
   }
 
   export(features: Feature[], format: "stl" | "step"): Promise<Blob> {

@@ -4,7 +4,8 @@
 // Everything is drawn into the viewport's sketch layer in sketch coordinates.
 
 import * as THREE from "three";
-import { newId, type EntityMode, type Point2, type SketchEntity } from "./model";
+import { newId, type EntityMode, type Point2, type SketchConstraint, type SketchEntity, type SketchRef } from "./model";
+import { CONSTRAINT_GLYPH, constraintAnchor, refAt, refGeometry } from "./constraints";
 import {
   bounds,
   canSplit,
@@ -30,7 +31,7 @@ import {
 import { scenePalette } from "./theme";
 import type { SketchPointer } from "./viewport";
 
-export type SketchTool = "select" | "point" | "line" | "rect" | "circle" | "ellipse" | "ngon" | "slot" | "polygon" | "spline" | "brush" | "split" | "trim";
+export type SketchTool = "select" | "point" | "line" | "rect" | "circle" | "ellipse" | "ngon" | "slot" | "polygon" | "spline" | "brush" | "split" | "trim" | "constrain";
 
 export interface MenuItem {
   label: string;
@@ -41,6 +42,8 @@ export interface MenuItem {
 
 export interface SketchHost {
   entities(): SketchEntity[];
+  /** The sketch's constraints (dimensions and rules), for drawing their labels. */
+  constraints(): SketchConstraint[];
   /** Apply an undoable change to the sketch's entities. */
   commit(mutate: (entities: SketchEntity[]) => void): void;
   /** Tool, selection or cursor changed; refresh any UI that shows them. */
@@ -67,6 +70,7 @@ const COLOR = {
   snap: 0xf09a2a,
   axisU: 0xd65a5a,
   axisV: 0x3fae6a,
+  dimension: 0x7a5af8,
 };
 
 /** Tools that are drawn with two points (drag, or click twice). */
@@ -88,6 +92,8 @@ export class SketchEditor {
   private brushing: P[] | null = null;
   selected = new Set<string>();
   cursor: P | null = null;
+  /** Constrain tool: the points/edges/circles clicked so far (at most two). */
+  picked: SketchRef[] = [];
 
   private content = new THREE.Group();
   /** Start point for two-point tools, or points placed so far for polygon/curve. */
@@ -113,6 +119,7 @@ export class SketchEditor {
 
   setTool(tool: SketchTool) {
     this.tool = tool;
+    this.picked = [];
     this.drawing = [];
     this.drag = null;
     this.render();
@@ -125,6 +132,9 @@ export class SketchEditor {
       this.drawing = [];
       this.drag = null;
       this.brushing = null;
+    } else if (this.picked.length) {
+      this.picked = [];
+      this.host.changed();
     } else if (this.selected.size) {
       this.selected.clear();
       this.host.changed();
@@ -211,6 +221,19 @@ export class SketchEditor {
     if (this.tool === "polygon" || this.tool === "spline") return this.handleMultiPoint(e.kind, p);
     if (this.tool === "split") {
       if (e.kind === "down") this.splitUnder(raw, e.pixel);
+      return;
+    }
+    if (this.tool === "constrain") {
+      if (e.kind === "down") {
+        // Click points, edges or circles to pick them (again to unpick); the panel offers what fits.
+        const ref = refAt(this.host.entities(), raw, 8 * e.pixel);
+        const same = (r: SketchRef) => ref && r.entity === ref.entity && r.kind === ref.kind && r.index === ref.index;
+        if (!ref) this.picked = [];
+        else if (this.picked.some(same)) this.picked = this.picked.filter((r) => !same(r));
+        else this.picked = [...this.picked.slice(-1), ref];
+        this.render();
+        this.host.changed();
+      }
       return;
     }
     if (this.tool === "trim") {
@@ -499,7 +522,8 @@ export class SketchEditor {
   private clearContent() {
     for (const child of [...this.content.children]) {
       this.content.remove(child);
-      if (child instanceof THREE.Line || child instanceof THREE.Points || child instanceof THREE.Mesh) {
+      if (child instanceof THREE.Sprite) child.material.dispose(); // Its texture is shared (cached).
+      else if (child instanceof THREE.Line || child instanceof THREE.Points || child instanceof THREE.Mesh) {
         child.geometry.dispose();
         (child.material as THREE.Material).dispose();
       }
@@ -530,6 +554,8 @@ export class SketchEditor {
       else this.addLine(pts, color, isClosed(e), { dashed: e.mode === "construction" });
       if (selected && this.selected.size <= 20) this.addHandles(e);
     }
+
+    this.drawConstraints();
 
     // Box selection.
     if (drag?.kind === "box") {
@@ -577,6 +603,49 @@ export class SketchEditor {
       this.addLine([[c[0] - s, c[1]], [c[0] + s, c[1]]], COLOR.selected, false);
       this.addLine([[c[0], c[1] - s], [c[0], c[1] + s]], COLOR.selected, false);
     }
+  }
+
+  /** Each constraint's symbol (or a dimension's value) by its geometry, and the Constrain tool's picks. */
+  private drawConstraints() {
+    const entities = this.host.entities();
+    const constraints = this.host.constraints();
+    // Several labels on the same spot (e.g. Horizontal and a Length on one line) stack up instead of hiding each other.
+    const used = new Map<string, number>();
+    for (const c of constraints) {
+      const at = constraintAnchor(c, entities);
+      if (!at) continue;
+      const key = `${Math.round(at[0] * 10)},${Math.round(at[1] * 10)}`;
+      const stack = used.get(key) ?? 0;
+      used.set(key, stack + 1);
+      const value = c.value !== undefined && ["distance", "length", "diameter", "angle"].includes(c.type);
+      const text = value ? `${c.type === "diameter" ? "Ø" : ""}${Math.round(c.value! * 100) / 100}${c.type === "angle" ? "°" : ""}` : CONSTRAINT_GLYPH[c.type];
+      // A distance between two points gets a dimension line.
+      if (c.type === "distance" && c.refs.length === 2) {
+        const [a, b] = c.refs.map((r) => refGeometry(r, entities));
+        if (a?.kind === "point" && b?.kind === "point") this.addLine([a.p, b.p], COLOR.dimension, false, { dashed: true });
+      }
+      this.addLabel(text, at, value, stack);
+    }
+    for (const ref of this.picked) {
+      const g = refGeometry(ref, entities);
+      if (!g) continue;
+      if (g.kind === "point") this.addPoints([g.p], COLOR.snap, 13);
+      else if (g.kind === "edge") {
+        this.addLine([g.a, g.b], COLOR.snap, false);
+        this.addPoints([g.a, g.b], COLOR.snap, 6);
+      } else this.addLine(outline({ id: "", mode: "add", type: "circle", x: g.c[0], y: g.c[1], radius: g.r }), COLOR.snap, true);
+    }
+  }
+
+  private addLabel(text: string, at: P, dimension: boolean, stack = 0) {
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: labelTexture(text, dimension), depthTest: false, sizeAttenuation: false }));
+    const tex = sprite.material.map!;
+    const aspect = (tex.image as HTMLCanvasElement).width / (tex.image as HTMLCanvasElement).height;
+    sprite.scale.set(0.032 * aspect, 0.032, 1);
+    sprite.center.set(-0.1, -0.2 - 1.15 * stack); // Just above and right of the anchor, clear of the line (stacked upwards).
+    sprite.position.set(at[0], at[1], 0);
+    sprite.renderOrder = 12;
+    this.content.add(sprite);
   }
 
   private previewEntity(a: P, b: P): SketchEntity | null {
@@ -638,6 +707,33 @@ export class SketchEditor {
     const ring = Array.from({ length: 24 }, (_, i) => [p[0] + r * Math.cos((i / 24) * Math.PI * 2), p[1] + r * Math.sin((i / 24) * Math.PI * 2)] as P);
     this.addLine(ring, color, true);
   }
+}
+
+/** Constraint labels as small badges; cached, since the sketch redraws on every pointer move. */
+const labelCache = new Map<string, THREE.CanvasTexture>();
+function labelTexture(text: string, dimension: boolean): THREE.CanvasTexture {
+  const key = `${dimension}|${text}`;
+  const hit = labelCache.get(key);
+  if (hit) return hit;
+  const c = document.createElement("canvas");
+  const g = c.getContext("2d")!;
+  const font = "600 28px system-ui, sans-serif";
+  g.font = font;
+  c.width = Math.ceil(g.measureText(text).width) + 20;
+  c.height = 40;
+  g.font = font;
+  g.fillStyle = dimension ? "#7a5af8" : "#f09a2a";
+  g.beginPath();
+  g.roundRect(1, 1, c.width - 2, c.height - 2, 9);
+  g.fill();
+  g.fillStyle = "#fff";
+  g.textAlign = "center";
+  g.textBaseline = "middle";
+  g.fillText(text, c.width / 2, c.height / 2 + 1);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  labelCache.set(key, tex);
+  return tex;
 }
 
 function dedupe(points: P[]): P[] {

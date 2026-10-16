@@ -24,10 +24,13 @@
           <button id="new" role="menuitem">New</button>
           <button id="open" role="menuitem">Open…</button>
           <button id="save" role="menuitem">Save</button>
+          <button id="import" role="menuitem">Import… <span class="note">STL, SVG</span></button>
           <hr />
           <button id="export-stl" role="menuitem">Export STL <span class="note">3D printing</span></button>
+          <button id="export-3mf" role="menuitem">Export 3MF <span class="note">slicers, with colours</span></button>
           <button id="export-step" role="menuitem">Export STEP <span class="note">other CAD</span></button>
           <hr />
+          <label class="menu-field" title="Shows your printer's bed in the view and warns when the model doesn't fit">Print bed <select id="bed"></select></label>
           <button id="theme" role="menuitem" title="Theme: follow system, light or dark"></button>
         </div>
       </div>
@@ -68,6 +71,7 @@
         <label class="toggle"><input type="checkbox" id="combined" /> Show result</label>
       </div>
       <input type="file" id="file-input" accept=".gizmocad,.mintcad,.json" hidden />
+      <input type="file" id="import-input" hidden />
     </header>
 
     <aside class="panel left">
@@ -86,6 +90,8 @@
         <button data-add="gear" title="Spur gear"><span class="ico gear">⚙</span>Gear</button>
         <button data-add="spring" title="Coil spring"><span class="ico spring"></span>Spring</button>
         <button data-add="star"><span class="ico star"></span>Star</button>
+        <button data-add="text" title="Raised or engraved lettering"><span class="ico text">T</span>Text</button>
+        <button data-add="screw" title="A hole for a metric screw (M2–M10), with counterbore or countersink"><span class="ico screw">⊚</span>Screw hole</button>
         <button data-add="sketch"><span class="ico sketch">✎</span>Sketch</button>
         <button data-add="group"><span class="ico group">▤</span>Group</button>
         <button data-add="plane"><span class="ico plane">◇</span>Plane</button>
@@ -95,7 +101,35 @@
       <ul id="object-list"></ul>
     </aside>
 
-    <main id="viewport"><div id="status">Loading geometry kernel…</div></main>
+    <main id="viewport">
+      <div id="status">Loading geometry kernel…</div>
+      <div class="view-tools">
+        <button id="fit-all" title="Fit the whole model in view (Home)">⌂</button>
+        <button id="fit-selected" title="Zoom to the selection (.)">⊙</button>
+        <button id="ortho" title="Switch between a 3D (perspective) and a flat (orthographic) view (O)">3D</button>
+        <button id="section" class="toggle-btn" title="Section view: cut the model open to see inside">◧</button>
+        <button id="measure" class="toggle-btn" title="Measure distances and angles (M)">📏</button>
+      </div>
+      <div id="section-panel" class="float-panel section-panel" hidden>
+        <strong>Section</strong>
+        <div class="segmented">
+          <button data-section-axis="x">X</button><button data-section-axis="y">Y</button><button data-section-axis="z">Z</button>
+        </div>
+        <input type="range" id="section-at" aria-label="Where the cut is" />
+        <span id="section-value"></span>
+        <button id="section-flip" title="Cut away the other side">⇄</button>
+        <button id="section-close" title="Close the section view">✕</button>
+      </div>
+      <div id="bed-warning" hidden></div>
+      <div id="history" class="history">
+        <button id="history-toggle" class="history-title" title="Show or hide the history">History</button>
+        <span id="history-count"></span>
+        <button id="history-back" title="Roll back one step: see the model as it was before the last step">◀</button>
+        <button id="history-forward" title="Roll forward one step">▶</button>
+        <button id="history-end" title="Back to the latest step">⏭</button>
+        <div id="history-steps"></div>
+      </div>
+    </main>
 
     <aside class="panel right" id="properties">
       <p class="hint">Select a shape to edit its exact dimensions.</p>
