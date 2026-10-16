@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+    <title>GizmoCAD</title>
+    <script>
+      // Apply a saved light/dark choice before first paint (theme.ts takes over after).
+      try {
+        const t = localStorage.getItem("gizmocad.theme");
+        if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+      } catch {}
+    </script>
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <header class="toolbar">
+      <div class="app-menu-wrap">
+        <button class="brand" id="app-menu-button" aria-haspopup="menu" aria-expanded="false" title="File, export and theme">
+          <img src="./icon.svg" alt="" /> GizmoCAD <span class="caret">▾</span>
+        </button>
+        <div class="app-menu" id="app-menu" role="menu" hidden>
+          <button id="new" role="menuitem">New</button>
+          <button id="open" role="menuitem">Open…</button>
+          <button id="save" role="menuitem">Save</button>
+          <hr />
+          <button id="export-stl" role="menuitem">Export STL <span class="note">3D printing</span></button>
+          <button id="export-step" role="menuitem">Export STEP <span class="note">other CAD</span></button>
+          <hr />
+          <button id="theme" role="menuitem" title="Theme: follow system, light or dark"></button>
+        </div>
+      </div>
+      <div class="group">
+        <button id="undo" title="Undo (Ctrl+Z)">Undo</button>
+        <button id="redo" title="Redo (Ctrl+Shift+Z)">Redo</button>
+      </div>
+      <div class="group segmented gizmo-mode">
+        <button data-gizmo="translate" class="active" title="Move objects (W)">Move</button>
+        <button data-gizmo="rotate" title="Rotate objects (E)">Rotate</button>
+        <button data-gizmo="scale" title="Resize objects (R): drag an axis handle, or the centre to resize evenly">Resize</button>
+        <button data-gizmo="joint" title="Turn it on its connection (J)" hidden>Spin</button>
+        <button data-gizmo="pivot" title="Move the connection's pivot (P); the object stays where it is" hidden>Pivot</button>
+      </div>
+      <button id="snap-face" class="toggle-btn" title="Move the selected object onto another object's face (F): click a face, or the grid">Onto face</button>
+      <button id="keep-ratio" class="toggle-btn" title="Resize keeps proportions: every axis changes together. Hold Shift while dragging to flip this.">Keep ratio</button>
+      <button id="one-side" class="toggle-btn" aria-pressed="false" title="Resize only the side whose handle you drag: the opposite face stays where it is">One side</button>
+      <div class="group" id="points-option">
+        <label title="Snap points (corners, edge middles, face centres) shown while moving: objects snap onto each other's points">Points
+          <select id="point-snap">
+            <option value="show" selected>Show + snap</option>
+            <option value="hidden">Snap, hidden</option>
+            <option value="off">Off</option>
+          </select>
+        </label>
+      </div>
+      <div class="group">
+        <label>Snap
+          <select id="snap">
+            <option value="0">Off</option>
+            <option value="0.1">0.1 mm</option>
+            <option value="0.5">0.5 mm</option>
+            <option value="1" selected>1 mm</option>
+            <option value="5">5 mm</option>
+            <option value="10">10 mm</option>
+          </select>
+        </label>
+        <label class="toggle"><input type="checkbox" id="combined" /> Show result</label>
+      </div>
+      <input type="file" id="file-input" accept=".gizmocad,.mintcad,.json" hidden />
+    </header>
+
+    <aside class="panel left">
+      <h2>Add shape</h2>
+      <div class="shape-buttons">
+        <button data-add="box"><span class="ico box"></span>Box</button>
+        <button data-add="cylinder"><span class="ico cylinder"></span>Cylinder</button>
+        <button data-add="sphere"><span class="ico sphere"></span>Sphere</button>
+        <button data-add="cone"><span class="ico cone"></span>Cone</button>
+        <button data-add="tube"><span class="ico tube"></span>Tube</button>
+        <button data-add="torus"><span class="ico torus"></span>Ring</button>
+        <button data-add="wedge"><span class="ico wedge"></span>Wedge</button>
+        <button data-add="pyramid"><span class="ico pyramid"></span>Pyramid</button>
+        <button data-add="prism"><span class="ico prism"></span>Prism</button>
+        <button data-add="thread" title="Threaded rod (make it a Hole for a threaded hole)"><span class="ico thread"></span>Thread</button>
+        <button data-add="gear" title="Spur gear"><span class="ico gear">⚙</span>Gear</button>
+        <button data-add="spring" title="Coil spring"><span class="ico spring"></span>Spring</button>
+        <button data-add="star"><span class="ico star"></span>Star</button>
+        <button data-add="sketch"><span class="ico sketch">✎</span>Sketch</button>
+        <button data-add="group"><span class="ico group">▤</span>Group</button>
+        <button data-add="plane"><span class="ico plane">◇</span>Plane</button>
+        <button data-add="sculpt"><span class="ico sculpt">✋</span>Sculpt</button>
+      </div>
+      <h2>Objects</h2>
+      <ul id="object-list"></ul>
+    </aside>
+
+    <main id="viewport"><div id="status">Loading geometry kernel…</div></main>
+
+    <aside class="panel right" id="properties">
+      <p class="hint">Select a shape to edit its exact dimensions.</p>
+    </aside>
+
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>
