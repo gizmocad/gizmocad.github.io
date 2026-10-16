@@ -302,15 +302,19 @@ export const PLANE_ROTATIONS: Record<SketchPlane, { axis: [number, number, numbe
 
 // ---- Edge finishing ------------------------------------------------------
 
-export type EdgeOpType = "fillet" | "chamfer";
+export type EdgeOpType = "fillet" | "chamfer" | "bevel";
 /** Which edges an operation rounds or bevels. "picked" uses the clicked edges in `points`. */
 export type EdgeTarget = "all" | "top" | "bottom" | "vertical" | "picked";
 
 export interface EdgeOp {
   id: string;
   type: EdgeOpType;
-  /** Fillet radius or chamfer distance. */
+  /** Fillet radius, chamfer distance, or a bevel's distance along its flatter face. */
   size: number;
+  /** Bevel only: the cut's angle from that face, in degrees (45 is a plain chamfer). */
+  angle?: number;
+  /** Bevel only: measure from the other face at each edge instead. */
+  flip?: boolean;
   target: EdgeTarget;
   /** A point on each picked edge, in the feature's local frame. */
   points: [number, number, number][];

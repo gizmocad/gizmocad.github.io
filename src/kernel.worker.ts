@@ -2,7 +2,7 @@
 
 import opencascade from "replicad-opencascadejs";
 import wasmUrl from "replicad-opencascadejs/wasm?url";
-import { assembleWire, cast, draw, drawCircle, drawEllipse, drawText, genericSweep, getOC, loadFont, makeBaseBox, makeBox, makeCircle, makeCylinder, makeHelix, makeLine, makeEllipsoid, makePolygon, makeSolid, makeSphere, setOC, type Drawing, type Shape3D } from "replicad";
+import { EdgeFinder, assembleWire, cast, draw, drawCircle, drawEllipse, drawText, genericSweep, getOC, loadFont, makeBaseBox, makeBox, makeCircle, makeCylinder, makeHelix, makeLine, makeEllipsoid, makePolygon, makeSolid, makeSphere, setOC, type Drawing, type Shape3D } from "replicad";
 import {
   PLANE_ROTATIONS,
   SCREW_SIZES,
@@ -185,11 +185,42 @@ let adjusted: Record<string, number> = {};
 function tryEdgeOp(shape: Shape3D, op: EdgeOp, size: number): Shape3D | null {
   try {
     const filter = edgeFilter(shape, op);
-    const result = op.type === "fillet" ? shape.fillet(size, filter) : shape.chamfer(size, filter);
+    const result = op.type === "fillet" ? shape.fillet(size, filter) : op.type === "bevel" ? bevel(shape, op, size, filter) : shape.chamfer(size, filter);
     return isValidShape(result) ? result : null;
   } catch (err) {
     if (err instanceof Error && /no edge/i.test(err.message)) throw err;
     return null;
+  }
+}
+
+/**
+ * An uneven chamfer: `size` along one face at each edge and the cut at `angle`
+ * from it. That face is the flatter of the edge's two (the top or bottom, on
+ * most parts), or the other one when the op is flipped.
+ */
+function bevel(shape: Shape3D, op: EdgeOp, size: number, filter: EdgeFilter | undefined): Shape3D {
+  const edges = filter ? filter(new EdgeFinder(), shape).find(shape) : shape.edges;
+  if (!edges.length) throw new Error("No edge matches.");
+  const angle = Math.min(89, Math.max(1, op.angle ?? 45));
+  const faces = shape.faces;
+  const oc = getOC() as unknown as {
+    BRepFilletAPI_MakeChamfer: new (s: unknown) => { AddDA(d: number, a: number, e: unknown, f: unknown): void; Shape(): unknown; IsDone(): boolean; delete(): void };
+  };
+  const builder = new oc.BRepFilletAPI_MakeChamfer((shape as unknown as { wrapped: unknown }).wrapped);
+  try {
+    for (const edge of edges) {
+      const mid = edge.pointAt(0.5);
+      const touching = faces.filter((face) => face.edges.some((e) => e.isSame(edge)));
+      if (touching.length < 2) continue; // A seam or open edge: nothing to bevel between.
+      const flatness = (face: (typeof faces)[number]) => Math.abs(face.normalAt(mid).z);
+      const [a, b] = touching;
+      let face = flatness(b) > flatness(a) + 1e-6 ? b : a;
+      if (op.flip) face = face === a ? b : a;
+      builder.AddDA(size, (angle * Math.PI) / 180, (edge as unknown as { wrapped: unknown }).wrapped, (face as unknown as { wrapped: unknown }).wrapped);
+    }
+    return cast(builder.Shape() as never) as Shape3D;
+  } finally {
+    builder.delete();
   }
 }
 
@@ -221,7 +252,7 @@ function applyEdgeOps(shape: Shape3D, ops: EdgeOp[]): Shape3D {
     try {
       shape = safeEdgeOp(shape, op);
     } catch {
-      const label = `${op.type === "fillet" ? "Fillet" : "Chamfer"} ${i + 1}`;
+      const label = `${op.type === "fillet" ? "Fillet" : op.type === "bevel" ? "Bevel" : "Chamfer"} ${i + 1}`;
       throw new Error(`${label}: its edges no longer exist; pick them again.`);
     }
   }

@@ -2079,8 +2079,20 @@ const TARGETS: { value: EdgeTarget; label: string }[] = [
   { value: "picked", label: "Picked edges" },
 ];
 
+/** A checkbox with its label. */
+function checkToggle(label: string, on: boolean, onChange: (on: boolean) => void) {
+  const row = document.createElement("label");
+  row.className = "toggle";
+  const check = document.createElement("input");
+  check.type = "checkbox";
+  check.checked = on;
+  check.onchange = () => onChange(check.checked);
+  row.append(check, ` ${label}`);
+  return row;
+}
+
 function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
-  const items: HTMLElement[] = [section("Edges: fillet & chamfer")];
+  const items: HTMLElement[] = [section("Edges: fillet, chamfer & bevel")];
   const setOp = (opId: string, mutate: (op: EdgeOp) => void) =>
     update((t) => {
       const op = t.edgeOps.find((o) => o.id === opId);
@@ -2097,7 +2109,8 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
       segmented(
         [
           { value: "fillet", label: "◜ Fillet", title: "Round the edges" },
-          { value: "chamfer", label: "◸ Chamfer", title: "Bevel the edges with a flat cut" },
+          { value: "chamfer", label: "◸ Chamfer", title: "Cut the edges flat at 45°" },
+          { value: "bevel", label: "◺ Bevel", title: "Cut the edges flat at any angle: a distance along the flatter face, and the cut's angle from it" },
         ],
         op.type,
         (v) => setOp(op.id, (o) => (o.type = v)),
@@ -2118,7 +2131,14 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
       if (value === "picked" && !op.points.length) startEdgePick(f.id, op.id);
     };
 
-    box.append(head, lengthField(op.type === "fillet" ? "Radius" : "Distance", op.size, (v) => setOp(op.id, (o) => (o.size = v)), { min: 0 }), labeled("Edges", target));
+    box.append(head, lengthField(op.type === "fillet" ? "Radius" : "Distance", op.size, (v) => setOp(op.id, (o) => (o.size = v)), { min: 0 }));
+    if (op.type === "bevel") {
+      box.append(
+        lengthField("Angle", op.angle ?? 45, (v) => setOp(op.id, (o) => (o.angle = Math.min(89, Math.max(1, v)))), { unit: "°", plain: true }),
+        checkToggle("Measure from the other face", !!op.flip, (on) => setOp(op.id, (o) => (o.flip = on || undefined))),
+      );
+    }
+    box.append(labeled("Edges", target));
 
     // Too big for this shape: say what size was used instead, and offer to adopt it.
     const used = edgeAdjustments[op.id];
