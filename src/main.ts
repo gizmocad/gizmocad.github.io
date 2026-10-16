@@ -2763,6 +2763,7 @@ const appMenuButton = $("#app-menu-button");
 function setAppMenu(open: boolean) {
   appMenu.hidden = !open;
   appMenuButton.setAttribute("aria-expanded", String(open));
+  document.body.classList.toggle("menu-open", open);
 }
 appMenuButton.onclick = () => setAppMenu(appMenu.hidden !== false);
 // Picking an item closes it (the theme item stays open, to see the change).

@@ -466,3 +466,15 @@ body.sketching .view-tools { display: none; }
 .field.stacked .segmented { display: flex; }
 .field.stacked .segmented button { flex: 1; padding-left: 4px; padding-right: 4px; }
 .view-tools button.on { background: var(--active-bg); color: var(--active-fg); border-color: var(--active-bg); }
+
+/*
+ * Scrollbars drawn by the page itself. WebKit's native overlay scrollbars (the
+ * desktop app on Linux) are painted above everything, even open menus.
+ */
+.panel { scrollbar-gutter: stable; }
+.panel::-webkit-scrollbar { width: 8px; height: 8px; }
+.panel::-webkit-scrollbar-track { background: transparent; }
+.panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+.panel::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+/* And none at all under the open GizmoCAD menu. */
+body.menu-open .panel.left { overflow-y: hidden; }
