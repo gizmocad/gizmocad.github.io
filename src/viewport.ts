@@ -383,7 +383,11 @@ export class Viewport {
       disposeTree(g);
       g.clear();
     }
-    this.grids.add(makeGrid(200, 20, pal.gridMajor, pal.gridMinor, 0), makeGrid(200, 200, pal.gridFine, pal.gridFine, -0.01), new THREE.AxesHelper(30));
+    // Everything on the floor is drawn in a fixed order without depth writes, instead of at nearly the
+    // same height: lines that close together flicker as the depth buffer can't tell which is in front.
+    const fine = floorLayer(makeGrid(200, 200, pal.gridFine, pal.gridFine, 0), -4);
+    const major = floorLayer(makeGrid(200, 20, pal.gridMajor, pal.gridMinor, 0), -3);
+    this.grids.add(fine, major, floorLayer(new THREE.AxesHelper(30), -1));
     this.sketchGrid.add(makeGrid(400, 40, pal.gridMajor, pal.gridMinor, -0.02, true), makeGrid(400, 400, pal.gridFine, pal.gridFine, -0.03, true));
     this.root.traverse((o) => {
       if (o instanceof THREE.LineSegments && o.userData.groups) (o.material as THREE.LineBasicMaterial).color.setHex(pal.edge);
@@ -1337,15 +1341,13 @@ export class Viewport {
     const { width: w, depth: d, height: h } = bed;
     const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
     const base = [V(-w / 2, -d / 2, 0), V(w / 2, -d / 2, 0), V(w / 2, d / 2, 0), V(-w / 2, d / 2, 0)];
-    const plate = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(base), new THREE.LineBasicMaterial({ color: 0x3e7bfa }));
+    const plate = floorLayer(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(base), new THREE.LineBasicMaterial({ color: 0x3e7bfa })), -2);
     const top = base.map((p) => p.clone().setZ(h));
     const posts = base.flatMap((p, i) => [p, top[i]]);
     const upper = top.flatMap((p, i) => [p, top[(i + 1) % 4]]);
     const frame = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints([...posts, ...upper]), new THREE.LineDashedMaterial({ color: 0x3e7bfa, dashSize: 3, gapSize: 3, transparent: true, opacity: 0.35 }));
     frame.computeLineDistances();
-    const fill = new THREE.Mesh(new THREE.PlaneGeometry(w, d), new THREE.MeshBasicMaterial({ color: 0x3e7bfa, transparent: true, opacity: 0.05, depthWrite: false }));
-    fill.position.z = -0.02;
-    this.bedGroup.add(plate, frame, fill);
+    this.bedGroup.add(plate, frame);
   }
 
   // ---- Split handle ----------------------------------------------------------
@@ -2122,6 +2124,16 @@ export class Viewport {
     this.perspCamera.updateProjectionMatrix();
     this.orthoFrustum((this.orthoCamera.top - this.orthoCamera.bottom) / 2 || 60);
   }
+}
+
+/** Draw a floor line set in the given order (before objects), without writing depth. */
+function floorLayer<T extends THREE.Object3D>(obj: T, order: number): T {
+  obj.renderOrder = order;
+  obj.traverse((o) => {
+    const m = (o as THREE.Line).material as THREE.Material | THREE.Material[] | undefined;
+    for (const mat of m ? (Array.isArray(m) ? m : [m]) : []) mat.depthWrite = false;
+  });
+  return obj;
 }
 
 /** A grid in the XY plane. `onTop` keeps it from being hidden behind ghosted parts. */
