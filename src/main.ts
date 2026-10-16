@@ -635,7 +635,7 @@ function hiddenInView(f: Feature): boolean {
   return false;
 }
 
-const panelKey = (ed: SketchEditor) => `${ed.tool}|${ed.newMode}|${ed.ngonSides}|${ed.brushWidth}|${[...ed.selected].join(",")}|${JSON.stringify(ed.picked)}`;
+const panelKey = (ed: SketchEditor) => `${ed.tool}|${ed.newMode}|${ed.ngonSides}|${ed.brushWidth}|${[...ed.selected].join(",")}|${JSON.stringify(ed.picked)}|${ed.activePoint}`;
 
 // ---- Context menu --------------------------------------------------------
 
@@ -1032,7 +1032,7 @@ function connectionSection(f: Feature, update: (mutate: (f: Feature) => void) =>
   items.push(
     row,
     hint("Pivot fields are in the parent's frame. Moving the pivot or changing the axis doesn't move the object."),
-    button("Remove connection", () => commit((features) => removeJoint(features, f.id)), "wide"),
+    button("Remove connection", () => commit((features) => removeJoint(features, f.id)), "wide danger"),
   );
   return items;
 }
@@ -1734,7 +1734,7 @@ function cutSection(f: Feature): HTMLElement[] {
       d.cuts.splice(d.active, 1);
       d.active = Math.min(d.active, d.cuts.length - 1);
       renderProperties();
-    });
+    }, "danger");
     remove.disabled = d.cuts.length < 2;
     remove.title = "Remove the highlighted cut";
     const even = button("Even spacing", () => (spreadCuts(d, lo, hi), renderProperties()));
@@ -2128,28 +2128,31 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
       if (op) mutate(op);
     });
 
-  f.edgeOps.forEach((op) => {
+  const OP_NAME: Record<EdgeOp["type"], string> = { fillet: "Fillet", chamfer: "Chamfer", bevel: "Bevel" };
+  f.edgeOps.forEach((op, n) => {
     const box = document.createElement("div");
     box.className = `edge-op${edgePick?.opId === op.id ? " picking" : ""}`;
 
+    // Its name and a remove button, then the type on its own full-width row (so all three fit).
     const head = document.createElement("div");
     head.className = "edge-op-head";
-    head.append(
-      segmented(
-        [
-          { value: "fillet", label: "◜ Fillet", title: "Round the edges" },
-          { value: "chamfer", label: "◸ Chamfer", title: "Cut the edges flat at 45°" },
-          { value: "bevel", label: "◺ Bevel", title: "Cut the edges flat at any angle: a distance along the flatter face, and the cut's angle from it" },
-        ],
-        op.type,
-        (v) => setOp(op.id, (o) => (o.type = v)),
-      ),
-      button("✕", () => {
-        if (edgePick?.opId === op.id) stopEdgePick();
-        update((t) => (t.edgeOps = t.edgeOps.filter((o) => o.id !== op.id)));
-      }, "icon"),
+    const name = document.createElement("strong");
+    name.textContent = `${OP_NAME[op.type]} ${n + 1}`;
+    const remove = button("✕", () => {
+      if (edgePick?.opId === op.id) stopEdgePick();
+      update((t) => (t.edgeOps = t.edgeOps.filter((o) => o.id !== op.id)));
+    }, "icon danger");
+    remove.title = "Remove";
+    head.append(name, remove);
+    const type = segmented(
+      [
+        { value: "fillet", label: "Fillet", title: "Round the edges" },
+        { value: "chamfer", label: "Chamfer", title: "Cut the edges flat at 45°" },
+        { value: "bevel", label: "Bevel", title: "Cut the edges flat at any angle: a distance along the flatter face, and the cut's angle from it" },
+      ],
+      op.type,
+      (v) => setOp(op.id, (o) => (o.type = v)),
     );
-    (head.lastElementChild as HTMLElement).title = "Remove";
 
     const target = document.createElement("select");
     for (const o of TARGETS) target.add(new Option(o.label, o.value));
@@ -2160,7 +2163,7 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
       if (value === "picked" && !op.points.length) startEdgePick(f.id, op.id);
     };
 
-    box.append(head, lengthField(op.type === "fillet" ? "Radius" : "Distance", op.size, (v) => setOp(op.id, (o) => (o.size = v)), { min: 0 }));
+    box.append(head, type, lengthField(op.type === "fillet" ? "Radius" : "Distance", op.size, (v) => setOp(op.id, (o) => (o.size = v)), { min: 0 }));
     if (op.type === "bevel") {
       box.append(
         lengthField("Angle", op.angle ?? 45, (v) => setOp(op.id, (o) => (o.angle = Math.min(89, Math.max(1, v)))), { unit: "°", plain: true }),
@@ -2198,8 +2201,9 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
 
   const add = document.createElement("div");
   add.className = "actions";
-  const newOp = (type: EdgeOp["type"]) => update((t) => t.edgeOps.push({ id: newId(), type, size: 1, target: "all", points: [] }));
-  add.append(button("+ Fillet", () => newOp("fillet")), button("+ Chamfer", () => newOp("chamfer")));
+  const newOp = (type: EdgeOp["type"]) => update((t) => t.edgeOps.push({ id: newId(), type, size: 1, target: "all", points: [], ...(type === "bevel" ? { angle: 30 } : {}) }));
+  add.className = "actions edge-add";
+  add.append(button("+ Fillet", () => newOp("fillet")), button("+ Chamfer", () => newOp("chamfer")), button("+ Bevel", () => newOp("bevel")));
   items.push(add);
   if (f.kind === "group") items.push(hint("Rounding a group merges its shapes first, so you can round edges where they meet, or the rim of a hole."));
   return items;
@@ -2506,7 +2510,7 @@ function constraintList(s: SketchFeature, updateSketch: (mutate: (f: Feature) =>
       }), c.type === "angle" ? { unit: "°" } : { min: 0 });
       row.append(input);
     }
-    const remove = button("✕", () => setConstraints((cs) => cs.splice(cs.findIndex((x) => x.id === c.id), 1)), "icon");
+    const remove = button("✕", () => setConstraints((cs) => cs.splice(cs.findIndex((x) => x.id === c.id), 1)), "icon danger");
     remove.title = "Remove this constraint";
     row.append(remove);
     items.push(row);
@@ -2563,15 +2567,25 @@ function diameterField(e: Extract<SketchEntity, { type: "circle" }>, updateEntit
 }
 
 function pointRows(e: Extract<SketchEntity, { type: "polygon" | "spline" }>, updateEntity: (id: string, mutate: (e: SketchEntity) => void) => void): HTMLElement[] {
-  const rows: HTMLElement[] = [];
+  const list = document.createElement("div");
+  list.className = "point-list";
   const head = document.createElement("div");
   head.className = "point-row head";
   head.innerHTML = e.type === "polygon" ? "<span></span><span>U (mm)</span><span>V (mm)</span><span>Bend (mm)</span><span></span>" : "<span></span><span>U (mm)</span><span>V (mm)</span><span></span>";
   if (e.type === "spline") head.classList.add("no-bend");
-  rows.push(head);
+  list.append(head);
+  const active = sketchEditor?.activePoint ?? null;
   e.points.forEach((p, i) => {
     const row = document.createElement("div");
-    row.className = `point-row${e.type === "spline" ? " no-bend" : ""}`;
+    row.className = `point-row${e.type === "spline" ? " no-bend" : ""}${i === active ? " active" : ""}`;
+    // Clicking a row shows its point in the view (and clicking a point in the view highlights its row).
+    row.addEventListener("pointerdown", () => {
+      if (!sketchEditor) return;
+      sketchEditor.setActivePoint(i);
+      sketchPanelKey = panelKey(sketchEditor); // Already shown here: don't rebuild the panel under the pointer.
+      list.querySelectorAll(".point-row.active").forEach((r) => r.classList.remove("active"));
+      row.classList.add("active");
+    });
     const label = document.createElement("span");
     label.textContent = `P${i + 1}`;
     const setPoint = (axis: 0 | 1, v: number) => updateEntity(e.id, (t) => (t.type === "polygon" || t.type === "spline") && (t.points[i][axis] = v));
@@ -2581,12 +2595,14 @@ function pointRows(e: Extract<SketchEntity, { type: "polygon" | "spline" }>, upd
       bend.title = `Curve the edge from P${i + 1} to P${((i + 1) % e.points.length) + 1} (0 = straight)`;
       row.append(bend);
     }
-    const remove = button("✕", () => updateEntity(e.id, (t) => removePoint(t, i)), "icon");
+    const remove = button("✕", () => updateEntity(e.id, (t) => removePoint(t, i)), "icon danger");
     remove.disabled = e.points.length <= 3;
     remove.title = "Delete point";
     row.append(remove);
-    rows.push(row);
+    list.append(row);
+    if (i === active) requestAnimationFrame(() => (list.scrollTop = row.offsetTop - list.clientHeight / 2 + row.clientHeight / 2));
   });
+  const rows: HTMLElement[] = [list];
   rows.push(
     button("+ Add point", () =>
       updateEntity(e.id, (t) => {

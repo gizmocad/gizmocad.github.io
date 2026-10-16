@@ -261,7 +261,13 @@ button.icon { padding: 3px 7px; }
 .entity-list li:hover { background: var(--accent-soft); }
 .entity-list li.selected { background: var(--select-soft); outline: 1px solid var(--select); }
 .actions { display: flex; gap: 6px; margin-top: 16px; }
-.actions .danger:hover { border-color: var(--hole); background: var(--danger-soft); }
+/* Delete and remove buttons are red: solid for whole deletes, red text for small ✕ removes. */
+button.danger { background: var(--hole); border-color: var(--hole); color: #fff; }
+button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--hole) 85%, #000); border-color: color-mix(in srgb, var(--hole) 85%, #000); }
+button.danger:disabled { background: var(--danger-soft); border-color: var(--border); color: var(--muted); }
+button.icon.danger { background: var(--panel); border-color: color-mix(in srgb, var(--hole) 40%, var(--border)); color: var(--hole); }
+button.icon.danger:hover:not(:disabled) { background: var(--danger-soft); border-color: var(--hole); }
+button.icon.danger:disabled { background: none; color: var(--muted); border-color: var(--border); }
 .units-hint { font-size: 12px; color: var(--muted); margin-top: 12px; }
 
 @media (max-width: 800px) {
@@ -307,13 +313,16 @@ button.icon { padding: 3px 7px; }
 .context-menu[hidden] { display: none; }
 .context-menu button { border: none; text-align: left; padding: 6px 10px; border-radius: 5px; background: none; }
 .context-menu button:hover:not(:disabled) { background: var(--accent-soft); }
-.context-menu button.danger { color: var(--hole); }
+.context-menu button.danger { color: var(--hole); background: transparent; border-color: transparent; }
 .context-menu button.danger:hover { background: var(--danger-soft); }
 
 .edge-op { border: 1px solid var(--border); border-radius: 8px; padding: 8px; margin-bottom: 8px; }
 .edge-op.picking { border-color: #ff8a00; box-shadow: 0 0 0 2px rgba(255, 138, 0, 0.18); }
-.edge-op-head { display: flex; gap: 6px; align-items: flex-start; }
-.edge-op-head .segmented { flex: 1; }
+.edge-op-head { display: flex; gap: 6px; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.edge-op-head strong { font-size: 12px; font-weight: 600; }
+.edge-op .segmented button { padding-left: 2px; padding-right: 2px; min-width: 0; }
+.edge-add { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.edge-add button { padding-left: 2px; padding-right: 2px; min-width: 0; white-space: nowrap; font-size: 13px; }
 .edge-op .field:last-child { margin-bottom: 0; }
 .pick-row { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; gap: 8px; }
 .pick-row span { color: var(--muted); font-size: 12px; }
@@ -479,3 +488,9 @@ body.sketching .view-tools { display: none; }
 .panel::-webkit-scrollbar-thumb:hover { background: var(--muted); }
 /* And none at all under the open GizmoCAD menu. */
 body.menu-open .panel.left { overflow-y: hidden; }
+
+/* A long list of sketch points scrolls on its own; the picked point's row is highlighted. */
+.point-list { position: relative; max-height: 240px; overflow-y: auto; margin-bottom: 8px; padding-right: 2px; border-radius: 6px; }
+.point-list .point-row.head { position: sticky; top: 0; z-index: 1; background: var(--panel); margin-bottom: 4px; padding-bottom: 4px; box-shadow: 0 1px 0 var(--border); }
+.point-row.active { background: color-mix(in srgb, #f09a2a 18%, transparent); border-radius: 6px; outline: 1px solid #f09a2a; }
+.point-row.active > span:first-child { color: #c46f00; font-weight: 700; }

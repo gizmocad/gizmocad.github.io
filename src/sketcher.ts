@@ -17,6 +17,7 @@ import {
   moveHandle,
   nearestEdge,
   outline,
+  rectCorners,
   removePoint,
   round,
   snapPoints,
@@ -100,6 +101,10 @@ export class SketchEditor {
   private drawing: P[] = [];
   private skipUp = false;
   private drag: Drag | null = null;
+  /** The picked point of the selected polygon or curve (its index), shown in the view and the panel. */
+  activePoint: number | null = null;
+  /** Sketch units per screen pixel, from the last pointer event (for sizing the ruler). */
+  private pixel = 0.1;
   /** The existing point the cursor is snapped to, if any. */
   private snappedTo: P | null = null;
 
@@ -195,6 +200,7 @@ export class SketchEditor {
 
   handle(e: SketchPointer) {
     const raw: P = [e.u, e.v];
+    this.pixel = e.pixel;
     const exclude = this.drag?.kind === "move" ? this.selected : this.drag?.kind === "handle" ? new Set([this.drag.id]) : undefined;
     const p = e.alt ? ((this.snappedTo = null), [round(raw[0]), round(raw[1])] as P) : this.snap(raw, e.pixel, exclude);
 
@@ -361,6 +367,9 @@ export class SketchEditor {
   private handleSelect(e: SketchPointer, raw: P, p: P) {
     if (e.kind === "down") {
       const h = this.selected.size === 1 || !e.shift ? this.handleAt(raw, e.pixel) : null;
+      // Clicking a polygon's or curve's point (or edge dot) shows which one it is.
+      const index = h && (h.entity.type === "polygon" || h.entity.type === "spline") ? /^[vm](\d+)$/.exec(h.handle.key) : null;
+      this.activePoint = index ? Number(index[1]) : null;
       if (h && h.handle.kind !== "center") {
         this.selected = new Set([h.entity.id]);
         this.drag = { kind: "handle", id: h.entity.id, key: h.handle.key, preview: structuredClone(h.entity) };
@@ -530,6 +539,21 @@ export class SketchEditor {
     }
   }
 
+  /** Highlight one point of the selected polygon or curve (from its row in the panel, which updates itself). */
+  setActivePoint(index: number | null) {
+    if (index === this.activePoint) return;
+    this.activePoint = index;
+    this.render();
+  }
+
+  /** The selected polygon or curve, while exactly one is selected. */
+  private pointEntity(): Extract<SketchEntity, { type: "polygon" | "spline" }> | null {
+    if (this.selected.size !== 1) return null;
+    const id = [...this.selected][0];
+    const e = this.drag?.kind === "handle" && this.drag.id === id ? this.drag.preview : this.host.entities().find((x) => x.id === id);
+    return e && (e.type === "polygon" || e.type === "spline") ? e : null;
+  }
+
   render() {
     const pal = scenePalette();
     COLOR.add = pal.sketchAdd;
@@ -557,6 +581,17 @@ export class SketchEditor {
 
     this.drawConstraints();
 
+    // The picked point: ringed and numbered, matching its row in the panel.
+    const pe = this.pointEntity();
+    if (pe && this.activePoint !== null && this.activePoint < pe.points.length) {
+      const pt = pe.points[this.activePoint];
+      this.addPoints([pt], COLOR.snap, 14);
+      if (drag?.kind !== "handle") this.addLabel(`P${this.activePoint + 1}`, pt, false); // While dragging, the ruler says it all.
+    } else if (!pe) this.activePoint = null;
+
+    // Ruler: live sizes of the shape being drawn or reshaped.
+    if (drag?.kind === "handle") this.drawRuler(drag.preview, drag.key);
+
     // Box selection.
     if (drag?.kind === "box") {
       const [a, b] = [drag.from, drag.to];
@@ -569,7 +604,14 @@ export class SketchEditor {
     if (this.drawing.length && c) {
       const a = this.drawing[0];
       const preview = this.previewEntity(a, c);
-      if (preview) this.addLine(outline(preview), previewColor, isClosed(preview), { dashed: true });
+      if (preview) {
+        this.addLine(outline(preview), previewColor, isClosed(preview), { dashed: true });
+        this.drawRuler(preview);
+      }
+      if ((this.tool === "polygon" || this.tool === "spline") && this.drawing.length) {
+        const last = this.drawing[this.drawing.length - 1];
+        this.segmentRuler(last, c);
+      }
       // On the first point (with enough points), a click closes the shape: show it finished.
       const first = this.drawing[0];
       const closing = this.drawing.length >= 3 && c[0] === first[0] && c[1] === first[1];
@@ -637,12 +679,100 @@ export class SketchEditor {
     }
   }
 
-  private addLabel(text: string, at: P, dimension: boolean, stack = 0) {
+  // ---- Ruler ---------------------------------------------------------------
+
+  /** Dimension lines for a shape: its sizes as they change (like the Resize ruler in 3D). */
+  private drawRuler(e: SketchEntity, key?: string) {
+    const mm = (v: number) => `${Math.round(v * 100) / 100} mm`;
+    const centre = (pts: P[]): P => [pts.reduce((s, p) => s + p[0], 0) / pts.length, pts.reduce((s, p) => s + p[1], 0) / pts.length];
+    switch (e.type) {
+      case "line":
+        return this.segmentRuler([e.x1, e.y1], [e.x2, e.y2]);
+      case "rect": {
+        const k = rectCorners(e);
+        const c = centre(k);
+        this.dimension(k[0], k[1], `W ${mm(e.width)}`, c);
+        this.dimension(k[1], k[2], `H ${mm(e.height)}`, c);
+        return;
+      }
+      case "circle":
+        return this.radiusRuler([e.x, e.y], e.radius, `Ø ${mm(2 * e.radius)}`);
+      case "ngon":
+        return this.radiusRuler([e.x, e.y], e.radius, `Ø ${mm(2 * e.radius)} · ${e.sides} sides`, e.angle);
+      case "ellipse":
+        this.radiusRuler([e.x, e.y], e.rx, `W ${mm(2 * e.rx)}`, e.angle);
+        this.radiusRuler([e.x, e.y], e.ry, `H ${mm(2 * e.ry)}`, e.angle + 90);
+        return;
+      case "slot":
+        return this.dimension([e.x1, e.y1], [e.x2, e.y2], `${mm(Math.hypot(e.x2 - e.x1, e.y2 - e.y1))} · W ${mm(2 * e.radius)}`);
+      case "polygon":
+      case "spline": {
+        // Dragging a point: the edges either side of it.
+        const i = key ? Number(/^v(\d+)$/.exec(key)?.[1] ?? NaN) : NaN;
+        if (Number.isNaN(i)) return;
+        const n = e.points.length;
+        const c = centre(e.points);
+        const p = e.points[i];
+        const prev = e.points[(i - 1 + n) % n];
+        const next = e.points[(i + 1) % n];
+        const before = e.type === "polygon" || i > 0 ? Math.hypot(p[0] - prev[0], p[1] - prev[1]) : null;
+        const after = e.type === "polygon" || i < n - 1 ? Math.hypot(next[0] - p[0], next[1] - p[1]) : null;
+        // Short edges on screen: one combined label by the point instead of two that would overlap.
+        const short = [before, after].some((l) => l !== null && l / this.pixel < 90);
+        if (before !== null) this.dimension(prev, p, short ? "" : mm(before), c);
+        if (after !== null) this.dimension(p, next, short ? "" : mm(after), c);
+        if (short) {
+          const out = Math.hypot(p[0] - c[0], p[1] - c[1]) || 1;
+          const at: P = [p[0] + ((p[0] - c[0]) / out) * 40 * this.pixel, p[1] + ((p[1] - c[1]) / out) * 40 * this.pixel];
+          this.addLabel([before, after].filter((l) => l !== null).map((l) => mm(l!)).join(" · "), at, true, 0, true);
+        }
+        return;
+      }
+    }
+  }
+
+  /** A straight run's length and angle. */
+  private segmentRuler(a: P, b: P) {
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (len < 1e-9) return;
+    const deg = Math.round(((Math.atan2(b[1] - a[1], b[0] - a[0]) * 180) / Math.PI) * 10) / 10;
+    this.dimension(a, b, `${Math.round(len * 100) / 100} mm · ${deg + 0}°`);
+  }
+
+  /** A line from a centre out to its size, labelled. */
+  private radiusRuler(c: P, r: number, text: string, angle = 0) {
+    if (r <= 0) return;
+    const t = (angle * Math.PI) / 180;
+    const end: P = [c[0] + r * Math.cos(t), c[1] + r * Math.sin(t)];
+    this.addLine([c, end], COLOR.dimension, false, { dashed: true });
+    this.addLabel(text, [(c[0] + end[0]) / 2, (c[1] + end[1]) / 2], true, 0, true);
+  }
+
+  /** A dimension line beside a–b (on the side away from `inside`), with extension lines and a centred label. */
+  private dimension(a: P, b: P, text: string, inside?: P) {
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (len < 1e-9) return;
+    let n: P = [-(b[1] - a[1]) / len, (b[0] - a[0]) / len];
+    const mid: P = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    if (inside && (mid[0] - inside[0]) * n[0] + (mid[1] - inside[1]) * n[1] < 0) n = [-n[0], -n[1]];
+    const off = 22 * this.pixel;
+    const a2: P = [a[0] + n[0] * off, a[1] + n[1] * off];
+    const b2: P = [b[0] + n[0] * off, b[1] + n[1] * off];
+    this.addLine([a, [a[0] + n[0] * off * 1.3, a[1] + n[1] * off * 1.3]], COLOR.dimension, false, { opacity: 0.5 });
+    this.addLine([b, [b[0] + n[0] * off * 1.3, b[1] + n[1] * off * 1.3]], COLOR.dimension, false, { opacity: 0.5 });
+    this.addLine([a2, b2], COLOR.dimension, false);
+    if (text) this.addLabel(text, [(a2[0] + b2[0]) / 2, (a2[1] + b2[1]) / 2], true, 0, true);
+  }
+
+  private addLabel(text: string, at: P, dimension: boolean, stack = 0, centred = false) {
     const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: labelTexture(text, dimension), depthTest: false, sizeAttenuation: false }));
     const tex = sprite.material.map!;
     const aspect = (tex.image as HTMLCanvasElement).width / (tex.image as HTMLCanvasElement).height;
-    sprite.scale.set(0.032 * aspect, 0.032, 1);
-    sprite.center.set(-0.1, -0.2 - 1.15 * stack); // Just above and right of the anchor, clear of the line (stacked upwards).
+    const size = centred ? 0.024 : 0.032; // Ruler labels are a little smaller: there can be several close together.
+    sprite.scale.set(size * aspect, size, 1);
+    // Just above and right of the anchor, clear of the line (stacked upwards); ruler labels sit on their line.
+    if (centred) sprite.center.set(0.5, 0.5);
+    else sprite.center.set(-0.1, -0.2 - 1.15 * stack);
     sprite.position.set(at[0], at[1], 0);
     sprite.renderOrder = 12;
     this.content.add(sprite);
@@ -715,6 +845,13 @@ function labelTexture(text: string, dimension: boolean): THREE.CanvasTexture {
   const key = `${dimension}|${text}`;
   const hit = labelCache.get(key);
   if (hit) return hit;
+  // Ruler labels change on every pointer move: keep only the most recent ones.
+  if (labelCache.size > 300) {
+    for (const [k, t] of [...labelCache].slice(0, 150)) {
+      t.dispose();
+      labelCache.delete(k);
+    }
+  }
   const c = document.createElement("canvas");
   const g = c.getContext("2d")!;
   const font = "600 28px system-ui, sans-serif";
