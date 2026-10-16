@@ -585,6 +585,7 @@ function updateToolbar() {
   joint.title = f?.joint?.type === "slider" ? "Slide it along its connection (J)" : "Turn it on its connection (J)";
   document.querySelectorAll<HTMLButtonElement>("[data-gizmo]").forEach((b) => b.classList.toggle("active", b.dataset.gizmo === mode));
   show("#snap-face", transforming && mode === "translate" && !f?.joint);
+  show("#local-axes", transforming && (mode === "translate" || mode === "rotate"));
   show("#keep-ratio, #one-side", transforming && mode === "scale");
   show("#points-option", (transforming && (mode === "translate" || mode === "pivot")) || viewport.placing);
 }
@@ -3118,6 +3119,14 @@ keepRatioButton.onclick = () => {
 $("#snap-face").onclick = () => (viewport.placing ? viewport.cancelPlacement() : snapToFace());
 const pointSnapSelect = $("#point-snap") as HTMLSelectElement;
 pointSnapSelect.onchange = () => viewport.setPointSnap(pointSnapSelect.value !== "off", pointSnapSelect.value === "show");
+const localAxesButton = $("#local-axes");
+function toggleLocalAxes() {
+  const on = !localAxesButton.classList.contains("on");
+  localAxesButton.classList.toggle("on", on);
+  localAxesButton.setAttribute("aria-pressed", String(on));
+  viewport.setLocalAxes(on);
+}
+localAxesButton.onclick = toggleLocalAxes;
 const oneSideButton = $("#one-side");
 oneSideButton.onclick = () => {
   viewport.oneSide = !viewport.oneSide;
@@ -3209,6 +3218,7 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault();
     return void paste();
   }
+  if (!mod && key === "l") return toggleLocalAxes();
   if (!mod && key === "w") setGizmoMode("translate");
   if (!mod && key === "e") setGizmoMode("rotate");
   if (!mod && key === "r") setGizmoMode("scale");

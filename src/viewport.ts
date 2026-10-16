@@ -203,6 +203,8 @@ export class Viewport {
   private brushRing: THREE.LineLoop;
   /** Resize: scale every axis together. Holding Shift during a drag flips this. */
   keepRatio = false;
+  /** Move and Rotate along the object's own (turned) axes instead of the world's. */
+  private localAxes = false;
   /** Resize: only the side whose handle is dragged moves; the opposite face stays put. */
   oneSide = false;
   /** Set when a one-sided resize drag starts: the fixed face, and where the object started. */
@@ -428,6 +430,12 @@ export class Viewport {
     this.camera.position.copy(this.orbit.target).addScaledVector(v.from.clone().applyQuaternion(q), v.distance);
     this.camera.lookAt(this.orbit.target);
     if (t >= 1) this.viewTurn = null;
+  }
+
+  setLocalAxes(on: boolean) {
+    this.localAxes = on;
+    // Only the object gizmo follows this; connection and cut handles set their own space.
+    if (this.gizmo.object && this.gizmo.object === this.nodes.get(this.selectedId ?? "")) this.gizmo.space = on ? "local" : "world";
   }
 
   get snapSize() {
@@ -922,7 +930,7 @@ export class Viewport {
     disposeTree(this.jointProxy);
     this.jointProxy.clear();
     this.gizmo.showX = this.gizmo.showY = this.gizmo.showZ = true;
-    this.gizmo.space = "world";
+    this.gizmo.space = this.localAxes ? "local" : "world";
     this.gizmo.setMode(this.userMode === "joint" || this.userMode === "pivot" ? "translate" : this.userMode);
     this.cutProxy.removeFromParent();
     this.pivotProxy.removeFromParent();
@@ -1856,7 +1864,9 @@ export class Viewport {
     // Only move along the axes the handle allows (the centre handle moves freely).
     const handle = this.gizmo.axis ?? "XYZ";
     const free = handle === "XYZ";
-    const axes = free ? [] : [...handle].map((a) => new THREE.Vector3(a === "X" ? 1 : 0, a === "Y" ? 1 : 0, a === "Z" ? 1 : 0));
+    // On its own axes, the handles point along the object's turned axes.
+    const turn = this.gizmo.space === "local" ? obj.getWorldQuaternion(new THREE.Quaternion()) : new THREE.Quaternion();
+    const axes = free ? [] : [...handle].map((a) => new THREE.Vector3(a === "X" ? 1 : 0, a === "Y" ? 1 : 0, a === "Z" ? 1 : 0).applyQuaternion(turn));
     const constrain = (d: THREE.Vector3) => (free ? d.clone() : axes.reduce((acc, u) => acc.addScaledVector(u, d.dot(u)), new THREE.Vector3()));
 
     const RADIUS = 10; // pixels
@@ -2028,8 +2038,9 @@ export class Viewport {
       }
       return;
     }
-    // A point snap lands exactly on another object, which needn't be on the grid.
-    const grid = this.snap > 0 && !this.pointDrag?.snapped ? this.snap : 0;
+    // A point snap lands exactly on another object, which needn't be on the grid. On its own
+    // axes the gizmo already snapped the move along them; rounding to the world grid would undo that.
+    const grid = this.snap > 0 && !this.pointDrag?.snapped && this.gizmo.space !== "local" ? this.snap : 0;
     const round = (v: number) => (grid > 0 ? Math.round(v / grid) * grid : Math.round(v * 1e4) / 1e4) + 0;
     const deg = (r: number) => Math.round(THREE.MathUtils.radToDeg(r) * 1e4) / 1e4 + 0;
     const p = obj.position;
