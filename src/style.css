@@ -380,8 +380,8 @@ header [hidden] { display: none !important; }
 .menu-field select { max-width: 150px; }
 
 /* Buttons under the view cube. */
-.view-tools { position: absolute; top: 106px; right: 10px; display: flex; flex-direction: column; gap: 4px; width: 90px; align-items: stretch; }
-.view-tools button { padding: 4px 0; font-size: 14px; background: var(--overlay); }
+.view-tools { position: absolute; top: 102px; right: 10px; display: flex; gap: 3px; }
+.view-tools button { width: 26px; height: 26px; padding: 0; font-size: 13px; line-height: 1; border-radius: 6px; background: var(--overlay); }
 body.sketching .view-tools { display: none; }
 
 .float-panel {

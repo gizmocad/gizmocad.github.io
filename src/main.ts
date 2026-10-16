@@ -2835,11 +2835,6 @@ document.querySelectorAll<HTMLButtonElement>("[data-section-axis]").forEach((b) 
 $("#measure").onclick = () => setMeasuring(!viewport.measuring);
 $("#fit-all").onclick = () => viewport.fitView();
 $("#fit-selected").onclick = () => viewport.fitView(true);
-$("#ortho").onclick = () => {
-  viewport.setOrthographic(!viewport.orthographic);
-  $("#ortho").classList.toggle("on", viewport.orthographic);
-  $("#ortho").textContent = viewport.orthographic ? "Flat" : "3D";
-};
 
 // ---- Print bed ----------------------------------------------------------------------
 
@@ -3095,7 +3090,6 @@ window.addEventListener("keydown", (e) => {
   if (!mod && key === "m") return setMeasuring(true);
   if (e.key === "Home") return viewport.fitView();
   if (e.key === "." && !mod) return viewport.fitView(true);
-  if (!mod && key === "o") return $("#ortho").click();
   if (mod && key === "a") {
     e.preventDefault();
     const active = activeFeatures(doc.features);

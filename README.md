@@ -61,7 +61,7 @@
   Drag an object near another's point and it snaps there, so faces and edges line up exactly.
   The Points menu can hide the dots (snapping still works) or turn point snapping off.
 - **View cube** in the corner of the 3D view turns with the camera; click a face, edge or corner to look from that side.
-  Below it: fit everything in view (Home), zoom to the selection (.), a flat orthographic view (O), a **section view**
+  Below it: fit everything in view (Home), zoom to the selection (.), a **section view**
   that cuts the model open along X, Y or Z, and Measure.
 - **History** along the bottom: every object is a step. Roll back to see (and edit) the model as it was at any step;
   new objects go in at the marker, and changes flow through to the later steps. Right-click a step to switch it off.
