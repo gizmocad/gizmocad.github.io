@@ -231,6 +231,9 @@ export class Viewport {
     flipped: boolean;
     pointer: [number, number] | null;
     at: { position: THREE.Vector3; quaternion: THREE.Quaternion; id: string | null } | null;
+    /** Snap points on the face under the pointer, and which face they were drawn for. */
+    dots: THREE.Points | null;
+    dotsKey: string;
   } | null = null;
   /** The mode picked in the toolbar; a connected object's gizmo may differ (its joint decides). */
   private userMode: GizmoMode = "translate";
@@ -1554,8 +1557,9 @@ export class Viewport {
     this.scene.add(ghost);
     const own = this.nodes.get(f.id);
     const avoid = source ?? ((session.marker && !session.allowSelf) || session.pickOnly ? own : undefined);
-    this.placement = { session, ghost, at: null, flipped: false, pointer: null, skip: avoid ? this.movingIds(avoid) : new Set() };
+    this.placement = { session, ghost, at: null, flipped: false, pointer: null, skip: avoid ? this.movingIds(avoid) : new Set(), dots: null, dotsKey: "" };
     this.applyAppearance(); // No gizmo while placing.
+    this.drawSnapDots(); // Only the face under the pointer gets dots.
     this.events.onPlacementChange();
     this.renderer.domElement.style.cursor = "crosshair";
   }
@@ -1590,9 +1594,12 @@ export class Viewport {
     if (!p) return;
     disposeTree(p.ghost);
     p.ghost.removeFromParent();
+    this.showFaceDots(p, null);
+    this.showSnapHint(null);
     this.placement = null;
     this.renderer.domElement.style.cursor = "";
     this.applyAppearance();
+    this.drawSnapDots();
     this.events.onPlacementChange();
   }
 
@@ -1602,6 +1609,8 @@ export class Viewport {
     if (!p) return;
     p.pointer = [clientX, clientY];
     const face = this.placementAt(clientX, clientY, p.skip, !!p.session.noGround);
+    this.showFaceDots(p, face?.face ?? null);
+    this.showSnapHint(face?.face?.snapped ? face.position : null, face?.position);
     if (face && p.flipped) face.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI));
     p.at = face && this.placeOnFace(face, p.session);
     p.ghost.visible = !!p.at;
@@ -1629,7 +1638,12 @@ export class Viewport {
    * out along the face, lined up with that object and snapped to its grid and
    * points), or on the ground grid.
    */
-  private placementAt(clientX: number, clientY: number, skip: Set<string>, noGround = false): { position: THREE.Vector3; quaternion: THREE.Quaternion; id: string | null } | null {
+  private placementAt(
+    clientX: number,
+    clientY: number,
+    skip: Set<string>,
+    noGround = false,
+  ): { position: THREE.Vector3; quaternion: THREE.Quaternion; id: string | null; face?: PlacementFace } | null {
     const rect = this.renderer.domElement.getBoundingClientRect();
     this.raycaster.setFromCamera(new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1), this.camera);
     const hit = this.raycaster
@@ -1666,9 +1680,33 @@ export class Viewport {
       // Grid snap across the face (not off it).
       for (const a of ["x", "y", "z"] as const) if (a !== axis) local[a] = Math.round(local[a] / this.snap) * this.snap;
     }
+    const onFace = local.clone();
     const position = local.applyMatrix4(frame);
     const quaternion = frameQ.multiply(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), localNormal));
-    return { position, quaternion, id: node ? (hit!.object.userData.id as string) : null };
+    const id = node ? (hit!.object.userData.id as string) : null;
+    const face = node && id ? { id, node, normal: localNormal, point: onFace, snapped: !!snapped } : undefined;
+    return { position, quaternion, id, face };
+  }
+
+  /** While placing: dots on the snap points of the face under the pointer. */
+  private showFaceDots(p: NonNullable<typeof this.placement>, face: PlacementFace | null) {
+    const show = face && this.pointSnap && this.showPoints;
+    const n = face?.normal;
+    // The face's plane, rounded so small pointer moves on one face reuse the dots.
+    const key = show ? `${face.id}|${n!.toArray().map((v) => v.toFixed(3))}|${n!.dot(face.point).toFixed(2)}` : "";
+    if (key === p.dotsKey) return;
+    p.dotsKey = key;
+    if (p.dots) {
+      p.dots.removeFromParent();
+      p.dots.geometry.dispose();
+      p.dots = null;
+    }
+    if (!show) return;
+    const pts = this.snapPointsOf(face.id, face.node).filter((q) => Math.abs(q.clone().sub(face.point).dot(face.normal)) <= 0.01);
+    if (!pts.length) return;
+    p.dots = new THREE.Points(new THREE.BufferGeometry().setFromPoints(pts), DOT_MATERIALS.other);
+    p.dots.renderOrder = 44;
+    face.node.add(p.dots);
   }
 
   /** Where the shape's own origin goes so its anchor sits on the face point, turned by its spin. */
@@ -1740,7 +1778,7 @@ export class Viewport {
   }
 
   private showsSnapPoints(): boolean {
-    return this.pointSnap && this.gizmo.mode === "translate" && !!this.selectedId && !this.combined && !this.sketch && !this.edgePick && !this.sculpt;
+    return this.pointSnap && !this.placement && this.gizmo.mode === "translate" && !!this.selectedId && !this.combined && !this.sketch && !this.edgePick && !this.sculpt;
   }
 
   /** Ids of a node and everything under it (they move together). */
@@ -2273,6 +2311,16 @@ function dotTexture(rim: boolean): THREE.Texture {
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
+}
+
+/** The object face under the pointer while placing, in that object's own frame. */
+interface PlacementFace {
+  id: string;
+  node: THREE.Object3D;
+  normal: THREE.Vector3;
+  /** Where the pointer hit the face (before snapping). */
+  point: THREE.Vector3;
+  snapped: boolean;
 }
 
 const DOT_MATERIALS = (() => {
