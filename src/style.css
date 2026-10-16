@@ -87,6 +87,9 @@ body {
 
 .toolbar {
   grid-area: top;
+  /* Above the side panels, so its dropdown covers their scrollbars too. */
+  position: relative;
+  z-index: 50;
   display: flex;
   align-items: center;
   gap: 16px;
