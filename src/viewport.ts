@@ -11,6 +11,7 @@ import { scenePalette } from "./theme";
 import { PLANE_ROTATIONS, baseMatrix, clampJoint, jointMatrix, localMatrix, worldMatrix, type Feature, type Joint, type SketchParams, type Vec3 } from "./model";
 import { featureExtents, rulerLength, staysRound, type ResizeAnchor } from "./resize";
 import { isClosed, outline, prismPoints } from "./sketchGeometry";
+import { hedron } from "./hedron";
 import { SculptMesh, sculptGeometry, type BrushSettings } from "./sculpt";
 import { ViewCube } from "./viewCube";
 
@@ -308,7 +309,10 @@ export class Viewport {
           obj.scale.setScalar(k);
         }
         const shape = this.features.get(obj.userData.id);
-        if (shape && staysRound(shape)) {
+        if (shape?.kind === "hedron") {
+          // A hedron only grows or shrinks as a whole.
+          obj.scale.setScalar([obj.scale.x, obj.scale.y, obj.scale.z].reduce((a, b) => (Math.abs(Math.log(b)) > Math.abs(Math.log(a)) ? b : a), 1));
+        } else if (shape && staysRound(shape)) {
           // Cones, tubes, rings and prisms stay round: X and Y follow whichever is being dragged.
           const r = Math.abs(Math.log(obj.scale.x)) >= Math.abs(Math.log(obj.scale.y)) ? obj.scale.x : obj.scale.y;
           obj.scale.x = obj.scale.y = r;
@@ -1757,6 +1761,12 @@ export class Viewport {
     if (f?.kind === "torus") {
       const { radius: r, tube: t } = f.params;
       return [V(0, 0, t), V(r, 0, t), V(-r, 0, t), V(0, r, t), V(0, -r, t)];
+    }
+    if (f?.kind === "hedron") {
+      // Corners, face centres and the middle.
+      const { vertices, faces } = hedron(f.params.faces, f.params.radius);
+      const mid = (pts: number[][]) => V(...([0, 1, 2].map((i) => pts.reduce((s, p) => s + p[i], 0) / pts.length) as [number, number, number]));
+      return [...vertices.map((v) => V(...v)), ...faces.map(mid), mid(vertices)];
     }
     if (f?.kind === "prism") {
       const h = f.params.height;

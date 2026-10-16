@@ -2,7 +2,7 @@
 
 3D CAD that's as easy as Tinkercad but precise enough for real parts. It runs in the browser and also as a desktop app.
 
-- Drag shapes in (box, cylinder, sphere, cone, tube, ring, wedge, pyramid, polygon prism, thread, gear, spring, star, text, screw hole),
+- Drag shapes in (box, cylinder, sphere, cone, tube, ring, wedge, pyramid, polygon prism, hedron (4, 6, 8, 12 or 20 faces), thread, gear, spring, star, text, screw hole),
   then type exact sizes. A thread set to Hole makes a threaded hole (nut); gears have real involute teeth.
   Springs come as coils (round or square wire, open or flat ends) or flat zigzag springs (rounded or sharp bends) that print lying down.
   **Text** comes in sans, serif or mono (bold or not, any alignment, several lines); make it a Hole to engrave it.

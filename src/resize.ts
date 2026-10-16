@@ -4,6 +4,7 @@
 
 import { SCREW_SIZES, subtreeIds, type Feature, type SketchEntity, type SketchPlane, type Vec3 } from "./model";
 import { decodeFloats, encodeFloats } from "./sculpt";
+import { hedronBox } from "./hedron";
 import { gearOuterRadius, prismPoints, round, starPoints } from "./sketchGeometry";
 
 /** Round a length to the snap grid (never down to zero). */
@@ -131,6 +132,10 @@ function scaleOwn(f: Feature, s: Vec3, snap: number) {
     case "prism":
       f.params.radius = snapRadius(f.params.radius * roundFactor(s), snap);
       f.params.height = snapLength(f.params.height * s.z, snap);
+      break;
+    case "hedron":
+      // It only grows or shrinks as a whole: follow whichever axis changed most.
+      f.params.radius = snapRadius(f.params.radius * dominantFactor(s), snap);
       break;
     case "thread":
       // The pitch is a standard size, so it stays; the diameter and length change.
@@ -352,6 +357,10 @@ function baseExtents(f: Feature): [Vec3, Vec3] | null {
       const xs = pts.map((p) => p[0]);
       const ys = pts.map((p) => p[1]);
       return [{ x: Math.min(...xs), y: Math.min(...ys), z: 0 }, { x: Math.max(...xs), y: Math.max(...ys), z: f.params.height }];
+    }
+    case "hedron": {
+      const [a, b] = hedronBox(f.params.faces, f.params.radius);
+      return [{ x: a[0], y: a[1], z: a[2] }, { x: b[0], y: b[1], z: b[2] }];
     }
     case "prism": {
       const pts = prismPoints(f.params.radius, f.params.sides);

@@ -165,6 +165,7 @@ select { border: 1px solid var(--border); border-radius: 6px; padding: 4px; back
 .ico.cone, .ico.pyramid { clip-path: polygon(50% 0, 100% 100%, 0 100%); }
 .ico.pyramid { background: linear-gradient(90deg, var(--accent) 50%, color-mix(in srgb, var(--accent) 70%, #000) 50%); }
 .ico.wedge { clip-path: polygon(0 0, 100% 100%, 0 100%); }
+.ico.hedron { clip-path: polygon(50% 0, 98% 35%, 80% 95%, 20% 95%, 2% 35%); background: linear-gradient(160deg, var(--accent) 45%, color-mix(in srgb, var(--accent) 70%, #000) 45%); }
 .ico.prism { clip-path: polygon(25% 4%, 75% 4%, 100% 50%, 75% 96%, 25% 96%, 0 50%); }
 .ico.thread { background: repeating-linear-gradient(160deg, var(--accent) 0 3px, transparent 3px 5px); border-radius: 2px; width: 12px; margin: 0 3px; }
 .ico.gear { background: none; color: var(--accent); font-size: 20px; line-height: 18px; text-align: center; }

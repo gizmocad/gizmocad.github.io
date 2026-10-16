@@ -4,6 +4,7 @@
 //
 import { Euler, Matrix3, Matrix4, Quaternion, Vector3 } from "three";
 import { defaultSculpt, type SculptParams } from "./sculpt";
+import type { HedronFaces } from "./hedron";
 
 // Features form a tree through `parentId`. A feature's position and rotation
 // are relative to its parent, and a hole only cuts within its parent's branch.
@@ -18,6 +19,7 @@ export type ShapeKind =
   | "wedge"
   | "pyramid"
   | "prism"
+  | "hedron"
   | "thread"
   | "gear"
   | "spring"
@@ -161,6 +163,11 @@ export interface PrismParams {
   radius: number;
   sides: number;
   height: number;
+}
+/** A regular polyhedron resting on a face; `radius` is centre to corner. */
+export interface HedronParams {
+  faces: HedronFaces;
+  radius: number;
 }
 /**
  * One side of a cut: what's left of an object split in two. `at` is along the
@@ -310,7 +317,7 @@ export interface EdgeOp {
 }
 
 /** Kinds that can have fillets/chamfers. A group's apply to its merged result. */
-export const FINISHABLE: ShapeKind[] = ["box", "cylinder", "sphere", "cone", "tube", "torus", "wedge", "pyramid", "prism", "gear", "star", "text", "sketch", "group"];
+export const FINISHABLE: ShapeKind[] = ["box", "cylinder", "sphere", "cone", "tube", "torus", "wedge", "pyramid", "prism", "hedron", "gear", "star", "text", "sketch", "group"];
 
 /** Hollow it out: walls `thickness` thick, optionally open at the top or bottom. */
 export interface Shell {
@@ -360,6 +367,7 @@ export type Feature =
   | (FeatureBase & { kind: "wedge"; params: WedgeParams })
   | (FeatureBase & { kind: "pyramid"; params: WedgeParams })
   | (FeatureBase & { kind: "prism"; params: PrismParams })
+  | (FeatureBase & { kind: "hedron"; params: HedronParams })
   | (FeatureBase & { kind: "thread"; params: ThreadParams })
   | (FeatureBase & { kind: "gear"; params: GearParams })
   | (FeatureBase & { kind: "spring"; params: SpringParams })
@@ -412,6 +420,8 @@ function defaultParams(kind: ShapeKind): Feature["params"] {
       return { width: 20, depth: 20, height: 20 };
     case "prism":
       return { radius: 10, sides: 6, height: 20 };
+    case "hedron":
+      return { faces: 20, radius: 12 };
     case "thread":
       return { diameter: 10, pitch: 1.5, length: 20 };
     case "gear":

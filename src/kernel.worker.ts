@@ -2,7 +2,7 @@
 
 import opencascade from "replicad-opencascadejs";
 import wasmUrl from "replicad-opencascadejs/wasm?url";
-import { assembleWire, cast, draw, drawCircle, drawEllipse, drawText, genericSweep, getOC, loadFont, makeBaseBox, makeBox, makeCircle, makeCylinder, makeHelix, makeLine, makeEllipsoid, makeSphere, setOC, type Drawing, type Shape3D } from "replicad";
+import { assembleWire, cast, draw, drawCircle, drawEllipse, drawText, genericSweep, getOC, loadFont, makeBaseBox, makeBox, makeCircle, makeCylinder, makeHelix, makeLine, makeEllipsoid, makePolygon, makeSolid, makeSphere, setOC, type Drawing, type Shape3D } from "replicad";
 import {
   PLANE_ROTATIONS,
   SCREW_SIZES,
@@ -29,6 +29,7 @@ import mono400 from "@fontsource/roboto-mono/files/roboto-mono-latin-400-normal.
 import mono700 from "@fontsource/roboto-mono/files/roboto-mono-latin-700-normal.woff?url";
 import { entityPath, gearPath, isProfile, prismPoints, starPoints, strokePieces, type Path } from "./sketchGeometry";
 import type { KernelRequest, KernelResponse, MeshData } from "./kernel";
+import { hedron } from "./hedron";
 
 /** Fonts for text, bundled with the app (Roboto family, OFL/Apache licensed). */
 const FONT_FILES: Record<string, string> = {
@@ -554,6 +555,10 @@ function buildBase(f: Feature): Shape3D | null {
     case "prism": {
       const { radius: r, height: h } = f.params;
       return (polygonDrawing(prismPoints(r, f.params.sides)).sketchOnPlane("XY") as unknown as Solidifiable).extrude(h);
+    }
+    case "hedron": {
+      if (f.params.radius <= 0) throw new Error("A hedron needs a size above 0.");
+      return makeSolid(hedron(f.params.faces, f.params.radius).faces.map((face) => makePolygon(face)));
     }
     case "thread":
       return buildThread(f.params.diameter, f.params.pitch, f.params.length);

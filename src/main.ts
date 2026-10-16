@@ -45,6 +45,7 @@ import { CONSTRAINT_LABEL, constraintFits, measure as measureConstraint, refPoin
 import { autosave, build3mf, loadAutosave, parseStl, svgToEntities, type MeshPart } from "./fileFormats";
 import { SketchEditor, type MenuItem, type SketchTool } from "./sketcher";
 import { gearOuterRadius, removePoint } from "./sketchGeometry";
+import { HEDRON_FACES, HEDRON_NAMES, type HedronFaces } from "./hedron";
 import { addDetail, appendToStl, baseMesh, importedMesh, meshToSculpt, scaleSculpt, sculptTriangles, vertexCount, type BrushKind, type BrushSettings, type SculptBase } from "./sculpt";
 import { openImportFile, openTextFile, saveFile } from "./storage";
 import { formatLength, parseLength } from "./units";
@@ -596,6 +597,7 @@ const KIND_ICON: Record<ShapeKind, string> = {
   wedge: "◣",
   pyramid: "△",
   prism: "⬢",
+  hedron: "⬟",
   thread: "⩫",
   gear: "⚙",
   spring: "➰",
@@ -1134,6 +1136,22 @@ function textFields(f: Extract<Feature, { kind: "text" }>, update: (mutate: (f: 
     lengthField("Thickness (Z)", p.height, (v) => set((t) => (t.height = v)), { min: 0 }),
     lengthField("Letter spacing", p.spacing, (v) => set((t) => (t.spacing = v))),
     hint("Make it a <b>Hole</b> and sink it into a face to engrave the text instead. Letters under about 5 mm tall are hard to print."),
+  ];
+}
+
+function hedronFields(f: Extract<Feature, { kind: "hedron" }>, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
+  const set = (mutate: (p: typeof f.params) => void) => update((t) => t.kind === "hedron" && mutate(t.params));
+  return [
+    stacked(
+      "Faces",
+      segmented(
+        HEDRON_FACES.map((n) => ({ value: String(n), label: String(n), title: HEDRON_NAMES[n] })),
+        String(f.params.faces),
+        (v) => set((t) => (t.faces = Number(v) as HedronFaces)),
+      ),
+    ),
+    hint(HEDRON_NAMES[f.params.faces]),
+    lengthField("Diameter (corners)", f.params.radius * 2, (v) => set((t) => (t.radius = Math.max(0.01, v / 2))), { min: 0 }),
   ];
 }
 
@@ -1981,6 +1999,8 @@ function renderPropertiesPanel() {
     items.push(section("Text"), ...textFields(f, update));
   } else if (f.kind === "screw") {
     items.push(section("Screw hole"), ...screwFields(f, update));
+  } else if (f.kind === "hedron") {
+    items.push(section("Size"), ...hedronFields(f, update));
   } else if (PARAM_FIELDS[f.kind]) {
     items.push(
       section("Size"),
