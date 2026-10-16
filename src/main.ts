@@ -9,6 +9,8 @@ import {
   newId,
   normalizeDocument,
   PARAM_FIELDS,
+  LEAN_KINDS,
+  type Tilt,
   reparent,
   setWorldPlacement,
   addJoint,
@@ -1139,6 +1141,31 @@ function textFields(f: Extract<Feature, { kind: "text" }>, update: (mutate: (f: 
   ];
 }
 
+/** Taper the sides and/or lean the whole shape over. */
+function tiltSection(f: Feature, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
+  const tilt = f.tilt ?? { taper: 0, leanX: 0, leanY: 0 };
+  const set = (key: keyof Tilt, v: number) =>
+    update((t) => {
+      const next = { ...(t.tilt ?? { taper: 0, leanX: 0, leanY: 0 }), [key]: Math.max(-60, Math.min(60, v)) };
+      t.tilt = next.taper || next.leanX || next.leanY ? next : undefined;
+    });
+  const deg = { unit: "°", plain: true };
+  const canLean = LEAN_KINDS.has(f.kind) && !(f.kind === "sketch" && (f.params.operation !== "extrude" || f.params.plane !== "XY"));
+  // Round-all-over shapes have no sides to taper (and can't lean).
+  if (!canLean && f.kind !== "sketch") return [];
+  const items: HTMLElement[] = [section("Tilt"), lengthField("Taper sides", tilt.taper, (v) => set("taper", v), deg)];
+  if (canLean) items.push(lengthField("Lean X", tilt.leanX, (v) => set("leanX", v), deg), lengthField("Lean Y", tilt.leanY, (v) => set("leanY", v), deg));
+  items.push(
+    hint(
+      canLean
+        ? "Taper leans the sides in (negative: out), keeping the base. Lean slants the whole shape so its top shifts along X or Y."
+        : "Taper leans the sides in (negative: out), keeping the base. This shape can't lean over.",
+    ),
+  );
+  if (f.tilt) items.push(button("Straighten", () => update((t) => (t.tilt = undefined)), "link"));
+  return items;
+}
+
 function hedronFields(f: Extract<Feature, { kind: "hedron" }>, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
   const set = (mutate: (p: typeof f.params) => void) => update((t) => t.kind === "hedron" && mutate(t.params));
   return [
@@ -2014,6 +2041,7 @@ function renderPropertiesPanel() {
       ),
     );
   }
+  if (f.kind !== "group" && f.kind !== "plane" && f.kind !== "sculpt" && !(f.kind === "sketch" && f.params.operation === "flat")) items.push(...tiltSection(f, update));
   if (f.kind === "thread") {
     items.push(hint("For a nut or threaded hole, make it a <b>Hole</b> inside the part. For 3D printing, add about 0.3 mm to a hole's diameter so the bolt fits."));
   }

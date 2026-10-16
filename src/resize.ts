@@ -293,8 +293,8 @@ function resizeOwnTree(features: Feature[], f: Feature, s: Vec3, snap: number) {
  */
 export function featureExtents(f: Feature): [Vec3, Vec3] | null {
   const ext = baseExtents(f);
-  // A tilted cut's piece has no simple box; its mesh gives its extents instead.
-  if (!ext || f.clips?.some((c) => c.normal)) return null;
+  // A tilted cut's piece, or a tapered or leaning shape, has no simple box; its mesh gives its extents instead.
+  if (!ext || f.clips?.some((c) => c.normal) || isTilted(f)) return null;
   // A split piece only reaches its cut.
   for (const c of f.clips ?? []) {
     if (c.keep === "below") ext[1][c.axis] = Math.min(ext[1][c.axis], c.at);
@@ -371,6 +371,11 @@ function baseExtents(f: Feature): [Vec3, Vec3] | null {
     default:
       return null;
   }
+}
+
+/** Tapered or leaning (its shape-specific points and box no longer apply). */
+export function isTilted(f: Feature): boolean {
+  return !!f.tilt && (!!f.tilt.taper || !!f.tilt.leanX || !!f.tilt.leanY);
 }
 
 /** A length as the resize will commit it: snapped to the grid. */

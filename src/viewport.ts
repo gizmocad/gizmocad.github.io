@@ -9,7 +9,7 @@ import { TransformControls } from "three/addons/controls/TransformControls.js";
 import type { MeshData } from "./kernel";
 import { scenePalette } from "./theme";
 import { PLANE_ROTATIONS, baseMatrix, clampJoint, jointMatrix, localMatrix, worldMatrix, type Feature, type Joint, type SketchParams, type Vec3 } from "./model";
-import { featureExtents, rulerLength, staysRound, type ResizeAnchor } from "./resize";
+import { featureExtents, isTilted, rulerLength, staysRound, type ResizeAnchor } from "./resize";
 import { isClosed, outline, prismPoints } from "./sketchGeometry";
 import { hedron } from "./hedron";
 import { SculptMesh, sculptGeometry, type BrushSettings } from "./sculpt";
@@ -1746,7 +1746,8 @@ export class Viewport {
    */
   private snapPointsOf(id: string, node: THREE.Object3D): THREE.Vector3[] {
     // Split pieces use their (cut) box; the shape-specific points may be gone.
-    const f = this.features.get(id)?.clips?.length ? undefined : this.features.get(id);
+    const own = this.features.get(id);
+    const f = own?.clips?.length || (own && isTilted(own)) ? undefined : own;
     const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
     if (f?.kind === "cylinder") {
       const { radius: rx, radiusY: ry, height: h } = f.params;

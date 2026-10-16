@@ -164,6 +164,20 @@ export interface PrismParams {
   sides: number;
   height: number;
 }
+/**
+ * Tilt: `taper` leans every side face in from straight up (negative: out),
+ * keeping the base; `leanX`/`leanY` slant the whole shape so its top shifts
+ * that way while the top and bottom stay flat and the same size.
+ */
+export interface Tilt {
+  taper: number;
+  leanX: number;
+  leanY: number;
+}
+
+/** Kinds that can lean (they're built as straight extrusions or from flat faces). */
+export const LEAN_KINDS = new Set<string>(["box", "cylinder", "tube", "cone", "wedge", "pyramid", "prism", "hedron", "gear", "star", "text", "sketch"]);
+
 /** A regular polyhedron resting on a face; `radius` is centre to corner. */
 export interface HedronParams {
   faces: HedronFaces;
@@ -357,6 +371,8 @@ interface FeatureBase {
   mirrored?: boolean;
   /** Hollowed out (after fillets, before splits). */
   shell?: Shell;
+  /** Sides tapered and/or the whole shape leaning over (degrees). */
+  tilt?: Tilt;
   /** Left out of the model (and exports) without deleting it: a switched-off history step. */
   suppressed?: boolean;
 }

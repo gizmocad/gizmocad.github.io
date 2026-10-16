@@ -6,6 +6,7 @@ import { EdgeFinder, assembleWire, cast, draw, drawCircle, drawEllipse, drawText
 import {
   PLANE_ROTATIONS,
   SCREW_SIZES,
+  LEAN_KINDS,
   childrenOf,
   insideMergedGroup,
   isMergedGroup,
@@ -83,12 +84,70 @@ function entityDrawing(e: SketchEntity): Drawing | null {
 }
 
 type Solidifiable = {
-  extrude(distance: number): Shape3D;
+  extrude(distance: number, config?: { extrusionDirection?: [number, number, number]; extrusionProfile?: { profile: "linear"; endFactor: number } }): Shape3D;
   revolve(axis?: [number, number, number], config?: { origin?: [number, number, number]; angle?: number }): Shape3D;
 };
 
+/** How far the top moves per mm of height, in X and Y: the tangents of the lean angles. Null: upright. */
+type Lean = [number, number] | null;
+
+function leanOf(f: Feature): Lean {
+  const t = f.tilt;
+  if (!t || (!t.leanX && !t.leanY)) return null;
+  const tan = (deg: number) => Math.tan((Math.max(-60, Math.min(60, deg)) * Math.PI) / 180);
+  return [tan(t.leanX), tan(t.leanY)];
+}
+
+/**
+ * Extrude a drawing up by `h`: slanted so the top shifts by the lean, and/or
+ * narrowing towards the top so its outermost points lean in by `taper` degrees
+ * (exact for circles; used where OpenCascade's draft can't handle the sides).
+ */
+function extrudeUp(d: Drawing, h: number, lean: Lean, taper = 0): Shape3D {
+  const sketch = d.sketchOnPlane("XY") as unknown as Solidifiable;
+  let extrusionProfile: { profile: "linear"; endFactor: number } | undefined;
+  if (taper) {
+    const [[x0, y0], [x1, y1]] = d.boundingBox.bounds;
+    const reach = Math.max(-x0, x1, -y0, y1);
+    const endFactor = 1 - (h * Math.tan((taper * Math.PI) / 180)) / reach;
+    if (endFactor <= 0.01) throw new Error("The taper is too steep for this height: the sides would meet before the top.");
+    extrusionProfile = { profile: "linear", endFactor };
+  }
+  if (!lean && !extrusionProfile) return sketch.extrude(h);
+  const [tx, ty] = lean ?? [0, 0];
+  return sketch.extrude(h * Math.hypot(tx, ty, 1), { extrusionDirection: [tx, ty, 1], extrusionProfile });
+}
+
+/** A solid from flat faces (corner lists), each corner sheared by the lean. */
+function facesSolid(faces: [number, number, number][][], lean: Lean): Shape3D {
+  const [tx, ty] = lean ?? [0, 0];
+  return makeSolid(faces.map((face) => makePolygon(face.map(([x, y, z]) => [x + z * tx, y + z * ty, z] as [number, number, number]))));
+}
+
+/** Corners of a box from (x0, y0, 0) to (x1, y1, h) as six faces. */
+function boxFaces(x0: number, y0: number, x1: number, y1: number, h: number): [number, number, number][][] {
+  const c = (i: number): [number, number, number] => [i & 1 ? x1 : x0, i & 2 ? y1 : y0, i & 4 ? h : 0];
+  return [[0, 2, 3, 1], [4, 5, 7, 6], [0, 1, 5, 4], [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5]].map((f) => f.map(c));
+}
+
+/**
+ * Taper: every side face leans in by `deg` from straight up, pivoting about the
+ * base (z = 0), so the bottom keeps its size. Negative leans out.
+ */
+function draftSides(shape: Shape3D, deg: number): Shape3D | null {
+  try {
+    const result = shape.draft(deg, (f) => f.not((g) => g.parallelTo("XY")));
+    return isValidShape(result) ? result : null;
+  } catch {
+    return null; // OpenCascade's draft only handles some faces (not round ones).
+  }
+}
+
+/** Kinds that can be rebuilt narrowing towards the top when a draft won't work on them. */
+const SCALE_TAPER = new Set(["cylinder", "tube", "cone", "prism", "gear", "star", "text", "sketch"]);
+
 /** Extrude or revolve one 2D drawing, in the sketch's XY frame (direction/offset applied later). */
-function solidify(d: Drawing, p: SketchParams): Shape3D {
+function solidify(d: Drawing, p: SketchParams, lean: Lean = null, taper = 0): Shape3D {
   const sketch = d.sketchOnPlane("XY") as unknown as Solidifiable;
   if (p.operation === "revolve") {
     const [[minU], [maxU]] = d.boundingBox.bounds;
@@ -96,21 +155,21 @@ function solidify(d: Drawing, p: SketchParams): Shape3D {
     return sketch.revolve([0, 1, 0], { origin: [0, 0, 0], angle: p.angle });
   }
   const depth = Math.abs(p.depth);
-  return sketch.extrude(p.direction === "both" ? depth * 2 : depth);
+  return extrudeUp(d, p.direction === "both" ? depth * 2 : depth, lean, taper);
 }
 
 /**
  * One sketch entity as a solid. A brush stroke is first merged in 2D (fast);
  * if that gives bad geometry, its capsules are merged as solids instead (slow but robust).
  */
-function entitySolid(e: SketchEntity, p: SketchParams): Shape3D | null {
+function entitySolid(e: SketchEntity, p: SketchParams, lean: Lean, taper: number): Shape3D | null {
   const d = entityDrawing(e);
   if (!d) return null;
-  const solid = solidify(d, p);
+  const solid = solidify(d, p, lean, taper);
   if (e.type !== "stroke" || isValidShape(solid)) return solid;
   let merged: Shape3D | null = null;
   for (const piece of strokePieces(e)) {
-    const s = solidify(pathDrawing(piece), p);
+    const s = solidify(pathDrawing(piece), p, lean, taper);
     merged = merged ? merged.fuse(s) : s;
   }
   return merged;
@@ -121,17 +180,19 @@ function entitySolid(e: SketchEntity, p: SketchParams): Shape3D | null {
  * which OpenCascade handles far more reliably than 2D booleans on complex,
  * overlapping outlines (e.g. crossing brush strokes).
  */
-function buildSketch(p: SketchParams): Shape3D | null {
+function buildSketch(p: SketchParams, featureLean: Lean, taper = 0): Shape3D | null {
   if (p.operation === "flat") return null; // Just a drawing until it's extruded or revolved.
+  // Only an extrusion straight up from the XY plane leans (other planes would lean sideways).
+  const lean = p.operation === "extrude" && p.plane === "XY" ? featureLean : null;
   const profileEntities = p.entities.filter(isProfile);
   let shape: Shape3D | null = null;
   for (const e of profileEntities.filter((e) => e.mode === "add")) {
-    const s = entitySolid(e, p);
+    const s = entitySolid(e, p, lean, taper);
     if (s) shape = shape ? shape.fuse(s) : s;
   }
   if (!shape) return null;
   for (const e of profileEntities.filter((e) => e.mode === "subtract")) {
-    const s = entitySolid(e, p);
+    const s = entitySolid(e, p, lean, taper);
     if (s) shape = shape.cut(s);
   }
 
@@ -139,7 +200,8 @@ function buildSketch(p: SketchParams): Shape3D | null {
     const depth = Math.abs(p.depth);
     // A negative depth extrudes the other way, same as "reversed".
     const reversed = (p.direction === "reversed") !== p.depth < 0;
-    if (p.direction === "both" || reversed) shape = shape.translate(0, 0, -depth);
+    // Moved down along its slant, so a leaning sketch still leans about its plane.
+    if (p.direction === "both" || reversed) shape = shape.translate(-depth * (lean?.[0] ?? 0), -depth * (lean?.[1] ?? 0), -depth);
   }
   if (p.offset) shape = shape.translate(0, 0, p.offset);
   for (const r of PLANE_ROTATIONS[p.plane]) shape = shape.rotate(r.degrees, [0, 0, 0], r.axis);
@@ -262,6 +324,14 @@ function applyEdgeOps(shape: Shape3D, ops: EdgeOp[]): Shape3D {
 /** The feature's own geometry with its fillets/chamfers, in its local frame. */
 function buildOwn(f: Feature): Shape3D | null {
   let shape = buildBase(f);
+  const taper = f.kind !== "group" ? (f.tilt?.taper ?? 0) : 0;
+  if (shape && taper) {
+    // Draft the sides if OpenCascade can (exact angle on flat sides), else rebuild it narrowing.
+    const drafted = draftSides(shape, taper);
+    if (drafted) shape = drafted;
+    else if (SCALE_TAPER.has(f.kind)) shape = buildBase(f, taper);
+    else throw new Error("This shape's sides can't be tapered.");
+  }
   // Text takes neither: OpenCascade can't round or hollow font outlines reliably (see the Text panel).
   const finished = f.kind !== "group" && f.kind !== "text";
   if (shape && finished && f.edgeOps.length) shape = applyEdgeOps(shape, f.edgeOps);
@@ -465,7 +535,7 @@ function zigzagStruts(width: number, t: number, pitch: number, height: number, d
  * Lettering: each line drawn in the chosen font, lined up left/centre/right,
  * then the whole block centred on the origin and extruded up by `height`.
  */
-function buildText(p: TextParams): Shape3D {
+function buildText(p: TextParams, lean: Lean = null, taper = 0): Shape3D {
   const font = fonts[`${p.font}-${p.bold ? 700 : 400}`];
   if (!font) throw new Error("The font isn't loaded yet.");
   if (p.size <= 0 || p.height <= 0) throw new Error("Text needs a size and height above 0.");
@@ -501,7 +571,7 @@ function buildText(p: TextParams): Shape3D {
   const [[x0, y0], [x1, y1]] = drawing.boundingBox.bounds;
   const dx = p.align === "center" ? -(x0 + x1) / 2 : 0;
   const placed = drawing.translate(dx, -(y0 + y1) / 2);
-  return (placed.sketchOnPlane("XY") as unknown as Solidifiable).extrude(p.height);
+  return extrudeUp(placed, p.height, lean, taper);
 }
 
 /** A screw hole going down from z = 0 (with a little above it, so it cuts the face cleanly). */
@@ -537,16 +607,20 @@ function revolveUpright(profile: Drawing): Shape3D {
   return solid.rotate(90, [0, 0, 0], [1, 0, 0]);
 }
 
-function buildBase(f: Feature): Shape3D | null {
+/** `taper`: build it narrowing towards the top (only when a draft of its sides failed). */
+function buildBase(f: Feature, taper = 0): Shape3D | null {
+  const lean = LEAN_KINDS.has(f.kind) ? leanOf(f) : null;
   switch (f.kind) {
-    case "box":
-      return makeBaseBox(f.params.width, f.params.depth, f.params.height);
+    case "box": {
+      const { width: w, depth: d, height: h } = f.params;
+      return lean ? facesSolid(boxFaces(-w / 2, -d / 2, w / 2, d / 2, h), lean) : makeBaseBox(w, d, h);
+    }
     case "cylinder": {
       const { radius: rx, radiusY: ry, height } = f.params;
-      if (rx === ry) return makeCylinder(rx, height);
+      if (rx === ry) return lean || taper ? extrudeUp(drawCircle(rx), height, lean, taper) : makeCylinder(rx, height);
       // Oval: extrude an ellipse (drawEllipse wants the larger radius first, along X).
       const d = rx >= ry ? drawEllipse(rx, ry) : drawEllipse(ry, rx).rotate(90);
-      return (d.sketchOnPlane("XY") as unknown as Solidifiable).extrude(height);
+      return extrudeUp(d, height, lean, taper);
     }
     case "sphere":
     {
@@ -555,14 +629,34 @@ function buildBase(f: Feature): Shape3D | null {
       return (round ? makeSphere(rx) : makeEllipsoid(rx, ry, rz)).translate(0, 0, rz);
     }
     case "cone": {
-      const { radius: r, topRadius: t, height: h } = f.params;
+      const { radius: r, height: h } = f.params;
+      let t = f.params.topRadius;
+      if (taper) {
+        // Its sides lean in further: a smaller top.
+        t -= h * Math.tan((taper * Math.PI) / 180);
+        if (t < -1e-9 || (r <= 0 && t <= 0)) throw new Error("The taper is too steep for this cone: its top would vanish.");
+        t = Math.max(0, t);
+      }
       if (r <= 0 && t <= 0) throw new Error("A cone needs a bottom or top diameter.");
+      if (lean) {
+        // Slanted: loft from the bottom circle to the shifted top one (or its tip).
+        const [tx, ty] = lean;
+        type Loftable = { loftWith(other: unknown[], config?: { endPoint?: [number, number, number] }): Shape3D };
+        if (r <= 0) {
+          const top = drawCircle(t).sketchOnPlane("XY", [h * tx, h * ty, h]) as unknown as Loftable;
+          return top.loftWith([], { endPoint: [0, 0, 0] });
+        }
+        const bottom = drawCircle(r).sketchOnPlane("XY") as unknown as Loftable;
+        if (t <= 0) return bottom.loftWith([], { endPoint: [h * tx, h * ty, h] });
+        return bottom.loftWith([drawCircle(t).sketchOnPlane("XY", [h * tx, h * ty, h])]);
+      }
       // Half the cone's outline (radius across, height up), spun around the vertical axis.
       return revolveUpright(polygonDrawing([[0, 0], ...(r > 0 ? [[r, 0] as [number, number]] : []), ...(t > 0 ? [[t, h] as [number, number]] : []), [0, h]]));
     }
     case "tube": {
       const { radius: r, wall, height: h } = f.params;
       if (wall >= r) throw new Error("The wall is as thick as the tube's radius, so there's no hole. Use a cylinder, or a thinner wall.");
+      if (lean || taper) return extrudeUp(drawCircle(r).cut(drawCircle(r - wall)), h, lean, taper);
       return revolveUpright(polygonDrawing([[r - wall, 0], [r, 0], [r, h], [r - wall, h]]));
     }
     case "torus": {
@@ -572,6 +666,20 @@ function buildBase(f: Feature): Shape3D | null {
     }
     case "wedge": {
       const { width: w, depth: d, height: h } = f.params;
+      if (lean) {
+        const c = (x: number, y: number, z: number): [number, number, number] => [x, y, z];
+        const [a, b] = [-d / 2, d / 2];
+        return facesSolid(
+          [
+            [c(-w / 2, a, 0), c(-w / 2, b, 0), c(w / 2, b, 0), c(w / 2, a, 0)],
+            [c(-w / 2, a, 0), c(-w / 2, a, h), c(-w / 2, b, h), c(-w / 2, b, 0)],
+            [c(w / 2, a, 0), c(w / 2, b, 0), c(-w / 2, b, h), c(-w / 2, a, h)],
+            [c(-w / 2, a, 0), c(w / 2, a, 0), c(-w / 2, a, h)],
+            [c(-w / 2, b, 0), c(-w / 2, b, h), c(w / 2, b, 0)],
+          ],
+          lean,
+        );
+      }
       // The side profile (X across, Z up), extruded along Y and stood up.
       const side = polygonDrawing([[-w / 2, 0], [w / 2, 0], [-w / 2, h]]).sketchOnPlane("XY") as unknown as Solidifiable;
       return side.extrude(d).rotate(90, [0, 0, 0], [1, 0, 0]).translate(0, d / 2, 0);
@@ -581,15 +689,15 @@ function buildBase(f: Feature): Shape3D | null {
       const base = polygonDrawing([[-w / 2, -d / 2], [w / 2, -d / 2], [w / 2, d / 2], [-w / 2, d / 2]]).sketchOnPlane("XY") as unknown as {
         loftWith(other: unknown[], config: { endPoint: [number, number, number] }): Shape3D;
       };
-      return base.loftWith([], { endPoint: [0, 0, h] });
+      return base.loftWith([], { endPoint: lean ? [h * lean[0], h * lean[1], h] : [0, 0, h] });
     }
     case "prism": {
       const { radius: r, height: h } = f.params;
-      return (polygonDrawing(prismPoints(r, f.params.sides)).sketchOnPlane("XY") as unknown as Solidifiable).extrude(h);
+      return extrudeUp(polygonDrawing(prismPoints(r, f.params.sides)), h, lean, taper);
     }
     case "hedron": {
       if (f.params.radius <= 0) throw new Error("A hedron needs a size above 0.");
-      return makeSolid(hedron(f.params.faces, f.params.radius).faces.map((face) => makePolygon(face)));
+      return facesSolid(hedron(f.params.faces, f.params.radius).faces, lean);
     }
     case "thread":
       return buildThread(f.params.diameter, f.params.pitch, f.params.length);
@@ -598,24 +706,26 @@ function buildBase(f: Feature): Shape3D | null {
     case "gear": {
       const { teeth, module: m, thickness, bore } = f.params;
       if (m <= 0 || thickness <= 0) throw new Error("A gear needs a module and thickness above 0.");
-      let gear: Shape3D = (pathDrawing(gearPath(teeth, m)).sketchOnPlane("XY") as unknown as Solidifiable).extrude(thickness);
-      if (bore > 0) {
-        if (bore / 2 >= (m * Math.round(teeth)) / 2 - 1.25 * m) throw new Error("The bore is wider than the gear's teeth go down to.");
-        gear = gear.cut(makeCylinder(bore / 2, thickness + 2, [0, 0, -1]));
+      if (bore > 0 && bore / 2 >= (m * Math.round(teeth)) / 2 - 1.25 * m) throw new Error("The bore is wider than the gear's teeth go down to.");
+      if (lean || taper) {
+        const outline = pathDrawing(gearPath(teeth, m));
+        return extrudeUp(bore > 0 ? outline.cut(drawCircle(bore / 2)) : outline, thickness, lean, taper);
       }
+      let gear: Shape3D = (pathDrawing(gearPath(teeth, m)).sketchOnPlane("XY") as unknown as Solidifiable).extrude(thickness);
+      if (bore > 0) gear = gear.cut(makeCylinder(bore / 2, thickness + 2, [0, 0, -1]));
       return gear;
     }
     case "star": {
       const { points, radius, inner, height } = f.params;
       if (radius <= 0 || inner <= 0 || height <= 0) throw new Error("A star needs sizes above 0.");
-      return (polygonDrawing(starPoints(points, radius, inner)).sketchOnPlane("XY") as unknown as Solidifiable).extrude(height);
+      return extrudeUp(polygonDrawing(starPoints(points, radius, inner)), height, lean, taper);
     }
     case "text":
-      return buildText(f.params);
+      return buildText(f.params, lean, taper);
     case "screw":
       return buildScrewHole(f.params);
     case "sketch":
-      return buildSketch(f.params);
+      return buildSketch(f.params, lean, taper);
     case "group":
     case "plane":
     case "sculpt": // Meshes, drawn and exported outside the kernel.
@@ -721,7 +831,7 @@ function toMesh(id: string, shape: Shape3D, kind?: Feature["kind"]): MeshData {
 const meshCache = new Map<string, { mesh: MeshData | null; adjusted: Record<string, number> }>();
 
 function ownMesh(f: Feature): MeshData | null {
-  const key = JSON.stringify([f.kind, f.params, f.edgeOps, f.clips ?? [], f.shell ?? null]);
+  const key = JSON.stringify([f.kind, f.params, f.edgeOps, f.clips ?? [], f.shell ?? null, f.tilt ?? null]);
   if (!meshCache.has(key)) {
     const outer = adjusted;
     adjusted = {};
