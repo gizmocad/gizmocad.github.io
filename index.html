@@ -38,6 +38,19 @@
         <button id="undo" title="Undo (Ctrl+Z)">Undo</button>
         <button id="redo" title="Redo (Ctrl+Shift+Z)">Redo</button>
       </div>
+      <div class="group">
+        <label>Snap
+          <select id="snap">
+            <option value="0">Off</option>
+            <option value="0.1">0.1 mm</option>
+            <option value="0.5">0.5 mm</option>
+            <option value="1" selected>1 mm</option>
+            <option value="5">5 mm</option>
+            <option value="10">10 mm</option>
+          </select>
+        </label>
+        <label class="toggle"><input type="checkbox" id="combined" /> Show result</label>
+      </div>
       <div class="group segmented gizmo-mode">
         <button data-gizmo="translate" class="active" title="Move objects (W)">Move</button>
         <button data-gizmo="rotate" title="Rotate objects (E)">Rotate</button>
@@ -56,19 +69,6 @@
             <option value="off">Off</option>
           </select>
         </label>
-      </div>
-      <div class="group">
-        <label>Snap
-          <select id="snap">
-            <option value="0">Off</option>
-            <option value="0.1">0.1 mm</option>
-            <option value="0.5">0.5 mm</option>
-            <option value="1" selected>1 mm</option>
-            <option value="5">5 mm</option>
-            <option value="10">10 mm</option>
-          </select>
-        </label>
-        <label class="toggle"><input type="checkbox" id="combined" /> Show result</label>
       </div>
       <input type="file" id="file-input" accept=".gizmocad,.mintcad,.json" hidden />
       <input type="file" id="import-input" hidden />
