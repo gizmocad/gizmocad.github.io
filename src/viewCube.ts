@@ -93,16 +93,26 @@ export class ViewCube {
     }
     (this.outline.material as THREE.LineBasicMaterial).color.setHex(c.edge);
     (this.hover.material as THREE.MeshBasicMaterial).color.setHex(c.highlight);
+    this.dirty = true;
   }
 
   set visible(v: boolean) {
     this.element.hidden = !v;
     this.element.style.display = v ? "block" : "none"; // three.js sets an inline display that beats [hidden].
+    this.dirty = true;
   }
 
   /** Turn the cube to match the main camera (looking from `camera` towards `target`). */
+  /** Last camera turn drawn, so a still camera doesn't redraw the cube every frame. */
+  private drawn = "";
+  private dirty = true;
+
   render(camera: THREE.Camera, target: THREE.Vector3) {
     if (this.element.hidden) return;
+    const key = camera.quaternion.toArray().map((v) => v.toFixed(5)).join() + camera.position.clone().sub(target).normalize().toArray().map((v) => v.toFixed(5)).join();
+    if (key === this.drawn && !this.dirty) return;
+    this.drawn = key;
+    this.dirty = false;
     const dir = camera.position.clone().sub(target).normalize();
     this.camera.position.copy(dir).multiplyScalar(8);
     this.camera.up.copy(camera.up);
@@ -123,6 +133,7 @@ export class ViewCube {
   }
 
   private showHover(dir: THREE.Vector3 | null) {
+    this.dirty = true;
     this.hover.visible = !!dir;
     this.element.style.cursor = dir ? "pointer" : "";
     if (!dir) return;

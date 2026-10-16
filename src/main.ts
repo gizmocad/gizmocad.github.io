@@ -1565,7 +1565,12 @@ async function paste() {
 // ---- History ------------------------------------------------------------------------
 
 /** The strip of steps under the view: roll back to see (and edit) the model as it was, switch steps off. */
+let historyKey = "";
 function renderHistory() {
+  // Only rebuild the strip when something it shows changed.
+  const key = JSON.stringify([historyMarker, selectedIds, doc.features.map((f) => [f.id, f.name, f.kind, f.suppressed])]);
+  if (key === historyKey) return;
+  historyKey = key;
   const bar = $("#history-steps");
   const chips: HTMLElement[] = [];
   const end = historyMarker ?? doc.features.length;
@@ -2903,7 +2908,9 @@ let autosaveReady = false;
 function scheduleAutosave() {
   if (!autosaveReady) return; // Not before the last session has been checked, or it'd be overwritten.
   clearTimeout(autosaveTimer);
-  autosaveTimer = window.setTimeout(() => autosave(JSON.stringify(doc)).catch(() => {}), 800);
+  // Saved a little after editing stops, when the browser is idle, so it never gets in the way.
+  const save = () => autosave(JSON.stringify(doc)).catch(() => {});
+  autosaveTimer = window.setTimeout(() => ("requestIdleCallback" in window ? requestIdleCallback(save, { timeout: 5000 }) : save()), 2000);
 }
 
 /** Bring back the last session's model (if this one is still empty). */

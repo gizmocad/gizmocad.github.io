@@ -268,7 +268,6 @@ export class Viewport {
     this.scene.add(sun);
 
     this.scene.add(this.grids, this.root, this.sectionGroup, this.bedGroup);
-    this.renderer.localClippingEnabled = true;
 
     this.sketchLayer.matrixAutoUpdate = false;
     this.sketchLayer.visible = false;
@@ -1175,6 +1174,8 @@ export class Viewport {
       const plane = new THREE.Plane(n, section.flip ? -section.at : section.at);
       this.section = { plane, ...section };
     }
+    // Clipping costs a little on every draw, so it's only on while a section is shown.
+    this.renderer.localClippingEnabled = !!this.section;
     this.applyAppearance();
   }
 

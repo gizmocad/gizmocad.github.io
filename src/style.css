@@ -423,7 +423,7 @@ body.sketching .view-tools { display: none; }
   align-items: center;
   gap: 6px;
   padding: 5px 8px;
-  background: var(--overlay);
+  background: var(--panel); /* Solid: blending a see-through bar over the 3D view costs every frame. */
   border-top: 1px solid var(--border);
   font-size: 12px;
 }
