@@ -2441,6 +2441,14 @@ function renderSketchPanel(panel: HTMLElement, s: SketchFeature, ed: SketchEdito
     items.push(section(`Edit ${ENTITY_LABEL[e.type].toLowerCase()}`));
     if (e.type !== "point" && e.type !== "line") items.push(segmented(MODE_OPTIONS, e.mode, (m) => updateEntity(e.id, (t) => (t.mode = m)), "entity"));
     items.push(...entityFields(e, updateEntity));
+    if (e.trims?.length) {
+      // Trimmed but still itself: its sizes above still work; the trim follows.
+      const n = e.trims.length;
+      items.push(
+        hint(`Trimmed ${n === 1 ? "once" : `${n} times`}: it keeps its own handles and sizes, and the trimmed edge stays where it was.`),
+        button(n === 1 ? "Undo the trim" : "Undo the last trim", () => updateEntity(e.id, (t) => (t.trims = t.trims?.slice(0, -1).length ? t.trims.slice(0, -1) : undefined))),
+      );
+    }
   }
   if (sel.length) {
     const actions = document.createElement("div");

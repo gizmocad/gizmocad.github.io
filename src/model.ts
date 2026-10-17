@@ -246,7 +246,18 @@ export type EntityMode = "add" | "subtract" | "construction";
 export type Point2 = [number, number];
 
 /** Angles are in degrees, counter-clockwise from +U. */
-export type SketchEntity = { id: string; mode: EntityMode } & (
+/**
+ * A trim kept on a shape, so it stays editable as itself (a trimmed circle can
+ * still be resized as a circle): "keep" only the part inside any of `shapes`,
+ * "cut" away the part inside them, or "merge" them in. `shapes` are copies of
+ * what it was trimmed against, as they were then.
+ */
+export interface SketchTrim {
+  op: "keep" | "cut" | "merge";
+  shapes: SketchEntity[];
+}
+
+export type SketchEntity = { id: string; mode: EntityMode; trims?: SketchTrim[] } & (
   | { type: "rect"; x: number; y: number; width: number; height: number; angle: number; radius: number }
   | { type: "circle"; x: number; y: number; radius: number }
   | { type: "ellipse"; x: number; y: number; rx: number; ry: number; angle: number }

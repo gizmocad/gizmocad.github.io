@@ -28,7 +28,7 @@ import serif400 from "@fontsource/roboto-slab/files/roboto-slab-latin-400-normal
 import serif700 from "@fontsource/roboto-slab/files/roboto-slab-latin-700-normal.woff?url";
 import mono400 from "@fontsource/roboto-mono/files/roboto-mono-latin-400-normal.woff?url";
 import mono700 from "@fontsource/roboto-mono/files/roboto-mono-latin-700-normal.woff?url";
-import { entityPath, gearPath, isProfile, prismPoints, starPoints, strokePieces, type Path } from "./sketchGeometry";
+import { entityPath, gearPath, isProfile, outline, prismPoints, starPoints, strokePieces, type Path } from "./sketchGeometry";
 import type { KernelRequest, KernelResponse, MeshData } from "./kernel";
 import { hedron } from "./hedron";
 
@@ -61,6 +61,7 @@ function pathDrawing(path: Path): Drawing {
 }
 
 function entityDrawing(e: SketchEntity): Drawing | null {
+  if (e.trims?.length) return trimmedDrawing(e);
   if (e.type === "stroke") {
     // Open offsets crash OpenCascade's 2D offset, so a stroke is the union of a capsule per segment.
     let result: Drawing | null = null;
@@ -81,6 +82,32 @@ function entityDrawing(e: SketchEntity): Drawing | null {
   if ((e.type === "circle" || e.type === "ngon" || e.type === "slot") && e.radius <= 0) return null;
   const path = entityPath(e);
   return path ? pathDrawing(path) : null;
+}
+
+/**
+ * A trimmed shape: its own exact outline combined with what it was trimmed
+ * against. If OpenCascade's 2D booleans fail, the sampled outline (the same one
+ * the sketch editor shows) stands in.
+ */
+function trimmedDrawing(e: SketchEntity): Drawing | null {
+  try {
+    let d = entityDrawing({ ...e, trims: undefined } as SketchEntity);
+    for (const t of e.trims ?? []) {
+      if (!d) return null;
+      let others: Drawing | null = null;
+      for (const s of t.shapes) {
+        const sd = entityDrawing(s);
+        if (sd) others = others ? others.fuse(sd) : sd;
+      }
+      if (!others) continue;
+      d = t.op === "keep" ? d.intersect(others) : t.op === "cut" ? d.cut(others) : d.fuse(others);
+    }
+    if (d) return d;
+  } catch {
+    // Fall through to the outline.
+  }
+  const pts = outline(e);
+  return pts.length >= 3 ? polygonDrawing(pts) : null;
 }
 
 type Solidifiable = {

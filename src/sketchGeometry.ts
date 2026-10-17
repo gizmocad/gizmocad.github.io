@@ -3,7 +3,7 @@
 
 import * as clippingModule from "polygon-clipping";
 import type { MultiPolygon } from "polygon-clipping";
-import type { Point2, SketchEntity } from "./model";
+import type { Point2, SketchEntity, SketchTrim } from "./model";
 
 // The package's types name its functions, but its ES build only has a default export holding them.
 const clipping = ((clippingModule as unknown as { default?: typeof clippingModule }).default ?? clippingModule) as typeof clippingModule;
@@ -289,8 +289,41 @@ export function samplePath(path: Path): P[] {
   return out;
 }
 
-/** Points to draw. Closed entities form a loop; lines are two points; points are one. */
+/** Points to draw. Closed entities form a loop; lines are two points; points are one. Trims are applied. */
 export function outline(e: SketchEntity): P[] {
+  return e.trims?.length ? trimmedOutline(e) : baseOutline(e);
+}
+
+/** Trimmed outlines, by shape: the sketch redraws on every pointer move, and clipping isn't free. */
+const trimCache = new Map<string, P[]>();
+
+/** The shape's own outline with its trims applied (the biggest piece, if a trim split it). */
+function trimmedOutline(e: SketchEntity): P[] {
+  const { id: _id, mode: _mode, ...rest } = e;
+  const key = JSON.stringify(rest);
+  const hit = trimCache.get(key);
+  if (hit) return hit;
+  let result: P[] = [];
+  try {
+    let mp: MultiPolygon = [[baseOutline(e)]];
+    for (const t of e.trims ?? []) {
+      const rings = t.shapes.map((s) => outline(s)).filter((r) => r.length >= 3);
+      if (!rings.length) continue;
+      const others: MultiPolygon = clipping.union(...(rings.map((r) => [[r]]) as [MultiPolygon, ...MultiPolygon[]]));
+      mp = t.op === "keep" ? clipping.intersection(mp, others) : t.op === "cut" ? clipping.difference(mp, others) : clipping.union(mp, others);
+    }
+    const biggest = mp.reduce<P[] | null>((best, poly) => (!best || polygonArea(poly[0] as P[]) > polygonArea(best) ? (poly[0] as P[]) : best), null);
+    result = biggest ? tidyRing(biggest) : [];
+  } catch {
+    result = baseOutline(e);
+  }
+  if (trimCache.size > 300) trimCache.clear();
+  trimCache.set(key, result);
+  return result;
+}
+
+/** The shape's own outline, ignoring trims. */
+function baseOutline(e: SketchEntity): P[] {
   if (e.type === "point") return [[e.x, e.y]];
   if (e.type === "line") return [[e.x1, e.y1], [e.x2, e.y2]];
   if (e.type === "ellipse") {
@@ -502,6 +535,8 @@ export function translateEntity(e: SketchEntity, [du, dv]: P) {
     [e.x2, e.y2] = t([e.x2, e.y2]);
   }
   if (e.type === "polygon" || e.type === "spline" || e.type === "stroke") e.points = e.points.map(t);
+  // What it was trimmed against moves with it.
+  for (const trim of e.trims ?? []) for (const s of trim.shapes) translateEntity(s, [du, dv]);
 }
 
 /** Points the cursor snaps to: corners, centres, ends, midpoints. */
@@ -563,6 +598,7 @@ function project(p: P, a: P, b: P): { at: P; t: number } {
 
 /** Can `splitAt` do anything with this entity? */
 export function canSplit(e: SketchEntity): boolean {
+  if (e.trims?.length) return false; // Its outline comes from the trim; it has no corners of its own to add to.
   return e.type === "line" || e.type === "stroke" || e.type === "polygon" || e.type === "spline" || e.type === "ngon" || (e.type === "rect" && !e.radius);
 }
 
@@ -651,6 +687,17 @@ function tidyRing(points: P[]): P[] {
     }
   }
   return pts;
+}
+
+/**
+ * Keep `hit` as itself (still resizable as a circle, rectangle…), with this trim
+ * recorded on it, when the result is one plain outline. Otherwise null: pieces
+ * and holes become polygons as before.
+ */
+function trimmed(hit: SketchEntity, op: SketchTrim["op"], shapes: SketchEntity[], result: MultiPolygon): SketchEntity | null {
+  if (hit.type === "stroke" || result.length !== 1 || result[0].length !== 1) return null;
+  const copies = shapes.map((s) => ({ ...structuredClone(s), mode: "add" as const }));
+  return { ...structuredClone(hit), trims: [...(hit.trims ?? []), { op, shapes: copies }] };
 }
 
 /** Turn a boolean result back into polygon entities (holes become cut-outs). */
@@ -744,10 +791,12 @@ export function trimAt(entities: SketchEntity[], p: P, tolerance: number, ids: (
     if (same.length) {
       const group = [hit, ...same];
       const merged = clipping.union([ring(hit)], ...same.map((o) => [ring(o)]));
-      return { remove: group.map((g) => g.id), add: toEntities(merged, hit.mode, ids), message: `Merged ${group.length} overlapping shapes into one outline.` };
+      const kept = trimmed(hit, "merge", same, merged);
+      return { remove: group.map((g) => g.id), add: kept ? [kept] : toEntities(merged, hit.mode, ids), message: `Merged ${group.length} overlapping shapes into one outline.` };
     }
     const left = clipping.difference([ring(hit)], ...around.map((o) => [ring(o)]));
-    return { remove: [hit.id], add: toEntities(left, hit.mode, ids), message: "Trimmed the shape back to the edge it overlapped." };
+    const kept = trimmed(hit, "cut", around, left);
+    return { remove: [hit.id], add: kept ? [kept] : toEntities(left, hit.mode, ids), message: "Trimmed the shape back to the edge it overlapped." };
   } catch {
     return null;
   }
@@ -765,7 +814,8 @@ function trimOutside(hit: SketchEntity, others: SketchEntity[], p: P, ids: () =>
       const inside = clipping.union([ring(overlapping[0])], ...overlapping.slice(1).map((o) => [ring(o)]));
       const left = clipping.intersection([ring(hit)], inside);
       if (!left.length) return null;
-      return { remove: [hit.id], add: toEntities(left, hit.mode, ids), message: "Trimmed off the part sticking out of the other shape." };
+      const kept = trimmed(hit, "keep", overlapping, left);
+      return { remove: [hit.id], add: kept ? [kept] : toEntities(left, hit.mode, ids), message: "Trimmed off the part sticking out of the other shape." };
     }
     const pts = ring(hit);
     let best: { a: P; b: P; d: number } | null = null;
@@ -785,12 +835,14 @@ function trimOutside(hit: SketchEntity, others: SketchEntity[], p: P, ids: () =>
     const u: P = [dir[0] / len, dir[1] / len];
     let n: P = [-u[1], u[0]];
     if ((p[0] - a[0]) * n[0] + (p[1] - a[1]) * n[1] < 0) n = [-n[0], -n[1]];
-    const big = 1e5;
+    const big = 1e4;
     const at = (s: number, t: number): P => [a[0] + u[0] * s + n[0] * t, a[1] + u[1] * s + n[1] * t];
     const side = [at(-big, 0), at(big, 0), at(big, big), at(-big, big)];
     const left = clipping.difference([pts], [side]);
     if (!left.length) return null;
-    return { remove: [hit.id], add: toEntities(left, hit.mode, ids), message: "Cut the shape along the guide line, removing the side you clicked." };
+    const box: SketchEntity = { id: "", mode: "add", type: "polygon", points: side.map(([x, y]) => [round(x), round(y)] as P), bends: [0, 0, 0, 0] };
+    const kept = trimmed(hit, "cut", [box], left);
+    return { remove: [hit.id], add: kept ? [kept] : toEntities(left, hit.mode, ids), message: "Cut the shape along the guide line, removing the side you clicked." };
   } catch {
     return null;
   }
