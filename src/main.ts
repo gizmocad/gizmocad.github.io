@@ -276,7 +276,8 @@ async function buildNow() {
   try {
     await kernel.ready;
     const combined = showCombined && !editingSketchId && !edgePick && !sculptingId;
-    const { meshes, errors, adjusted } = await kernel.build(edgePick ? featuresForPicking(features) : features, combined);
+    // Holes are shown cut, except while picking edges (the picked edges are the object's own).
+    const { meshes, errors, adjusted } = await kernel.build(edgePick ? featuresForPicking(features) : features, combined, !edgePick);
     if (token !== buildToken) return; // A newer edit superseded this build.
     buildErrors = errors;
     const adjustmentsChanged = JSON.stringify(adjusted) !== JSON.stringify(edgeAdjustments);

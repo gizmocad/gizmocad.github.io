@@ -8,6 +8,8 @@ import {
   SCREW_SIZES,
   LEAN_KINDS,
   childrenOf,
+  subtreeIds,
+  worldMatrix,
   insideMergedGroup,
   isMergedGroup,
   type Clip,
@@ -32,6 +34,7 @@ import mono700 from "@fontsource/roboto-mono/files/roboto-mono-latin-700-normal.
 import { entityPath, gearPath, isProfile, outline, prismPoints, starPoints, strokePieces, type Path } from "./sketchGeometry";
 import type { ImportedSolid, ImportSource, KernelRequest, KernelResponse, MeshData } from "./kernel";
 import { hedron } from "./hedron";
+import { Matrix3, Vector3 } from "three";
 
 /** Fonts for text, bundled with the app (Roboto family, OFL/Apache licensed). */
 const FONT_FILES: Record<string, string> = {
@@ -1071,6 +1074,112 @@ function ownMesh(f: Feature): MeshData | null {
   };
 }
 
+// ---- Holes shown cut ------------------------------------------------------------------
+
+/**
+ * The holes that cut this object in the finished model: its own hole children,
+ * and those of each ancestor it's joined to as a solid (top-level holes cut every
+ * top-level solid). None for a hole, or for something that's part of a hole.
+ */
+function cuttingHoles(features: Feature[], f: Feature): Feature[] {
+  if (f.mode === "hole") return [];
+  // A merged group's own holes are already in its shape.
+  const holes: Feature[] = isMergedGroup(f) ? [] : childrenOf(features, f.id).filter((c) => c.mode === "hole");
+  let node = f;
+  while (node.parentId) {
+    const parent = features.find((x) => x.id === node.parentId);
+    if (!parent) break;
+    if (parent.mode === "hole") return [];
+    holes.push(...childrenOf(features, parent.id).filter((c) => c.mode === "hole"));
+    node = parent;
+  }
+  holes.push(...childrenOf(features, null).filter((c) => c.mode === "hole" && c.id !== node.id));
+  return holes;
+}
+
+/** A shape in its object's frame, moved to where it is in the world (through its parents). */
+function placeInWorld(features: Feature[], f: Feature, shape: Shape3D): Shape3D {
+  let s = place(f, shape);
+  for (let p = features.find((x) => x.id === f.parentId); p; p = features.find((x) => x.id === p!.parentId)) s = place(p, s);
+  return s;
+}
+
+const r6 = (v: number) => Math.round(v * 1e6) / 1e6 + 0;
+/** What a feature's subtree looks like to the kernel (names, colours and visibility don't change geometry). */
+const geometryKey = (features: Feature[], id: string) =>
+  features
+    .filter((x) => subtreeIds(features, id).has(x.id))
+    .map((x) => [x.id, x.parentId, x.kind, x.mode, x.kind === "imported" ? { ...x.params, brep: undefined } : x.params, x.position, x.rotation, x.edgeOps, x.clips, x.shell, x.tilt, x.mirrored, x.joint]);
+
+const cutCache = new Map<string, MeshData | null>();
+
+/**
+ * The object as it ends up with the holes that reach it cut away, in its own
+ * frame (so it shows where its own mesh would). Null when no hole touches it,
+ * or the cut fails (it's then shown whole; Show result reports why).
+ */
+function cutMesh(features: Feature[], f: Feature): MeshData | null {
+  if (f.kind === "plane" || f.kind === "sculpt" || (f.kind === "group" && !isMergedGroup(f))) return null;
+  const holes = cuttingHoles(features, f);
+  if (!holes.length) return null;
+  const world = worldMatrix(features, f.id);
+  const key = JSON.stringify([
+    f.kind === "group" ? geometryKey(features, f.id) : [f.kind, f.kind === "imported" ? { ...f.params, brep: undefined } : f.params, f.edgeOps, f.clips ?? [], f.shell ?? null, f.tilt ?? null, f.mirrored ?? false],
+    world.elements.map(r6),
+    holes.map((h) => [geometryKey(features, h.id), worldMatrix(features, h.id).elements.map(r6)]),
+  ]);
+  if (!cutCache.has(key)) {
+    const outerFailures = failures;
+    failures = {};
+    let mesh: MeshData | null = null;
+    try {
+      const own = f.kind === "group" ? branch(features, f) : buildOwn(f);
+      if (own) {
+        let shape = placeInWorld(features, f, own);
+        const [lo, hi] = shape.boundingBox.bounds;
+        let cut = false;
+        for (const h of holes) {
+          const hs = branch(features, h);
+          if (!hs) continue;
+          const placed = placeInWorld(features, h, hs);
+          const [a, b] = placed.boundingBox.bounds;
+          // Only holes that reach it.
+          if ([0, 1, 2].some((k) => a[k] > hi[k] || b[k] < lo[k])) continue;
+          shape = shape.cut(placed);
+          cut = true;
+        }
+        if (cut) mesh = toLocal(toMesh(f.id, shape, f.kind), world);
+      }
+    } catch {
+      mesh = null;
+    } finally {
+      failures = outerFailures;
+    }
+    cutCache.set(key, mesh);
+    if (cutCache.size > 200) cutCache.delete(cutCache.keys().next().value!);
+  }
+  const m = cutCache.get(key)!;
+  return m && { id: f.id, vertices: m.vertices.slice(), normals: m.normals.slice(), triangles: m.triangles.slice(), edges: m.edges.slice(), edgeGroups: m.edgeGroups.slice() };
+}
+
+/** A mesh made in world coordinates, moved into the frame `world` places things from. */
+function toLocal(m: MeshData, world: import("three").Matrix4): MeshData {
+  const inv = world.clone().invert();
+  const nm = new Matrix3().getNormalMatrix(inv);
+  const v = new Vector3();
+  const points = (arr: Float32Array) => {
+    const out = new Float32Array(arr.length);
+    for (let i = 0; i < arr.length; i += 3) out.set(v.fromArray(arr, i).applyMatrix4(inv).toArray(), i);
+    return out;
+  };
+  const normals = new Float32Array(m.normals.length);
+  for (let i = 0; i < normals.length; i += 3) normals.set(v.fromArray(m.normals, i).applyMatrix3(nm).normalize().toArray(), i);
+  const triangles = m.triangles.slice();
+  // Mirrored: the view flips it back, so its triangles must face the other way here.
+  if (world.determinant() < 0) for (let i = 0; i < triangles.length; i += 3) [triangles[i + 1], triangles[i + 2]] = [triangles[i + 2], triangles[i + 1]];
+  return { ...m, vertices: points(m.vertices), normals, triangles, edges: points(m.edges) };
+}
+
 function post(msg: KernelResponse, transfer: Transferable[] = []) {
   (self as unknown as Worker).postMessage(msg, transfer);
 }
@@ -1102,7 +1211,9 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
           // Shapes inside a merged group are shown as part of the group's mesh.
           if (insideMergedGroup(req.features, f.id)) continue;
           try {
-            if (isMergedGroup(f)) {
+            const cut = req.cuts ? cutMesh(req.features, f) : null;
+            if (cut) meshes.push(cut);
+            else if (isMergedGroup(f)) {
               failures = {};
               const shape = branch(req.features, f);
               Object.assign(errors, failures);

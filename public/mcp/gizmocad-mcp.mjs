@@ -277,7 +277,7 @@ const TOOLS = [
   {
     name: "screenshot",
     description:
-      "A picture of the model as GizmoCAD shows it (the user's own view isn't moved). Use it to check your work. Holes are drawn see-through red unless show_result is on, which shows the true boolean result.",
+      "A picture of the model as GizmoCAD shows it (the user's own view isn't moved). Use it to check your work. Shapes are shown with their holes already cut, and the hole objects drawn see-through red on top; show_result shows only the finished boolean result (holes hidden, parts merged).",
     inputSchema: {
       type: "object",
       properties: {

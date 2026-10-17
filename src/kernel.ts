@@ -29,7 +29,8 @@ export type ImportedSolid =
   | { kind: "mesh"; name: string; color?: string; vertices: Float32Array; triangles: Uint32Array };
 
 export type KernelRequest =
-  | { type: "build"; requestId: number; features: Feature[]; combined: boolean }
+  /** `cuts`: show each object with the holes that reach it cut away. */
+  | { type: "build"; requestId: number; features: Feature[]; combined: boolean; cuts?: boolean }
   | { type: "export"; requestId: number; features: Feature[]; format: "stl" | "step" }
   /** One finished mesh per top-level object, in world coordinates (for 3MF). */
   | { type: "parts"; requestId: number; features: Feature[] }
@@ -91,8 +92,8 @@ export class Kernel {
   }
 
   /** Builds meshes; per-feature failures come back in `errors` instead of failing the whole build. */
-  build(features: Feature[], combined: boolean): Promise<BuildResult> {
-    return this.request({ type: "build", features, combined });
+  build(features: Feature[], combined: boolean, cuts = false): Promise<BuildResult> {
+    return this.request({ type: "build", features, combined, cuts });
   }
 
   /**

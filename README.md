@@ -30,7 +30,8 @@
 - **Tilt:** taper an object's sides in or out by an angle (the base keeps its size), or lean the whole shape over along X or Y.
 - **Colours** per object, shown in the view and saved into 3MF exports.
 - **Measure** (M): click two points (corners and edges snap) for the distance and its X/Y/Z parts; two faces also give their angle.
-- Mark any shape as a **hole**. **Show result** shows the true boolean result, computed by the OpenCascade kernel.
+- Mark any shape as a **hole**: what it cuts is shown cut as you work, with the hole itself see-through so you can still move it.
+  **Show result** shows only the finished boolean result (parts merged), computed by the OpenCascade kernel.
 - **Sketches:** points, guide lines, rectangles (rounded corners, any angle), circles, ellipses,
   regular polygons, slots, polygons with arc edges, smooth curves (closer points make tighter bends), and freehand brush strokes, on the XY/XZ/YZ plane or any
   tilted Plane object. Shapes can add to the profile, cut it, or just act as guides. Snap to existing
