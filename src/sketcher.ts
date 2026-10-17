@@ -32,6 +32,9 @@ import {
 import { scenePalette } from "./theme";
 import type { SketchPointer } from "./viewport";
 
+/** A ruler length: always two decimals, e.g. "20.00". */
+const twoPlaces = (v: number) => (Math.abs(v) < 0.005 ? 0 : v).toFixed(2);
+
 export type SketchTool = "select" | "point" | "line" | "rect" | "circle" | "ellipse" | "ngon" | "slot" | "polygon" | "spline" | "brush" | "split" | "trim" | "constrain";
 
 export interface MenuItem {
@@ -683,7 +686,7 @@ export class SketchEditor {
 
   /** Dimension lines for a shape: its sizes as they change (like the Resize ruler in 3D). */
   private drawRuler(e: SketchEntity, key?: string) {
-    const mm = (v: number) => `${Math.round(v * 100) / 100} mm`;
+    const mm = (v: number) => `${twoPlaces(v)} mm`;
     const centre = (pts: P[]): P => [pts.reduce((s, p) => s + p[0], 0) / pts.length, pts.reduce((s, p) => s + p[1], 0) / pts.length];
     switch (e.type) {
       case "line":
@@ -736,7 +739,7 @@ export class SketchEditor {
     const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
     if (len < 1e-9) return;
     const deg = Math.round(((Math.atan2(b[1] - a[1], b[0] - a[0]) * 180) / Math.PI) * 10) / 10;
-    this.dimension(a, b, `${Math.round(len * 100) / 100} mm · ${deg + 0}°`);
+    this.dimension(a, b, `${twoPlaces(len)} mm · ${deg + 0}°`);
   }
 
   /** A line from a centre out to its size, labelled. */

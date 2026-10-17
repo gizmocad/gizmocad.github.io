@@ -2976,6 +2976,7 @@ $("#redo").onclick = () => restore(redoStack, undoStack);
 $("#snap").onchange = (e) => {
   viewport.setSnap(parseFloat((e.target as HTMLSelectElement).value));
 };
+viewport.setSnap(parseFloat(($("#snap") as HTMLSelectElement).value)); // In case the browser brought back an earlier choice.
 $("#combined").onchange = (e) => {
   showCombined = (e.target as HTMLInputElement).checked;
   if (showCombined) stopSketchEdit();
@@ -3652,7 +3653,16 @@ keepRatioButton.onclick = () => {
 };
 $("#snap-face").onclick = () => (viewport.placing ? viewport.cancelPlacement() : snapToFace());
 const pointSnapSelect = $("#point-snap") as HTMLSelectElement;
-pointSnapSelect.onchange = () => viewport.setPointSnap(pointSnapSelect.value !== "off", pointSnapSelect.value === "show");
+const POINT_SNAP_KEY = "gizmocad.pointSnap";
+const applyPointSnap = () => viewport.setPointSnap(pointSnapSelect.value !== "off", pointSnapSelect.value === "show");
+pointSnapSelect.onchange = () => {
+  applyPointSnap();
+  store(POINT_SNAP_KEY, pointSnapSelect.value);
+};
+// Remembered between visits, and applied now (a browser can also bring back the menu's last choice on reload).
+const savedPointSnap = stored(POINT_SNAP_KEY);
+if (savedPointSnap && [...pointSnapSelect.options].some((o) => o.value === savedPointSnap)) pointSnapSelect.value = savedPointSnap;
+applyPointSnap();
 const localAxesButton = $("#local-axes");
 function toggleLocalAxes() {
   const on = !localAxesButton.classList.contains("on");

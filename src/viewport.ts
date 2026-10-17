@@ -1177,7 +1177,7 @@ export class Viewport {
   private measureText(a: THREE.Vector3, b: THREE.Vector3, na: THREE.Vector3 | null, nb: THREE.Vector3 | null): string {
     const f = (v: number) => String(Math.round(v * 100) / 100 + 0);
     const d = b.clone().sub(a);
-    let text = `${f(d.length())} mm   ΔX ${f(Math.abs(d.x))}  ΔY ${f(Math.abs(d.y))}  ΔZ ${f(Math.abs(d.z))}`;
+    let text = `${d.length().toFixed(2)} mm   ΔX ${Math.abs(d.x).toFixed(2)}  ΔY ${Math.abs(d.y).toFixed(2)}  ΔZ ${Math.abs(d.z).toFixed(2)}`;
     if (na && nb) {
       // Two faces: the angle between them too (0° parallel, 90° square).
       const angle = THREE.MathUtils.radToDeg(Math.acos(Math.min(1, Math.abs(na.dot(nb)))));
@@ -2056,7 +2056,7 @@ export class Viewport {
       const p = span.node.localToWorld(mid.clone()).project(this.camera);
       label.hidden = length < 1e-6 || p.z > 1;
       if (label.hidden) return;
-      label.textContent = `${names[i]} ${+rulerLength(length, this.snap).toFixed(2)} mm`;
+      label.textContent = `${names[i]} ${rulerLength(length, this.snap).toFixed(2)} mm`;
       label.style.transform = `translate(${((p.x + 1) / 2) * w}px, ${((1 - p.y) / 2) * h}px) translate(-50%, -50%)`;
     });
   }

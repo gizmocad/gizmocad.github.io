@@ -425,7 +425,7 @@ export function rulerLength(v: number, snap: number): number {
 export function sizeReadout(f: Feature, s: Vec3, snap: number): string {
   const probe = structuredClone(f);
   scaleOwn(probe, f.kind === "group" ? { x: dominantFactor(s), y: dominantFactor(s), z: dominantFactor(s) } : s, f.kind === "group" ? 0 : snap);
-  const n = (v: number) => String(round(v));
+  const n = (v: number) => (Math.abs(v) < 0.005 ? 0 : v).toFixed(2);
   switch (probe.kind) {
     case "box":
       return `${n(probe.params.width)} × ${n(probe.params.depth)} × ${n(probe.params.height)} mm`;

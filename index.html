@@ -43,7 +43,7 @@
       </div>
       <div class="group">
         <label>Snap
-          <select id="snap">
+          <select id="snap" autocomplete="off">
             <option value="0">Off</option>
             <option value="0.1">0.1 mm</option>
             <option value="0.5">0.5 mm</option>
@@ -52,7 +52,7 @@
             <option value="10">10 mm</option>
           </select>
         </label>
-        <label class="toggle"><input type="checkbox" id="combined" /> Show result</label>
+        <label class="toggle"><input type="checkbox" id="combined" autocomplete="off" /> Show result</label>
       </div>
       <div class="group segmented gizmo-mode">
         <button data-gizmo="translate" class="active" title="Move objects (W)">Move</button>
@@ -67,7 +67,7 @@
       <button id="one-side" class="toggle-btn" aria-pressed="false" title="Resize only the side whose handle you drag: the opposite face stays where it is">One side</button>
       <div class="group" id="points-option">
         <label title="Snap points (corners, edge middles, face centres) shown while moving: objects snap onto each other's points">Points
-          <select id="point-snap">
+          <select id="point-snap" autocomplete="off">
             <option value="show" selected>Show + snap</option>
             <option value="hidden">Snap, hidden</option>
             <option value="off">Off</option>
