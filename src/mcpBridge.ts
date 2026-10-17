@@ -15,6 +15,8 @@ import {
   subtreeIds,
   type CadDocument,
   type EdgeOp,
+  type Texture,
+  type TexturePattern,
   type Feature,
   type ShapeKind,
   type SketchEntity,
@@ -362,6 +364,22 @@ function applyFields(f: Feature, a: Args) {
       f.shell = { thickness, open };
     }
   }
+  if (a.texture !== undefined) {
+    if (a.texture === null) delete f.texture;
+    else {
+      const t = a.texture as Args;
+      const patterns = ["knurl", "ribs", "rings", "bumps", "honeycomb", "grid", "bricks", "waves", "wood", "rough"];
+      if (!patterns.includes(t.pattern as string)) throw new Error(`texture.pattern must be one of: ${patterns.join(", ")}.`);
+      const faces = t.faces ?? "sides";
+      if (!["sides", "all", "top"].includes(faces as string)) throw new Error("texture.faces must be sides, all or top.");
+      const wrap = t.wrap ?? "auto";
+      if (!["auto", "around", "flat"].includes(wrap as string)) throw new Error("texture.wrap must be auto, around or flat.");
+      const depth = t.depth === undefined ? 0.6 : num(t.depth, "texture.depth");
+      const size = t.size === undefined ? 2 : num(t.size, "texture.size");
+      if (depth <= 0 || size <= 0) throw new Error("texture.depth and texture.size must be above 0.");
+      f.texture = { pattern: t.pattern as TexturePattern, depth: Math.min(depth, 10), size: Math.max(0.3, size), faces: faces as Texture["faces"], wrap: wrap as Texture["wrap"], raised: t.raised === true };
+    }
+  }
   if (a.tilt !== undefined) {
     if (a.tilt === null) delete f.tilt;
     else {
@@ -508,6 +526,7 @@ function describeModel(host: BridgeHost, sketchGeometry: boolean) {
     if (f.edgeOps.length) o.edges = f.edgeOps.map((op) => ({ type: op.type, size: op.size, edges: op.target, ...(op.angle !== undefined ? { angle: op.angle } : {}) }));
     if (f.shell) o.hollow = f.shell;
     if (f.tilt) o.tilt = f.tilt;
+    if (f.texture) o.texture = f.texture;
     if (f.color) o.color = f.color;
     if (f.mirrored) o.mirrored = true;
     if (f.hidden) o.hidden = true;

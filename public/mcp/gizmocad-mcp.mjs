@@ -222,6 +222,19 @@ const objectFields = {
     description: "Taper the sides in by `taper` degrees (negative: out), and/or lean the whole shape so its top shifts along X/Y (`leanX`, `leanY` degrees). null straightens it.",
     properties: { taper: { type: "number" }, leanX: { type: "number" }, leanY: { type: "number" } },
   },
+  texture: {
+    type: ["object", "null"],
+    description:
+      "A real, printable surface pattern on its finished shape (shown, and in STL/3MF exports; STEP gets the plain shape). pattern: knurl|ribs|rings|bumps|honeycomb|grid|bricks|waves|wood|rough; depth (mm, default 0.6); size (mm per repeat, default 2); faces: sides|all|top (default sides); wrap: auto|around|flat; raised (default false: pressed in). null removes it.",
+    properties: {
+      pattern: { type: "string", enum: ["knurl", "ribs", "rings", "bumps", "honeycomb", "grid", "bricks", "waves", "wood", "rough"] },
+      depth: { type: "number" },
+      size: { type: "number" },
+      faces: { type: "string", enum: ["sides", "all", "top"] },
+      wrap: { type: "string", enum: ["auto", "around", "flat"] },
+      raised: { type: "boolean" },
+    },
+  },
   mirrored: { type: "boolean", description: "Mirror it across its own YZ plane (X → −X)." },
   hidden: { type: "boolean", description: "Hide it in the view (still part of the model)." },
 };

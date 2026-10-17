@@ -244,6 +244,23 @@ export interface ImportedParams {
   scale: [number, number, number];
 }
 
+export type TexturePattern = "knurl" | "ribs" | "rings" | "bumps" | "honeycomb" | "grid" | "bricks" | "waves" | "wood" | "rough";
+
+/** A printable surface pattern on an object's finished shape (see texture.ts). */
+export interface Texture {
+  pattern: TexturePattern;
+  /** How deep the pattern goes (mm). */
+  depth: number;
+  /** One repeat of the pattern (mm). */
+  size: number;
+  /** Which faces: the sides (not top or bottom), every face, or the top only. */
+  faces: "sides" | "all" | "top";
+  /** Wrapped around the object's Z axis (round things), projected flat onto each side, or picked by shape. */
+  wrap: "auto" | "around" | "flat";
+  /** Raised out of the surface instead of pressed into it (pressed in keeps the outside size). */
+  raised: boolean;
+}
+
 export interface SphereParams {
   /** Radius along X. */
   radius: number;
@@ -405,6 +422,8 @@ interface FeatureBase {
   shell?: Shell;
   /** Sides tapered and/or the whole shape leaning over (degrees). */
   tilt?: Tilt;
+  /** A printable surface pattern on its finished shape (shown, and in STL/3MF exports). */
+  texture?: Texture;
   /** Left out of the model (and exports) without deleting it: a switched-off history step. */
   suppressed?: boolean;
 }
@@ -611,9 +630,9 @@ export const PARAM_FIELDS: Partial<Record<ShapeKind, { key: string; label: strin
 
 // ---- Tree helpers --------------------------------------------------------
 
-/** A group with fillets/chamfers is shown and picked as one merged shape. */
+/** A group with fillets/chamfers (or a hollow, or a texture) is shown and picked as one merged shape. */
 export function isMergedGroup(f: Feature): boolean {
-  return f.kind === "group" && (f.edgeOps.length > 0 || !!f.shell);
+  return f.kind === "group" && (f.edgeOps.length > 0 || !!f.shell || !!f.texture);
 }
 
 /** Is `id` inside a merged group (so its own mesh isn't shown)? */

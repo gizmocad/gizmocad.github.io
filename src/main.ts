@@ -22,6 +22,8 @@ import {
   subtreeIds,
   type CadDocument,
   type ImportedFont,
+  type Texture,
+  type TexturePattern,
   type Feature,
   type Point2,
   type ShapeKind,
@@ -1444,6 +1446,80 @@ function colourRow(ids: string[], current: string | undefined): HTMLElement {
   return row;
 }
 
+const TEXTURES: { value: TexturePattern; label: string; size: number; depth: number }[] = [
+  { value: "knurl", label: "Diamond knurl", size: 2, depth: 0.6 },
+  { value: "ribs", label: "Straight ribs", size: 2, depth: 0.6 },
+  { value: "rings", label: "Rings", size: 2, depth: 0.5 },
+  { value: "bumps", label: "Bumps", size: 3, depth: 0.8 },
+  { value: "honeycomb", label: "Honeycomb", size: 5, depth: 0.6 },
+  { value: "grid", label: "Square grid", size: 3, depth: 0.6 },
+  { value: "bricks", label: "Bricks", size: 8, depth: 0.6 },
+  { value: "waves", label: "Waves", size: 4, depth: 0.6 },
+  { value: "wood", label: "Wood grain", size: 3, depth: 0.4 },
+  { value: "rough", label: "Rough (fuzzy)", size: 1, depth: 0.3 },
+];
+
+/** A printable surface pattern on the object. */
+function textureSection(f: Feature, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
+  const tex = f.texture;
+  const set = (change: Partial<Texture>) => update((t) => t.texture && Object.assign(t.texture, change));
+  const pick = document.createElement("select");
+  pick.add(new Option("None", ""));
+  for (const t of TEXTURES) pick.add(new Option(t.label, t.value));
+  pick.value = tex?.pattern ?? "";
+  pick.onchange = () => {
+    const chosen = TEXTURES.find((t) => t.value === pick.value);
+    update((t) => {
+      if (!chosen) delete t.texture;
+      // A new pattern starts at its own usual size and depth.
+      else t.texture = { pattern: chosen.value, size: chosen.size, depth: chosen.depth, faces: t.texture?.faces ?? "sides", wrap: t.texture?.wrap ?? "auto", raised: t.texture?.raised ?? false };
+    });
+  };
+  const items: HTMLElement[] = [section("Texture"), labeled("Pattern", pick)];
+  if (!tex) return items;
+  items.push(
+    lengthField("Depth", tex.depth, (v) => set({ depth: Math.min(v, 10) }), { min: 0 }),
+    lengthField("Repeat size", tex.size, (v) => set({ size: Math.max(0.3, v) }), { min: 0 }),
+    labeled(
+      "On",
+      segmented(
+        [
+          { value: "sides", label: "Sides" },
+          { value: "all", label: "All" },
+          { value: "top", label: "Top" },
+        ],
+        tex.faces,
+        (v) => set({ faces: v }),
+      ),
+    ),
+    labeled(
+      "Wrap",
+      segmented(
+        [
+          { value: "auto", label: "Auto" },
+          { value: "around", label: "Around" },
+          { value: "flat", label: "Flat" },
+        ],
+        tex.wrap,
+        (v) => set({ wrap: v }),
+      ),
+    ),
+    segmented(
+      [
+        { value: "in", label: "Pressed in" },
+        { value: "out", label: "Raised" },
+      ],
+      tex.raised ? "out" : "in",
+      (v) => set({ raised: v === "out" }),
+    ),
+    hint(
+      "A real pattern that prints: shown here, and in STL and 3MF exports (STEP files get the plain shape). Pressed in keeps the outside size. " +
+        "<b>Around</b> wraps it round the object (for cylinders), <b>Flat</b> lays it on each side. Keep the depth under about a third of the size for clean prints.",
+    ),
+  );
+  return items;
+}
+
 function shellSection(f: Feature, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
   const items: HTMLElement[] = [section("Hollow")];
   const sh = f.shell;
@@ -2271,6 +2347,7 @@ function renderPropertiesPanel() {
       items.push(...edgeSection(f, update));
       items.push(...shellSection(f, update));
     }
+    if (f.mode === "solid") items.push(...textureSection(f, update));
     const sculpt = button("✋ Sculpt this object", () => void convertToSculpt(f.id), "wide");
     sculpt.title = "Turn this object into clay you can sculpt with brushes (Ctrl+Z to undo)";
     items.push(section("Sculpt"), sculpt, hint(f.kind === "group" ? "The group's merged shape becomes one piece of clay." : "Turns the exact shape into clay; dimensions and fillets stop being editable."));

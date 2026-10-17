@@ -30,6 +30,7 @@ import type { ImportedSolid, ImportSource, KernelRequest, KernelResponse, MeshDa
 import { hedron } from "./hedron";
 import { CUSTOM_FONT, builtInFontUrl, fontFamily, isCustomFont } from "./fonts";
 import { Matrix3, Vector3 } from "three";
+import { applyTexture } from "./texture";
 
 type Font = Awaited<ReturnType<typeof loadFont>>;
 /** Loaded fonts by family (see fontFamily): built-in ones as texts first need them, imported ones when the app sends them. */
@@ -984,9 +985,11 @@ function buildOwnSafe(f: Feature): Shape3D | null {
  * solid children, minus its hole children. `parentId` null means the whole model.
  */
 function branch(features: Feature[], self: Feature | null): Shape3D | null {
-  let result = self ? buildOwnSafe(self) : null;
+  // With textures added as their own meshes, a textured object's own shape is left out here (its children stay).
+  let result = self && !(excludeTextured && isTextured(self) && self.kind !== "group") ? buildOwnSafe(self) : null;
   const kids = childrenOf(features, self?.id ?? null);
   for (const c of kids.filter((c) => c.mode === "solid")) {
+    if (excludeTextured && isTextured(c) && c.kind === "group") continue;
     const s = branch(features, c);
     if (s) {
       const placed = place(c, s);
@@ -1042,15 +1045,15 @@ const meshCache = new Map<string, { mesh: MeshData | null; adjusted: Record<stri
 function ownMesh(f: Feature): MeshData | null {
   // An imported solid's geometry is named by its ref (its BREP text can be megabytes).
   const params = f.kind === "imported" ? { ...f.params, brep: undefined } : f.params;
-  const key = JSON.stringify([f.kind, params, f.edgeOps, f.clips ?? [], f.shell ?? null, f.tilt ?? null]);
+  const key = JSON.stringify([f.kind, params, f.edgeOps, f.clips ?? [], f.shell ?? null, f.tilt ?? null, isTextured(f) ? f.texture : null]);
   if (!meshCache.has(key)) {
     const outer = adjusted;
     adjusted = {};
     try {
-      if (plainStretch(f)) meshCache.set(key, { mesh: stretchMesh(toMesh("", importedBase(f.params)), f.params.scale), adjusted });
+      if (plainStretch(f)) meshCache.set(key, { mesh: textured(f, stretchMesh(toMesh("", importedBase(f.params)), f.params.scale)), adjusted });
       else {
         const shape = buildOwn(f);
-        meshCache.set(key, { mesh: shape ? toMesh("", shape, f.kind) : null, adjusted });
+        meshCache.set(key, { mesh: shape ? textured(f, toMesh("", shape, f.kind)) : null, adjusted });
       }
     } finally {
       adjusted = Object.assign(outer, adjusted);
@@ -1125,6 +1128,7 @@ function cutMesh(features: Feature[], f: Feature): MeshData | null {
     f.kind === "group" ? geometryKey(features, f.id) : [f.kind, f.kind === "imported" ? { ...f.params, brep: undefined } : f.params, f.edgeOps, f.clips ?? [], f.shell ?? null, f.tilt ?? null, f.mirrored ?? false],
     world.elements.map(r6),
     holes.map((h) => [geometryKey(features, h.id), worldMatrix(features, h.id).elements.map(r6)]),
+    isTextured(f) ? f.texture : null,
   ]);
   if (!cutCache.has(key)) {
     const outerFailures = failures;
@@ -1146,7 +1150,7 @@ function cutMesh(features: Feature[], f: Feature): MeshData | null {
           shape = shape.cut(placed);
           cut = true;
         }
-        if (cut) mesh = toLocal(toMesh(f.id, shape, f.kind), world);
+        if (cut) mesh = textured(f, toLocal(toMesh(f.id, shape, f.kind), world));
       }
     } catch {
       mesh = null;
@@ -1178,6 +1182,98 @@ function toLocal(m: MeshData, world: import("three").Matrix4): MeshData {
   return { ...m, vertices: points(m.vertices), normals, triangles, edges: points(m.edges) };
 }
 
+// ---- Textures ---------------------------------------------------------------------------
+
+/** Set while building results that add textured objects as their own meshes (see branch). */
+let excludeTextured = false;
+
+/** Has a printable texture (holes, planes and meshes don't take one). */
+function isTextured(f: Feature): f is Feature & { texture: NonNullable<Feature["texture"]> } {
+  return !!f.texture && f.mode === "solid" && f.kind !== "plane" && f.kind !== "sculpt";
+}
+
+/** A display mesh with the object's texture pressed into it (unchanged if it has none). */
+function textured(f: Feature, m: MeshData): MeshData {
+  if (!isTextured(f)) return m;
+  const t = applyTexture(m.vertices, m.triangles, f.texture, f.kind);
+  return { ...m, vertices: t.display.vertices, normals: t.display.normals, triangles: t.display.triangles };
+}
+
+/** Textured objects that aren't inside another textured object or a hole: each becomes its own mesh in results and exports. */
+function texturedRoots(features: Feature[]): Feature[] {
+  return features.filter((f) => {
+    if (!isTextured(f)) return false;
+    for (let p = features.find((x) => x.id === f.parentId); p; p = features.find((x) => x.id === p!.parentId)) if (p.mode === "hole" || isTextured(p)) return false;
+    return true;
+  });
+}
+
+/**
+ * A textured object in the world: its finished shape with the holes that reach
+ * it cut away, textured in its own frame. `display` has normals for the view.
+ */
+function texturedWorld(features: Feature[], f: Feature & { texture: NonNullable<Feature["texture"]> }) {
+  const was = excludeTextured;
+  excludeTextured = false;
+  try {
+    const own = f.kind === "group" ? branch(features, f) : buildOwn(f);
+    if (!own) return null;
+    let shape = placeInWorld(features, f, own);
+    const [lo, hi] = shape.boundingBox.bounds;
+    for (const h of cuttingHoles(features, f)) {
+      const hs = branch(features, h);
+      if (!hs) continue;
+      const placed = placeInWorld(features, h, hs);
+      const [a, b] = placed.boundingBox.bounds;
+      if ([0, 1, 2].some((k) => a[k] > hi[k] || b[k] < lo[k])) continue;
+      shape = shape.cut(placed);
+    }
+    const world = worldMatrix(features, f.id);
+    const m = shape.mesh({ tolerance: 0.02, angularTolerance: 0.15 });
+    const local = toLocal({ id: f.id, vertices: new Float32Array(m.vertices), normals: new Float32Array(m.normals), triangles: new Uint32Array(m.triangles), edges: new Float32Array(), edgeGroups: new Int32Array() }, world);
+    const t = applyTexture(local.vertices, local.triangles, f.texture, f.kind);
+    const toWorld = (arr: Float32Array, normals = false) => {
+      const out = new Float32Array(arr.length);
+      const v = new Vector3();
+      const nm = new Matrix3().getNormalMatrix(world);
+      for (let i = 0; i < arr.length; i += 3) out.set((normals ? v.fromArray(arr, i).applyMatrix3(nm).normalize() : v.fromArray(arr, i).applyMatrix4(world)).toArray(), i);
+      return out;
+    };
+    // Mirrored: its triangles turn inside out on the way back, so they're flipped.
+    const flip = (tris: Uint32Array) => {
+      const out = tris.slice();
+      if (world.determinant() < 0) for (let i = 0; i < out.length; i += 3) [out[i + 1], out[i + 2]] = [out[i + 2], out[i + 1]];
+      return out;
+    };
+    return {
+      vertices: toWorld(t.vertices),
+      triangles: flip(t.triangles),
+      display: { vertices: toWorld(t.display.vertices), normals: toWorld(t.display.normals, true), triangles: flip(t.display.triangles) },
+    };
+  } finally {
+    excludeTextured = was;
+  }
+}
+
+/** A binary STL of several triangle meshes. */
+function stlBlob(meshes: { vertices: ArrayLike<number>; triangles: ArrayLike<number> }[]): Blob {
+  const n = meshes.reduce((sum, m) => sum + m.triangles.length / 3, 0);
+  const view = new DataView(new ArrayBuffer(84 + n * 50));
+  view.setUint32(80, n, true);
+  let at = 84;
+  for (const m of meshes)
+    for (let t = 0; t < m.triangles.length; t += 3) {
+      const [a, b, c] = [m.triangles[t], m.triangles[t + 1], m.triangles[t + 2]].map((i) => [m.vertices[3 * i], m.vertices[3 * i + 1], m.vertices[3 * i + 2]]);
+      const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+      const w = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+      const nrm = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+      const l = Math.hypot(nrm[0], nrm[1], nrm[2]) || 1;
+      [...nrm.map((x) => x / l), ...a, ...b, ...c].forEach((x, k) => view.setFloat32(at + 4 * k, x, true));
+      at += 50;
+    }
+  return new Blob([view.buffer], { type: "model/stl" });
+}
+
 function post(msg: KernelResponse, transfer: Transferable[] = []) {
   (self as unknown as Worker).postMessage(msg, transfer);
 }
@@ -1196,6 +1292,7 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
   try {
     await ready;
     adjusted = {};
+    excludeTextured = false; // In case an earlier request stopped half way.
     if ("features" in req) await ensureFonts(req.features);
     if (req.type === "font") {
       // An imported font: check it can be read, and keep it for texts that use it.
@@ -1215,9 +1312,20 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
       let errors: Record<string, string> = {};
       if (req.combined) {
         failures = {};
-        const shape = branch(req.features, null);
+        // Textured objects come out as their own meshes (their patterns can't go through the exact booleans).
+        const roots = texturedRoots(req.features);
+        excludeTextured = roots.length > 0;
+        try {
+          const shape = branch(req.features, null);
+          if (shape) meshes.push(toMesh("combined", shape));
+          for (const f of roots) {
+            const t = texturedWorld(req.features, f as Feature & { texture: NonNullable<Feature["texture"]> });
+            if (t) meshes.push({ id: "combined", ...t.display, edges: new Float32Array(), edgeGroups: new Int32Array() });
+          }
+        } finally {
+          excludeTextured = false;
+        }
         errors = failures;
-        if (shape) meshes.push(toMesh("combined", shape));
       } else {
         for (const f of req.features) {
           // Shapes inside a merged group are shown as part of the group's mesh.
@@ -1229,7 +1337,7 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
               failures = {};
               const shape = branch(req.features, f);
               Object.assign(errors, failures);
-              if (shape) meshes.push(toMesh(f.id, shape));
+              if (shape) meshes.push(textured(f, toMesh(f.id, shape)));
             } else {
               const m = ownMesh(f);
               if (m) meshes.push(m);
@@ -1257,13 +1365,20 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
       const shape = f ? (f.kind === "group" ? branch(req.features, f) : buildOwn(f)) : null;
       // Finer than the display mesh, so curved surfaces come out smooth as clay.
       const m = shape ? shape.mesh({ tolerance: 0.02, angularTolerance: 0.2 }) : null;
-      const mesh: MeshData | null = m
+      let mesh: MeshData | null = m
         ? { id: req.id, vertices: new Float32Array(m.vertices), normals: new Float32Array(m.normals), triangles: new Uint32Array(m.triangles), edges: new Float32Array(), edgeGroups: new Int32Array() }
         : null;
+      // Turned into clay with its texture in it.
+      if (mesh && f && isTextured(f)) {
+        const t = applyTexture(mesh.vertices, mesh.triangles, f.texture, f.kind);
+        mesh = { ...mesh, vertices: t.vertices, normals: new Float32Array(t.vertices.length), triangles: t.triangles };
+      }
       post({ type: "mesh", requestId: req.requestId, mesh });
     } else if (req.type === "parts") {
       // One mesh per top-level object (holes at the top level cut each of them), for 3MF.
       failures = {};
+      const roots = texturedRoots(req.features);
+      excludeTextured = roots.length > 0;
       const top = childrenOf(req.features, null);
       const holes = top.filter((f) => f.mode === "hole").map((f) => {
         const s = branch(req.features, f);
@@ -1279,12 +1394,34 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
         const m = shape.mesh({ tolerance: 0.01, angularTolerance: 0.1 });
         parts.push({ id: f.id, vertices: new Float32Array(m.vertices), normals: new Float32Array(), triangles: new Uint32Array(m.triangles), edges: new Float32Array(), edgeGroups: new Int32Array() });
       }
+      excludeTextured = false;
+      // Each textured object is its own part, in place.
+      for (const f of roots) {
+        const t = texturedWorld(req.features, f as Feature & { texture: NonNullable<Feature["texture"]> });
+        if (t) parts.push({ id: f.id, vertices: t.vertices, normals: new Float32Array(), triangles: t.triangles, edges: new Float32Array(), edgeGroups: new Int32Array() });
+      }
       post({ type: "parts", requestId: req.requestId, parts }, parts.flatMap((m) => [m.vertices.buffer, m.triangles.buffer]));
     } else if (req.type === "export") {
       failures = {};
+      // Textures go into STL (each textured object as its own closed mesh, overlapping the rest as slicers expect); STEP holds exact shapes only.
+      const roots = req.format === "stl" ? texturedRoots(req.features) : [];
+      excludeTextured = roots.length > 0;
       const shape = branch(req.features, null);
-      if (!shape) throw new Error("Nothing to export: add at least one solid shape.");
-      const blob = req.format === "step" ? shape.blobSTEP() : shape.blobSTL({ binary: true, tolerance: 0.01, angularTolerance: 0.1 });
+      excludeTextured = false;
+      let blob: Blob;
+      if (roots.length) {
+        const meshes: { vertices: ArrayLike<number>; triangles: ArrayLike<number> }[] = [];
+        if (shape) meshes.push(shape.mesh({ tolerance: 0.01, angularTolerance: 0.1 }));
+        for (const f of roots) {
+          const t = texturedWorld(req.features, f as Feature & { texture: NonNullable<Feature["texture"]> });
+          if (t) meshes.push(t);
+        }
+        if (!meshes.length) throw new Error("Nothing to export: add at least one solid shape.");
+        blob = stlBlob(meshes);
+      } else {
+        if (!shape) throw new Error("Nothing to export: add at least one solid shape.");
+        blob = req.format === "step" ? shape.blobSTEP() : shape.blobSTL({ binary: true, tolerance: 0.01, angularTolerance: 0.1 });
+      }
       post({ type: "exported", requestId: req.requestId, blob });
     } else if (req.type === "importSolids") {
       const parts = await importSolids(req.files);

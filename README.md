@@ -29,6 +29,9 @@
 - **Mirror** any object (or several) along X, Y or Z, in place.
 - **Repeat:** copies in a row, a grid, or around a circle (e.g. holes round a flange), previewed before they're added.
 - **Hollow:** turn a solid into walls of a set thickness, open at the top or bottom, or closed.
+- **Textures:** real, printable surface patterns on any solid: diamond knurl, ribs, rings, bumps, honeycomb, square grid,
+  bricks, waves, wood grain or rough (fuzzy skin), pressed in or raised, on its sides, top or all faces, wrapped around round
+  shapes or laid flat. Shown as you work and in STL/3MF exports (STEP keeps the plain exact shape).
 - **Tilt:** taper an object's sides in or out by an angle (the base keeps its size), or lean the whole shape over along X or Y.
 - **Colours** per object (new objects take turns through green, orange, purple, yellow and pink), shown in the view and saved into 3MF exports.
 - **Measure** (M): click two points (corners and edges snap) for the distance and its X/Y/Z parts; two faces also give their angle.
