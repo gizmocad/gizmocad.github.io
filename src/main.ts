@@ -261,8 +261,8 @@ const viewport = new Viewport($("#viewport"), {
       if (f?.joint) f.joint.value = value;
     });
   },
-  onResized(id, scale, anchor) {
-    commit((features) => resizeFeature(features, id, scale, viewport.snapSize, anchor));
+  onResized(id, scale, anchor, exact) {
+    commit((features) => resizeFeature(features, id, scale, exact ? 0 : viewport.snapSize, anchor));
   },
   onOpen(id) {
     const kind = findFeature(id)?.kind;

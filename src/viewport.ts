@@ -14,6 +14,7 @@ import { isClosed, outline, prismPoints } from "./sketchGeometry";
 import { hedron } from "./hedron";
 import { SculptMesh, creasedGeometry, isCadMesh, sculptGeometry, type BrushSettings } from "./sculpt";
 import { ViewCube } from "./viewCube";
+import { parseLength } from "./units";
 
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
 
@@ -40,8 +41,8 @@ export interface ViewportEvents {
   onOpen(id: string): void;
   /** While resizing with the gizmo: scale factors along the object's own axes. */
   onResizing(id: string, scale: Vec3): void;
-  /** A resize drag finished. */
-  onResized(id: string, scale: Vec3, anchor?: ResizeAnchor): void;
+  /** A resize drag finished (`exact`: a size typed on the ruler, not snapped to the grid). */
+  onResized(id: string, scale: Vec3, anchor?: ResizeAnchor, exact?: boolean): void;
   /** While turning/sliding a connected object by its joint: the joint's value (degrees or mm). */
   onJointMoving(id: string, value: number): void;
   /** A joint drag finished. */
@@ -215,6 +216,8 @@ export class Viewport {
   private rulerSpan: { node: THREE.Object3D; mids: THREE.Vector3[]; lengths: number[] } | null = null;
   // Filled in the constructor; empty until then because the theme setup redraws early.
   private rulerLabels: HTMLDivElement[] = [];
+  /** The ruler label being typed into, if any. */
+  private rulerEditing: HTMLDivElement | null = null;
   /** Move mode: show snap points on objects and snap dragged objects' points onto them. */
   pointSnap = true;
   /** Draw the snap points (snapping still works with them hidden). */
@@ -362,6 +365,9 @@ export class Viewport {
       const el = document.createElement("div");
       el.className = `ruler-label ruler-${axis}`;
       el.hidden = true;
+      el.title = "Click to type a size";
+      el.onpointerdown = (e) => e.stopPropagation();
+      el.onclick = () => this.editRuler(el, "xyz".indexOf(axis));
       container.appendChild(el);
       return el;
     });
@@ -2032,6 +2038,7 @@ export class Viewport {
     const box = show ? this.localBox(id!, node!) : null;
     if (!show || !box) {
       this.rulerLabels.forEach((l) => (l.hidden = true));
+      this.rulerEditing = null;
       return;
     }
     const { min, max } = box;
@@ -2073,9 +2080,69 @@ export class Viewport {
       const p = span.node.localToWorld(mid.clone()).project(this.camera);
       label.hidden = length < 1e-6 || p.z > 1;
       if (label.hidden) return;
-      label.textContent = `${names[i]} ${rulerLength(length, this.snap).toFixed(2)} mm`;
+      // While dragging, the size it will snap to; otherwise the size it is.
+      const shown = this.gizmo.dragging ? rulerLength(length, this.snap) : length;
+      if (this.rulerEditing !== label) label.textContent = `${names[i]} ${shown.toFixed(2)} mm`;
       label.style.transform = `translate(${((p.x + 1) / 2) * w}px, ${((1 - p.y) / 2) * h}px) translate(-50%, -50%)`;
     });
+  }
+
+  /** Turn a ruler label into a box to type the object's size along that axis (Enter sets it, Esc cancels). */
+  private editRuler(label: HTMLDivElement, i: number) {
+    const span = this.rulerSpan;
+    if (!span || this.rulerEditing === label) return;
+    const length = span.lengths[i] * [span.node.scale.x, span.node.scale.y, span.node.scale.z][i];
+    this.rulerEditing = label;
+    const input = document.createElement("input");
+    input.className = "ruler-input";
+    input.value = Math.abs(length).toFixed(2);
+    input.size = Math.max(5, input.value.length + 1);
+    let done = false;
+    const finish = (apply: boolean) => {
+      if (done) return;
+      done = true;
+      if (this.rulerEditing === label) this.rulerEditing = null;
+      const value = parseLength(input.value);
+      label.replaceChildren();
+      if (apply && value !== null && Number.isFinite(value) && value > 0) this.resizeTo(i, value);
+    };
+    input.onkeydown = (e) => {
+      e.stopPropagation(); // Typing mustn't trigger shortcuts.
+      if (e.key === "Enter") finish(true);
+      if (e.key === "Escape") finish(false);
+    };
+    input.onblur = () => finish(true);
+    label.replaceChildren(`${"XYZ"[i]} `, input, " mm");
+    input.focus();
+    input.select();
+  }
+
+  /** Resize the selected object so it measures `size` along its own axis `i` (as a ruler drag would, but exact). */
+  private resizeTo(i: number, size: number) {
+    const id = this.selectedId;
+    const obj = id ? this.nodes.get(id) : undefined;
+    const f = id ? this.features.get(id) : undefined;
+    const box = obj && f ? this.localBox(id!, obj) : null;
+    if (!obj || !f || !box) return;
+    const axis = (["x", "y", "z"] as const)[i];
+    const current = box.max[axis] - box.min[axis];
+    if (current < 1e-6 || Math.abs(size - current) < 1e-6) return;
+    const k = size / current;
+    const s = { x: 1, y: 1, z: 1 };
+    s[axis] = k;
+    if (this.keepRatio || f.kind === "hedron") s.x = s.y = s.z = k;
+    else if (staysRound(f) && axis !== "z") s.x = s.y = k;
+    // The same fixed side as dragging: One side keeps the low end; imported objects grow up and down from their middle.
+    const imported = f.kind === "imported" || (f.kind === "sculpt" && f.params.base === "imported");
+    let anchor: ResizeAnchor | undefined;
+    if (this.oneSide || (imported && axis === "z")) {
+      const flip = f.mirrored ? -1 : 1;
+      const dir = new THREE.Vector3();
+      dir[axis] = axis === "x" ? flip : 1;
+      dir.applyQuaternion(obj.quaternion);
+      anchor = { axis, at: this.oneSide ? box.min[axis] : (box.min[axis] + box.max[axis]) / 2, dir: { x: dir.x, y: dir.y, z: dir.z } };
+    }
+    this.events.onResized(id!, s, anchor, true);
   }
 
   /** In One side mode, work out which face stays fixed for the handle just grabbed. */
