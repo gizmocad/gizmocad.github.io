@@ -440,6 +440,8 @@ interface FeatureBase {
   texture?: Texture;
   /** Left out of the model (and exports) without deleting it: a switched-off history step. */
   suppressed?: boolean;
+  /** Holes (by id) that don't cut it, or anything inside it, though they'd otherwise reach it. */
+  ignoreHoles?: string[];
 }
 
 export type Feature =
@@ -958,3 +960,12 @@ export function normalizeDocument(doc: CadDocument): CadDocument {
   }
   return doc;
 }
+
+/** Whether a hole leaves this object alone: it, or an object it's inside, is set to ignore that hole. */
+export function ignoresHole(features: Feature[], f: Feature, holeId: string): boolean {
+  for (let n: Feature | undefined = f; n; n = features.find((x) => x.id === n!.parentId)) if (n.ignoreHoles?.includes(holeId)) return true;
+  return false;
+}
+
+/** Whether anything in the model ignores a hole (when nothing does, holes are cut the quicker usual way). */
+export const anyIgnoredHoles = (features: Feature[]) => features.some((f) => f.ignoreHoles?.length);

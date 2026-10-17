@@ -5,6 +5,7 @@ import {
   createFeature,
   FINISHABLE,
   baseMatrix,
+  ignoresHole,
   emptyDocument,
   isCadDocument,
   nextColour,
@@ -2088,6 +2089,50 @@ const AXES: { value: Axis; label: string }[] = [
 ];
 
 /** The "Split & dividers" panel section: closed, it's two buttons; open, the tool's settings. */
+/**
+ * The holes that would cut this object: its own, its parents', and the
+ * top-level ones (as the kernel works it out), whether or not it ignores them.
+ */
+function holesReaching(features: Feature[], f: Feature): Feature[] {
+  if (f.mode === "hole") return [];
+  const holes = childrenOf(features, f.id).filter((c) => c.mode === "hole");
+  let node = f;
+  while (node.parentId) {
+    const parent = features.find((x) => x.id === node.parentId);
+    if (!parent) break;
+    if (parent.mode === "hole") return []; // Part of a hole: it doesn't get cut.
+    holes.push(...childrenOf(features, parent.id).filter((c) => c.mode === "hole"));
+    node = parent;
+  }
+  holes.push(...childrenOf(features, null).filter((c) => c.mode === "hole" && c.id !== node.id));
+  return holes;
+}
+
+/** Which holes cut this object: untick one and it leaves this object (and everything inside it) alone. */
+function holesSection(f: Feature, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
+  const holes = holesReaching(activeFeatures(doc.features), f);
+  if (!holes.length) return [];
+  const items: HTMLElement[] = [section("Cut by holes")];
+  for (const h of holes) {
+    const inherited = !f.ignoreHoles?.includes(h.id) && ignoresHole(doc.features, f, h.id);
+    const row = checkToggle(h.name, !ignoresHole(doc.features, f, h.id), (on) =>
+      update((t) => {
+        const list = (t.ignoreHoles ?? []).filter((id) => id !== h.id);
+        if (!on) list.push(h.id);
+        t.ignoreHoles = list.length ? list : undefined;
+      }),
+    );
+    if (inherited) {
+      // Ignored because an object it's inside ignores it: change it there.
+      (row.querySelector("input") as HTMLInputElement).disabled = true;
+      row.title = "An object this is inside ignores this hole";
+    }
+    items.push(row);
+  }
+  items.push(hint("Untick a hole to keep it from cutting this object (and anything inside it). It still cuts everything else it reaches."));
+  return items;
+}
+
 function cutSection(f: Feature): HTMLElement[] {
   const ext = viewport.objectExtents(f.id);
   if (!ext) return [];
@@ -2502,6 +2547,7 @@ function renderPropertiesPanel() {
     items.push(section("Sculpt"), sculpt, hint(f.kind === "group" ? "The group's merged shape becomes one piece of clay." : "Turns the exact shape into clay; dimensions and fillets stop being editable."));
   }
 
+  if (f.kind !== "plane") items.push(...holesSection(f, update));
   items.push(...connectionSection(f, update));
   if (!["group", "plane", "sculpt"].includes(f.kind) && !flat) items.push(...cutSection(f));
   if (f.kind !== "plane") items.push(...mirrorSection([f.id]), ...patternSection(f));

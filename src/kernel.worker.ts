@@ -9,6 +9,8 @@ import {
   LEAN_KINDS,
   childrenOf,
   subtreeIds,
+  ignoresHole,
+  anyIgnoredHoles,
   worldMatrix,
   insideMergedGroup,
   isMergedGroup,
@@ -1029,11 +1031,61 @@ function facetView(w: WorldMesh): MeshData {
  * triangles in its own frame, done with mesh booleans. Faceted solids go in
  * as their triangles; anything else is made exactly and then triangulated.
  */
-function branchTriangles(features: Feature[], f: Feature | null): WorldMesh | null {
+type MeshCutter = { id: string; name: string; mesh: WorldMesh };
+
+function branchTriangles(features: Feature[], f: Feature | null, inherited: MeshCutter[] = []): WorldMesh | null {
+  const reaching = (list: MeshCutter[], x: Feature | null) => list.filter((c) => !x?.ignoreHoles?.includes(c.id));
+  const cutAll = (w: WorldMesh, list: MeshCutter[], what: Feature | null) => {
+    for (const c of list) {
+      try {
+        w = meshBoolean(w, c.mesh, "cut");
+      } catch (err) {
+        throw new Error(`the hole ${c.name} couldn't be cut${what ? ` from ${what.name}` : ""}: ${message(err)}`);
+      }
+    }
+    return w;
+  };
+  const join = (w: WorldMesh | null, placed: WorldMesh) => {
+    if (!w) return placed;
+    try {
+      return meshBoolean(w, placed, "fuse");
+    } catch {
+      // Not watertight enough to merge: kept as separate, overlapping shells (slicers join them).
+      return joinMeshes(w, placed);
+    }
+  };
   // Fillets on a merged group, or a split, need the exact result.
   if (f && ((f.kind === "group" && isMergedGroup(f)) || f.clips?.length)) {
     const s = branch(features, f);
-    return s && shapeTriangles(s);
+    return s && cutAll(shapeTriangles(s), reaching(inherited, f), f);
+  }
+  if (inherited.length || anyIgnoredHoles(features)) {
+    // Some objects ignore some holes: each piece is cut by the holes that reach it (as branchIgnoring does).
+    const kids = childrenOf(features, f?.id ?? null);
+    const own: MeshCutter[] = [];
+    for (const c of kids.filter((c) => c.mode === "hole")) {
+      const k = branchTriangles(features, c);
+      if (k) own.push({ id: c.id, name: c.name, mesh: transformMesh(k, localMatrix(c)) });
+    }
+    const cutters = reaching([...own, ...inherited], f);
+    let w: WorldMesh | null = null;
+    if (f && !(excludeTextured && isTextured(f) && f.kind !== "group") && f.kind !== "group") {
+      const mine = f.kind === "imported" && plainFaceted(f) ? facetTriangles(f.params) : (() => {
+        const s = buildOwnSafe(f);
+        return s && shapeTriangles(s);
+      })();
+      if (mine) w = cutAll(mine, cutters, f);
+    }
+    for (const k of kids.filter((c) => c.mode === "solid")) {
+      if (excludeTextured && isTextured(k) && k.kind === "group") continue;
+      const toK = reaching(cutters, k);
+      const deep = toK.filter((c) => insideIgnores(features, k, c.id));
+      const direct = toK.filter((c) => !deep.includes(c));
+      const back = localMatrix(k).invert();
+      const kk = branchTriangles(features, k, deep.map((c) => ({ ...c, mesh: transformMesh(c.mesh, back) })));
+      if (kk) w = join(w, cutAll(transformMesh(kk, localMatrix(k)), direct, k));
+    }
+    return w;
   }
   let w: WorldMesh | null = null;
   // As in branch(): with textures added as their own meshes, a textured object's own shape is left out.
@@ -1445,7 +1497,83 @@ function buildOwnSafe(f: Feature): Shape3D | null {
  * A branch's result in its own frame: the feature's own shape, fused with its
  * solid children, minus its hole children. `parentId` null means the whole model.
  */
-function branch(features: Feature[], self: Feature | null): Shape3D | null {
+/** A hole on its way down to the objects it cuts (in the frame of the branch it's passed into). */
+type Cutter = { id: string; shape: Shape3D };
+
+/** A copy of a shape (transforms use theirs up), keeping its triangles if it has them. */
+function copyShape(s: Shape3D): Shape3D {
+  const copy = s.clone();
+  const w = knownTriangles.get(s);
+  if (w) knownTriangles.set(copy, w);
+  return copy;
+}
+
+/** A shape in the parent's frame brought into `f`'s own frame: place() undone. */
+function unplace(f: Feature, shape: Shape3D): Shape3D {
+  const w = knownTriangles.get(shape);
+  const j = f.joint;
+  if (j && j.value) {
+    const { x, y, z } = j.axis;
+    if (j.type === "hinge") shape = shape.rotate(-j.value, [j.origin.x, j.origin.y, j.origin.z], [x, y, z]);
+    else if (j.type === "orbit") {
+      const m = jointMatrix(j, j.value, f.position).elements;
+      shape = shape.translate(-m[12], -m[13], -m[14]);
+    } else {
+      const len = Math.hypot(x, y, z) || 1;
+      shape = shape.translate((-x / len) * j.value, (-y / len) * j.value, (-z / len) * j.value);
+    }
+  }
+  shape = shape.translate(-f.position.x, -f.position.y, -f.position.z);
+  const r = f.rotation;
+  if (r.z) shape = shape.rotate(-r.z, [0, 0, 0], [0, 0, 1]);
+  if (r.y) shape = shape.rotate(-r.y, [0, 0, 0], [0, 1, 0]);
+  if (r.x) shape = shape.rotate(-r.x, [0, 0, 0], [1, 0, 0]);
+  if (f.mirrored) shape = shape.mirror("YZ", [0, 0, 0]);
+  if (w) knownTriangles.set(shape, transformMesh(w, localMatrix(f).invert()));
+  return shape;
+}
+
+/** Whether something inside `f` (not `f` itself) ignores this hole. */
+const insideIgnores = (features: Feature[], f: Feature, holeId: string) => features.some((x) => x.id !== f.id && x.ignoreHoles?.includes(holeId) && subtreeIds(features, f.id).has(x.id));
+
+/**
+ * branch() when some objects ignore some holes: instead of joining
+ * everything and then cutting the holes, each piece is cut by the holes that
+ * don't ignore it, and holes are passed down into the parts where something
+ * inside ignores them. `inherited` are holes from outside, in this frame.
+ */
+function branchIgnoring(features: Feature[], self: Feature | null, inherited: Cutter[]): Shape3D | null {
+  const kids = childrenOf(features, self?.id ?? null);
+  const own: Cutter[] = [];
+  for (const c of kids.filter((c) => c.mode === "hole")) {
+    const s = branch(features, c);
+    if (s) own.push({ id: c.id, shape: place(c, s) });
+  }
+  const cutters = [...own, ...inherited].filter((c) => !self?.ignoreHoles?.includes(c.id));
+  const cutBy = (shape: Shape3D, list: Cutter[]) => list.reduce((s, c) => booleanSafe(s, c.shape, "cut"), shape);
+  let result: Shape3D | null = null;
+  const mine = self && !(excludeTextured && isTextured(self) && self.kind !== "group") ? buildOwnSafe(self) : null;
+  if (mine) result = cutBy(mine, cutters);
+  for (const k of kids.filter((c) => c.mode === "solid")) {
+    if (excludeTextured && isTextured(k) && k.kind === "group") continue;
+    const reaching = cutters.filter((c) => !k.ignoreHoles?.includes(c.id));
+    // Holes something inside ignores go down into it; the rest cut its finished shape.
+    const deep = reaching.filter((c) => insideIgnores(features, k, c.id));
+    const direct = reaching.filter((c) => !deep.includes(c));
+    const s = branch(features, k, deep.map((c) => ({ id: c.id, shape: unplace(k, copyShape(c.shape)) })));
+    if (!s) continue;
+    const placed = cutBy(place(k, s), direct);
+    result = result ? booleanSafe(result, placed, "fuse") : placed;
+  }
+  return result;
+}
+
+function branch(features: Feature[], self: Feature | null, inherited: Cutter[] = []): Shape3D | null {
+  if (inherited.length || anyIgnoredHoles(features)) {
+    let result = branchIgnoring(features, self, inherited);
+    if (result && self) result = finishBranch(self, result, childrenOf(features, self.id).length > 0);
+    return result;
+  }
   // With textures added as their own meshes, a textured object's own shape is left out here (its children stay).
   let result = self && !(excludeTextured && isTextured(self) && self.kind !== "group") ? buildOwnSafe(self) : null;
   const kids = childrenOf(features, self?.id ?? null);
@@ -1462,7 +1590,12 @@ function branch(features: Feature[], self: Feature | null): Shape3D | null {
     const s = branch(features, c);
     if (s) result = booleanSafe(result, place(c, s), "cut");
   }
-  if (self && isMergedGroup(self)) {
+  return self ? finishBranch(self, result, kids.length > 0) : result;
+}
+
+/** A merged group's fillets and hollowing, and a split's side, on a branch's result. */
+function finishBranch(self: Feature, result: Shape3D, hasKids: boolean): Shape3D {
+  if (isMergedGroup(self)) {
     try {
       result = applyEdgeOps(result, self.edgeOps);
       if (self.shell) result = applyShell(result, self.shell);
@@ -1471,7 +1604,7 @@ function branch(features: Feature[], self: Feature | null): Shape3D | null {
     }
   }
   // A split piece keeps only its side, children included.
-  if (self?.clips?.length && kids.length) {
+  if (self.clips?.length && hasKids) {
     try {
       result = applyClips(result, self.clips);
     } catch (err) {
@@ -1557,7 +1690,7 @@ function cuttingHoles(features: Feature[], f: Feature): Feature[] {
     node = parent;
   }
   holes.push(...childrenOf(features, null).filter((c) => c.mode === "hole" && c.id !== node.id));
-  return holes;
+  return holes.filter((h) => !ignoresHole(features, f, h.id));
 }
 
 /** A shape in its object's frame, moved to where it is in the world (through its parents). */
@@ -1572,7 +1705,7 @@ const r6 = (v: number) => Math.round(v * 1e6) / 1e6 + 0;
 const geometryKey = (features: Feature[], id: string) =>
   features
     .filter((x) => subtreeIds(features, id).has(x.id))
-    .map((x) => [x.id, x.parentId, x.kind, x.mode, keyParams(x), x.position, x.rotation, x.edgeOps, x.clips, x.shell, x.tilt, x.mirrored, x.joint]);
+    .map((x) => [x.id, x.parentId, x.kind, x.mode, keyParams(x), x.position, x.rotation, x.edgeOps, x.clips, x.shell, x.tilt, x.mirrored, x.joint, x.ignoreHoles]);
 
 const cutCache = new Map<string, { mesh: MeshData | null; error?: string }>();
 
@@ -2092,31 +2225,38 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
       const roots = texturedRoots(req.features);
       excludeTextured = roots.length > 0;
       const top = childrenOf(req.features, null);
-      const holes = top.filter((f) => f.mode === "hole").map((f) => {
+      const holes = top.flatMap((f): Cutter[] => {
+        if (f.mode !== "hole") return [];
         const s = branch(req.features, f);
-        return s ? place(f, s) : null;
+        return s ? [{ id: f.id, shape: place(f, s) }] : [];
       });
       const parts: MeshData[] = [];
       if (hasFaceted(req.features)) {
-        const cutters = top.filter((f) => f.mode === "hole").flatMap((h) => {
+        const cutters: MeshCutter[] = top.filter((f) => f.mode === "hole").flatMap((h) => {
           const w = branchTriangles(req.features, h);
-          return w ? [transformMesh(w, localMatrix(h))] : [];
+          return w ? [{ id: h.id, name: h.name, mesh: transformMesh(w, localMatrix(h)) }] : [];
         });
         for (const f of top) {
           if (f.mode === "hole") continue;
-          const own = branchTriangles(req.features, f);
+          // Holes it ignores leave it alone; ones only something inside it ignores go down into it.
+          const reach = cutters.filter((c) => !f.ignoreHoles?.includes(c.id));
+          const deep = reach.filter((c) => insideIgnores(req.features, f, c.id));
+          const back = localMatrix(f).invert();
+          const own = branchTriangles(req.features, f, deep.map((c) => ({ ...c, mesh: transformMesh(c.mesh, back) })));
           if (!own) continue;
           let w = transformMesh(own, localMatrix(f));
-          for (const c of cutters) w = meshBoolean(w, c, "cut");
+          for (const c of reach.filter((c) => !deep.includes(c))) w = meshBoolean(w, c.mesh, "cut");
           parts.push({ id: f.id, vertices: w.vertices, normals: new Float32Array(), triangles: w.triangles, edges: new Float32Array(), edgeGroups: new Int32Array() });
         }
       }
       for (const f of hasFaceted(req.features) ? [] : top) {
         if (f.mode === "hole") continue;
-        let shape = branch(req.features, f);
+        const reach = holes.filter((c) => !f.ignoreHoles?.includes(c.id));
+        const deep = reach.filter((c) => insideIgnores(req.features, f, c.id));
+        let shape = branch(req.features, f, deep.map((c) => ({ id: c.id, shape: unplace(f, copyShape(c.shape)) })));
         if (!shape) continue;
         shape = place(f, shape);
-        for (const h of holes) if (h) shape = shape.cut(h);
+        for (const h of reach.filter((c) => !deep.includes(c))) shape = booleanSafe(shape, h.shape, "cut");
         const m = shape.mesh({ tolerance: 0.01, angularTolerance: 0.1 });
         parts.push({ id: f.id, vertices: new Float32Array(m.vertices), normals: new Float32Array(), triangles: new Uint32Array(m.triangles), edges: new Float32Array(), edgeGroups: new Int32Array() });
       }

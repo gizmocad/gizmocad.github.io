@@ -88,6 +88,7 @@
     corners count as edges. Bigger or open meshes stay meshes; **Make it a solid** converts one (or a sculpt) later;
   - **DXF** and **SVG** drawings as sketches (lines and arcs that join up become shapes, holes included);
   - another **GizmoCAD** model, brought into this one.
+- **Cut by holes:** untick a hole in an object's panel and it leaves that object (and anything inside it) alone, while still cutting everything else it reaches.
 - **AI assistant (MCP):** let Claude (or any MCP-capable assistant) build and edit the model while you watch. See below.
 
 ## AI assistant (MCP)

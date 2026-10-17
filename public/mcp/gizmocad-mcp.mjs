@@ -238,6 +238,7 @@ const objectFields = {
   mirrored: { type: "boolean", description: "Mirror it across its own YZ plane (X → −X)." },
   hidden: { type: "boolean", description: "Hide it in the view (still part of the model)." },
   ghost: { type: "boolean", description: "Ghost it: see-through in the view, and clicks and placing go through it (still part of the model and exports)." },
+  ignore_holes: { type: "array", items: { type: "string" }, description: "Ids of holes that must not cut this object (or anything inside it), though they'd otherwise reach it; they still cut everything else. [] lets every hole cut it again." },
 };
 
 const TOOLS = [

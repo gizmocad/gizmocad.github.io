@@ -329,6 +329,12 @@ function applyFields(f: Feature, a: Args) {
     else if (typeof a.color === "string" && /^#[0-9a-f]{6}$/i.test(a.color)) f.color = a.color.toLowerCase();
     else throw new Error('color must look like "#e05252".');
   }
+  if (a.ignore_holes !== undefined) {
+    const ids = a.ignore_holes as string[];
+    if (!Array.isArray(ids)) throw new Error("ignore_holes is a list of hole ids ([] lets every hole cut it again).");
+    if (ids.length) f.ignoreHoles = [...new Set(ids)];
+    else delete f.ignoreHoles;
+  }
   if (a.ghost !== undefined) {
     if (a.ghost) f.ghost = true;
     else delete f.ghost;
@@ -535,6 +541,7 @@ function describeModel(host: BridgeHost, sketchGeometry: boolean) {
     if (f.mirrored) o.mirrored = true;
     if (f.hidden) o.hidden = true;
     if (f.ghost) o.ghost = true;
+    if (f.ignoreHoles?.length) o.ignore_holes = f.ignoreHoles;
     if (f.suppressed) o.switched_off = true;
     if (f.joint) o.joint = f.joint.type;
     if (f.clips?.length) o.split_piece = true;
