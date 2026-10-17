@@ -203,6 +203,25 @@ function scaleOwn(f: Feature, s: Vec3, snap: number) {
     }
     case "sculpt": {
       const pos = decodeFloats(f.params.positions);
+      // Its sizes land on the grid like other shapes' (one factor for all when kept in proportion).
+      const lo = [Infinity, Infinity, Infinity];
+      const hi = [-Infinity, -Infinity, -Infinity];
+      for (let i = 0; i < pos.length; i += 3)
+        for (let k = 0; k < 3; k++) {
+          lo[k] = Math.min(lo[k], pos[i + k]);
+          hi[k] = Math.max(hi[k], pos[i + k]);
+        }
+      const ext = [0, 1, 2].map((k) => hi[k] - lo[k]);
+      const raw = [s.x, s.y, s.z];
+      const snapped = (k: number, factor: number) => (ext[k] > 1e-9 ? snapLength(ext[k] * factor, snap) / ext[k] : factor);
+      let k3: number[];
+      if (Math.abs(s.x - s.y) < 1e-9 && Math.abs(s.y - s.z) < 1e-9) {
+        const big = [0, 1, 2].reduce((a, b) => (ext[b] > ext[a] ? b : a));
+        k3 = raw.map(() => snapped(big, s.x));
+      } else k3 = raw.map((factor, k) => (factor === 1 ? 1 : snapped(k, factor)));
+      // The caller's factors follow the snapped sizes (for the one-side anchor and children's places);
+      // without a grid (inside a resized group) they're left alone, as one shared factor.
+      if (snap > 0) [s.x, s.y, s.z] = k3;
       for (let i = 0; i < pos.length; i += 3) {
         pos[i] *= s.x;
         pos[i + 1] *= s.y;
