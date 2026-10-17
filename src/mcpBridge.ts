@@ -329,6 +329,10 @@ function applyFields(f: Feature, a: Args) {
     else if (typeof a.color === "string" && /^#[0-9a-f]{6}$/i.test(a.color)) f.color = a.color.toLowerCase();
     else throw new Error('color must look like "#e05252".');
   }
+  if (a.ghost !== undefined) {
+    if (a.ghost) f.ghost = true;
+    else delete f.ghost;
+  }
   if (a.hidden !== undefined) {
     if (a.hidden) f.hidden = true;
     else delete f.hidden;
@@ -530,6 +534,7 @@ function describeModel(host: BridgeHost, sketchGeometry: boolean) {
     if (f.color) o.color = f.color;
     if (f.mirrored) o.mirrored = true;
     if (f.hidden) o.hidden = true;
+    if (f.ghost) o.ghost = true;
     if (f.suppressed) o.switched_off = true;
     if (f.joint) o.joint = f.joint.type;
     if (f.clips?.length) o.split_piece = true;

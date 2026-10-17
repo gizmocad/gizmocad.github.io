@@ -405,6 +405,12 @@ interface FeatureBase {
   rotation: Vec3;
   /** Fillets and chamfers, applied in order. */
   edgeOps: EdgeOp[];
+  /**
+   * See-through, and clicks, placing and snapping go through it (it, and
+   * everything inside it), so things can be put inside or behind it. Still
+   * part of the model and exports.
+   */
+  ghost?: boolean;
   /** Hidden from the view (it, and everything inside it). Still part of the model and exports. */
   hidden?: boolean;
   /** Set on the pieces of a split object: the side of each cut that this piece keeps. */

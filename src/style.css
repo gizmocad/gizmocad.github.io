@@ -207,6 +207,8 @@ body.sketching .panel.left .shape-buttons { opacity: 0.6; }
 #object-list li:hover .eye, #object-list .eye.off, #object-list .eye:focus-visible { opacity: 1; }
 #object-list .eye:hover { color: var(--text); background: var(--accent-soft); }
 #object-list li.hidden-obj .name { opacity: 0.45; font-style: italic; }
+/* A ghosted object's button stays lit, in the accent colour. */
+#object-list .ghost-btn.off { color: var(--accent); }
 
 /* Overlay labels (rulers, measurements) stay inside the view instead of spilling over the side panels. */
 #viewport { grid-area: view; position: relative; min-width: 0; min-height: 0; overflow: hidden; }

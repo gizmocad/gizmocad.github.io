@@ -27,6 +27,8 @@
   delete, or **group** them (Ctrl+G).
 - **Copy and paste** (Ctrl+C / Ctrl+X / Ctrl+V), also between GizmoCAD windows.
 - **Mirror** any object (or several) along X, Y or Z, in place.
+- **Ghost** an object (G, or the ghost button in the list): it turns see-through and clicks, placing and snapping go
+  through it, so you can put things inside or behind it. It's still part of the model and exports.
 - **Repeat:** copies in a row, a grid, or around a circle (e.g. holes round a flange), previewed before they're added.
 - **Hollow:** turn a solid into walls of a set thickness, open at the top or bottom, or closed.
 - **Textures:** real, printable surface patterns on any solid: diamond knurl, ribs, rings, bumps, honeycomb, square grid,

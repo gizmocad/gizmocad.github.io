@@ -657,6 +657,22 @@ const EYE_OPEN = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" st
 const EYE_SHUT = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3l18 18"/><path d="M10.6 5.1A10.8 10.8 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-3.2 4M6.6 6.6A17.6 17.6 0 0 0 2 12s3.6 7 10 7a9.7 9.7 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>`;
 
 /** Show or hide objects (and everything inside them) in the view; several go the way the first one goes. */
+const GHOST = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 20V10a7 7 0 0 1 14 0v10l-2.3-1.6L14.3 20 12 18.4 9.7 20l-2.4-1.6z"/><circle cx="9.5" cy="10.5" r="0.6" fill="currentColor"/><circle cx="14.5" cy="10.5" r="0.6" fill="currentColor"/></svg>`;
+
+/** Make objects ghosts (see-through, clicked and placed through) or solid again; several go the way the first one goes. */
+function toggleGhost(id: string, more: string[] = []) {
+  const ghost = !findFeature(id)?.ghost;
+  commit((features) => {
+    for (const x of [id, ...more]) {
+      const f = features.find((y) => y.id === x);
+      if (!f) continue;
+      if (ghost) f.ghost = true;
+      else delete f.ghost;
+    }
+  });
+  setNotice(ghost ? "Ghosted: you can click, place and snap through it. Select it in the list to move it; G or the ghost button makes it solid again." : "Not a ghost any more.");
+}
+
 function toggleHidden(id: string, more: string[] = []) {
   const hide = !findFeature(id)?.hidden;
   commit((features) => {
@@ -735,8 +751,19 @@ function objectRow(f: Feature, depth: number) {
   li.className = [selectedIds.includes(f.id) ? "selected" : "", buildErrors[f.id] ? "failed" : "", hiddenInView(f) ? "hidden-obj" : "", f.suppressed ? "suppressed" : ""].join(" ");
   li.style.paddingLeft = `${8 + depth * 16}px`;
   li.draggable = true;
-  li.innerHTML = `<span class="name"><span class="kind"></span><span></span></span><span class="row-end"><span class="tag ${f.mode}">${f.kind === "group" ? "group" : f.mode}</span><button class="eye"></button></span>`;
-  const eye = li.querySelector<HTMLButtonElement>(".eye")!;
+  li.innerHTML = `<span class="name"><span class="kind"></span><span></span></span><span class="row-end"><span class="tag ${f.mode}">${f.kind === "group" ? "group" : f.mode}</span><button class="eye ghost-btn"></button><button class="eye"></button></span>`;
+  const ghost = li.querySelector<HTMLButtonElement>(".ghost-btn")!;
+  ghost.innerHTML = GHOST;
+  ghost.title = f.ghost ? "Make solid again (G)" : "Ghost (G): see-through, and click or place things through it";
+  ghost.setAttribute("aria-label", `${f.ghost ? "Unghost" : "Ghost"} ${f.name}`);
+  ghost.setAttribute("aria-pressed", String(!!f.ghost));
+  ghost.classList.toggle("off", !!f.ghost);
+  ghost.onclick = (e) => {
+    e.stopPropagation();
+    toggleGhost(f.id);
+  };
+  ghost.ondblclick = (e) => e.stopPropagation();
+  const eye = li.querySelector<HTMLButtonElement>(".eye:not(.ghost-btn)")!;
   eye.innerHTML = f.hidden ? EYE_SHUT : EYE_OPEN;
   eye.title = f.hidden ? "Show (H)" : "Hide (H)";
   eye.setAttribute("aria-label", `${f.hidden ? "Show" : "Hide"} ${f.name}`);
@@ -3972,6 +3999,8 @@ window.addEventListener("keydown", (e) => {
     duplicateSelected();
   } else if (!mod && key === "f" && selectedId) {
     snapToFace();
+  } else if (!mod && key === "g" && selectedId) {
+    toggleGhost(selectedId, selectedIds.filter((x) => x !== selectedId));
   } else if (!mod && key === "h" && selectedId) {
     toggleHidden(selectedId, selectedIds.filter((x) => x !== selectedId));
   } else if (e.key === "Delete" || e.key === "Backspace") {

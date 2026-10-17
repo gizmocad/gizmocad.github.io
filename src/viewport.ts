@@ -903,6 +903,17 @@ export class Viewport {
 
   // ---- Internals ---------------------------------------------------------
 
+  /** Is this object (or anything it's inside) a ghost: see-through, and clicked, placed and snapped through? */
+  private isGhost(o: THREE.Object3D): boolean {
+    for (let x: THREE.Object3D | null = o; x; x = x.parent) if (x.userData.id && this.features.get(x.userData.id)?.ghost) return true;
+    return false;
+  }
+
+  /** Shown, and not a ghost: something a click or placement can land on. */
+  private solidTarget(o: THREE.Object3D): boolean {
+    return isShown(o) && !this.isGhost(o);
+  }
+
   private applyAppearance() {
     const sketchId = this.sketch?.id;
     this.root.traverse((o) => {
@@ -931,6 +942,7 @@ export class Viewport {
       mat.color.setHex(pickingThis ? scenePalette().picking : selected && !sketchId && !this.sculpt ? COLORS.selected : isHole ? COLORS.hole : own);
       let opacity = isHole ? 0.35 : 1;
       if (sketchId) opacity = 0.1;
+      if (this.isGhost(o)) opacity = Math.min(opacity, selected ? 0.35 : 0.2);
       mat.opacity = opacity;
       mat.transparent = opacity < 1;
       mat.depthWrite = opacity === 1;
@@ -1052,7 +1064,7 @@ export class Viewport {
       const ids: string[] = [];
       this.root.updateMatrixWorld(true);
       for (const [id, node] of this.nodes) {
-        if (!isShown(node) || this.features.get(id)?.kind === "group") continue;
+        if (!this.solidTarget(node) || this.features.get(id)?.kind === "group") continue;
         const box = this.localBox(id, node);
         if (!box) continue;
         // Inside when its middle is in the box on screen.
@@ -1100,7 +1112,7 @@ export class Viewport {
   /** The point to measure from under the pointer: a snap point or edge vertex if one is close, else the surface. */
   private measurePoint(e: MouseEvent): { p: THREE.Vector3; n: THREE.Vector3 | null } | null {
     this.raycaster.setFromCamera(this.ndc(e), this.camera);
-    const hit = this.raycaster.intersectObject(this.root, true).find((h) => h.object instanceof THREE.Mesh && h.face && h.object.userData.id && isShown(h.object) && !this.previewGroup.getObjectById(h.object.id));
+    const hit = this.raycaster.intersectObject(this.root, true).find((h) => h.object instanceof THREE.Mesh && h.face && h.object.userData.id && this.solidTarget(h.object) && !this.previewGroup.getObjectById(h.object.id));
     const rect = this.renderer.domElement.getBoundingClientRect();
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
@@ -1550,7 +1562,7 @@ export class Viewport {
     this.root.updateMatrixWorld(true);
     const targets: THREE.Vector3[] = [];
     for (const [id, node] of this.nodes) {
-      if (this.features.get(id)?.kind === "group" || !isShown(node)) continue;
+      if (this.features.get(id)?.kind === "group" || !this.solidTarget(node)) continue;
       for (const pt of this.snapPointsOf(id, node)) targets.push(pt.applyMatrix4(node.matrixWorld));
     }
     this.pointDrag = { local: [new THREE.Vector3()], targets, snapped: false };
@@ -1737,7 +1749,7 @@ export class Viewport {
     this.raycaster.setFromCamera(new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1), this.camera);
     const hit = this.raycaster
       .intersectObject(this.root, true)
-      .find((h) => h.object instanceof THREE.Mesh && h.face && isShown(h.object) && !skip.has(h.object.userData.id) && !this.previewGroup.getObjectById(h.object.id));
+      .find((h) => h.object instanceof THREE.Mesh && h.face && this.solidTarget(h.object) && !skip.has(h.object.userData.id) && !this.previewGroup.getObjectById(h.object.id));
 
     // The frame we snap in: the hit object's own frame, or the world for the ground.
     const node = hit && hit.object.userData.id ? this.nodes.get(hit.object.userData.id) : undefined;
@@ -1898,7 +1910,7 @@ export class Viewport {
     for (const [id, node] of this.nodes) {
       const own = id === this.selectedId;
       // Groups only get dots when they're the thing being moved; otherwise their children have them.
-      if (!own && (moving.has(id) || this.features.get(id)?.kind === "group" || !isShown(node))) continue;
+      if (!own && (moving.has(id) || this.features.get(id)?.kind === "group" || !this.solidTarget(node))) continue;
       const pts = this.snapPointsOf(id, node);
       if (!pts.length) continue;
       const dots = new THREE.Points(new THREE.BufferGeometry().setFromPoints(pts), own ? DOT_MATERIALS.own : DOT_MATERIALS.other);
@@ -1918,7 +1930,7 @@ export class Viewport {
     for (const n of this.groupFollowers()) this.movingIds(n).forEach((x) => moving.add(x));
     const targets: THREE.Vector3[] = [];
     for (const [id, node] of this.nodes) {
-      if (moving.has(id) || this.features.get(id)?.kind === "group" || !isShown(node)) continue;
+      if (moving.has(id) || this.features.get(id)?.kind === "group" || !this.solidTarget(node)) continue;
       for (const p of this.snapPointsOf(id, node)) targets.push(p.applyMatrix4(node.matrixWorld));
     }
     this.pointDrag = { local: this.snapPointsOf(obj.userData.id, obj), targets, snapped: false };
@@ -2141,7 +2153,7 @@ export class Viewport {
   private pick(e: MouseEvent): string | null {
     this.raycaster.setFromCamera(this.ndc(e), this.camera);
     // The raycaster doesn't skip hidden objects by itself.
-    const hit = this.raycaster.intersectObject(this.root, true).find((h) => h.object instanceof THREE.Mesh && h.object.userData.id && isShown(h.object));
+    const hit = this.raycaster.intersectObject(this.root, true).find((h) => h.object instanceof THREE.Mesh && h.object.userData.id && this.solidTarget(h.object));
     return (hit?.object.userData.id as string | undefined) ?? null;
   }
 
