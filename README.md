@@ -70,7 +70,7 @@
 - **Print bed:** pick your printer in the GizmoCAD menu to see its bed and get a warning when the model doesn't fit.
 - Snap to the grid, undo/redo. New, Open, Save, Export and Theme are in the menu under the GizmoCAD logo.
 - Export **STEP** (for other CAD programs), **STL** (for 3D printing) and **3MF** (for slicers, one object per part,
-  with colours). **Import** STL meshes and SVG drawings (closed shapes become a sketch, holes included).
+  with colours). **Import** STL and 3MF meshes (3MF keeps part names, colours and layout; several parts come in as a group) and SVG drawings (closed shapes become a sketch, holes included).
 - **AI assistant (MCP):** let Claude (or any MCP-capable assistant) build and edit the model while you watch. See below.
 
 ## AI assistant (MCP)
@@ -126,7 +126,7 @@ npm run tauri dev      # desktop app (needs Rust + system WebKit)
 | `src/sculpt.ts` | Sculpt meshes, brushes, and adding them to STL exports. |
 | `src/sketchGeometry.ts` | Exact outlines of sketch shapes, shared by the kernel and the editor. |
 | `src/constraints.ts` | Sketch constraints and the solver that keeps drawings to them. |
-| `src/fileFormats.ts` | 3MF export, STL and SVG import, autosave. |
+| `src/fileFormats.ts` | 3MF export and import, STL and SVG import, autosave. |
 | `src/viewCube.ts` | The view orientation cube. |
 | `src/main.ts` | UI: panels, undo/redo, commands, keyboard shortcuts. |
 | `src/storage.ts` | Save/open: native dialogs in the desktop app, downloads on the web. |

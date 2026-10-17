@@ -108,6 +108,165 @@ function zip(files: [string, string][]): Blob {
   return new Blob([...chunks, ...central, new Uint8Array(end.buffer)] as BlobPart[], { type: "model/3mf" });
 }
 
+// ---- 3MF import ---------------------------------------------------------------------------
+
+/** One printable part from a 3MF: its triangles in world millimetres (the file's build placement applied). */
+export interface ImportedPart {
+  name: string;
+  /** "#rrggbb", if the file gives it one. */
+  color?: string;
+  vertices: Float32Array;
+  triangles: Uint32Array;
+}
+
+type ZipEntry = { method: number; raw: Uint8Array };
+
+/** The files in a zip archive (read from its central directory; unpacked only when asked for). */
+function readZip(buffer: ArrayBuffer): Map<string, ZipEntry> {
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+  let end = -1;
+  for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 65557); i--) {
+    if (view.getUint32(i, true) === 0x06054b50) {
+      end = i;
+      break;
+    }
+  }
+  if (end < 0) throw new Error("it isn't a 3MF file (3MF files are zip archives).");
+  const count = view.getUint16(end + 10, true);
+  let p = view.getUint32(end + 16, true);
+  if (p === 0xffffffff) throw new Error("it uses ZIP64 (over 4 GB), which isn't supported.");
+  const names = new TextDecoder();
+  const files = new Map<string, ZipEntry>();
+  for (let k = 0; k < count; k++) {
+    if (view.getUint32(p, true) !== 0x02014b50) throw new Error("its zip directory is damaged.");
+    const method = view.getUint16(p + 10, true);
+    const size = view.getUint32(p + 20, true);
+    const nameLen = view.getUint16(p + 28, true);
+    const local = view.getUint32(p + 42, true);
+    const name = names.decode(bytes.subarray(p + 46, p + 46 + nameLen));
+    p += 46 + nameLen + view.getUint16(p + 30, true) + view.getUint16(p + 32, true);
+    const dataAt = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
+    files.set(name.replace(/^\//, "").toLowerCase(), { method, raw: bytes.subarray(dataAt, dataAt + size) });
+  }
+  return files;
+}
+
+async function unzipEntry(e: ZipEntry): Promise<Uint8Array> {
+  if (e.method === 0) return e.raw;
+  if (e.method !== 8) throw new Error(`it uses zip compression method ${e.method}, which isn't supported.`);
+  const stream = new Blob([e.raw as BlobPart]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+/** A 3×4 affine transform as 3MF writes it: rows m00 m01 m02 / m10 m11 m12 / m20 m21 m22 / m30 m31 m32 (points are row vectors). */
+type Affine = number[];
+const IDENTITY: Affine = [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0];
+const parseAffine = (s: string | null): Affine => {
+  const v = (s ?? "").trim().split(/[\s,]+/).map(Number);
+  return v.length === 12 && v.every(Number.isFinite) ? v : IDENTITY;
+};
+/** First `a`, then `b`. */
+function compose(a: Affine, b: Affine): Affine {
+  const out: number[] = [];
+  for (let i = 0; i < 4; i++)
+    for (let j = 0; j < 3; j++) out.push(a[i * 3] * b[j] + a[i * 3 + 1] * b[3 + j] + a[i * 3 + 2] * b[6 + j] + (i === 3 ? b[9 + j] : 0));
+  return out;
+}
+const det = (m: Affine) => m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) + m[2] * (m[3] * m[7] - m[4] * m[6]);
+
+const UNITS: Record<string, number> = { micron: 0.001, millimeter: 1, centimeter: 10, inch: 25.4, foot: 304.8, meter: 1000 };
+const PRODUCTION_NS = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06";
+
+/** The parts of a 3MF file (from slicers or other CAD): one per build item, with names and colours where given. */
+export async function parse3mf(buffer: ArrayBuffer): Promise<ImportedPart[]> {
+  const zip = readZip(buffer);
+  const text = async (path: string) => {
+    const e = zip.get(path.replace(/^\//, "").toLowerCase());
+    return e ? new TextDecoder().decode(await unzipEntry(e)) : null;
+  };
+  // The main model is named in the package's relationships (usually 3D/3dmodel.model).
+  let root = "3D/3dmodel.model";
+  const rels = await text("_rels/.rels");
+  const rel = rels && [...rels.matchAll(/<Relationship\b[^>]*>/g)].map((m) => m[0]).find((r) => /3dmodel/i.test(/Type="([^"]*)"/.exec(r)?.[1] ?? ""));
+  if (rel) root = /Target="([^"]*)"/.exec(rel)?.[1] ?? root;
+
+  const docs = new Map<string, Document>();
+  const load = async (path: string): Promise<Document> => {
+    const key = path.replace(/^\//, "").toLowerCase();
+    let d = docs.get(key);
+    if (!d) {
+      const t = await text(key);
+      if (t === null) throw new Error(`a model part it refers to (${path}) is missing.`);
+      d = new DOMParser().parseFromString(t, "application/xml");
+      if (d.getElementsByTagName("parsererror").length) throw new Error(`its model (${path}) isn't valid XML.`);
+      docs.set(key, d);
+    }
+    return d;
+  };
+  const kids = (el: Element, name: string) => [...el.children].filter((c) => c.localName === name);
+  const all = (el: Document | Element, name: string) => [...el.getElementsByTagNameNS("*", name)];
+  const rootDoc = await load(root);
+  const scale = UNITS[rootDoc.documentElement.getAttribute("unit") ?? "millimeter"] ?? 1;
+
+  /** A colour from a material or colour group (pid) and its entry (pindex). */
+  const colorOf = (doc: Document, pid: string | null, pindex: string | null): string | undefined => {
+    if (!pid) return undefined;
+    const group = [...all(doc, "basematerials"), ...all(doc, "colorgroup")].find((g) => g.getAttribute("id") === pid);
+    if (!group) return undefined;
+    const entry = [...group.children][Number(pindex ?? 0)];
+    const c = entry?.getAttribute("displaycolor") ?? entry?.getAttribute("color");
+    return c && /^#[0-9a-f]{6}/i.test(c) ? c.slice(0, 7).toLowerCase() : undefined;
+  };
+
+  type Found = { verts: number[]; tris: number[]; color?: string; name?: string };
+  /** An object's triangles (its own mesh and its components'), placed by `m`. */
+  const collect = async (path: string, id: string, m: Affine, out: Found, depth = 0): Promise<void> => {
+    if (depth > 32) throw new Error("its components refer to each other in a loop.");
+    const doc = await load(path);
+    const obj = all(doc, "object").find((o) => o.getAttribute("id") === id);
+    if (!obj) throw new Error(`object ${id} is missing.`);
+    out.name ??= obj.getAttribute("name") ?? undefined;
+    const mesh = kids(obj, "mesh")[0];
+    if (mesh) {
+      const base = out.verts.length / 3;
+      const flip = det(m) < 0; // A mirroring placement turns the triangles inside out unless they're reversed.
+      for (const v of all(kids(mesh, "vertices")[0] ?? mesh, "vertex")) {
+        const [x, y, z] = ["x", "y", "z"].map((k) => Number(v.getAttribute(k)));
+        out.verts.push(
+          (x * m[0] + y * m[3] + z * m[6] + m[9]) * scale,
+          (x * m[1] + y * m[4] + z * m[7] + m[10]) * scale,
+          (x * m[2] + y * m[5] + z * m[8] + m[11]) * scale,
+        );
+      }
+      const tris = all(kids(mesh, "triangles")[0] ?? mesh, "triangle");
+      for (const t of tris) {
+        const [a, b, c] = ["v1", "v2", "v3"].map((k) => base + Number(t.getAttribute(k)));
+        out.tris.push(a, flip ? c : b, flip ? b : c);
+      }
+      out.color ??= colorOf(doc, obj.getAttribute("pid"), obj.getAttribute("pindex")) ?? colorOf(doc, tris[0]?.getAttribute("pid") ?? null, tris[0]?.getAttribute("p1") ?? null);
+    }
+    for (const comp of all(kids(obj, "components")[0] ?? document.createElement("x"), "component")) {
+      const next = comp.getAttributeNS(PRODUCTION_NS, "path") ?? comp.getAttribute("p:path") ?? path;
+      await collect(next, comp.getAttribute("objectid") ?? "", compose(parseAffine(comp.getAttribute("transform")), m), out, depth + 1);
+    }
+  };
+
+  const parts: ImportedPart[] = [];
+  const build = all(rootDoc, "build")[0];
+  const items = build ? kids(build, "item") : [];
+  for (const [i, item] of items.entries()) {
+    const found: Found = { verts: [], tris: [] };
+    await collect(item.getAttributeNS(PRODUCTION_NS, "path") ?? item.getAttribute("p:path") ?? root, item.getAttribute("objectid") ?? "", parseAffine(item.getAttribute("transform")), found);
+    if (!found.tris.length) continue;
+    const bad = found.tris.some((v) => v >= found.verts.length / 3 || v < 0 || !Number.isInteger(v));
+    if (bad) throw new Error("a triangle refers to a corner that isn't there.");
+    parts.push({ name: item.getAttribute("name") || found.name || `Part ${i + 1}`, color: found.color, vertices: new Float32Array(found.verts), triangles: new Uint32Array(found.tris) });
+  }
+  if (!parts.length) throw new Error("it has no parts to print in it.");
+  return parts;
+}
+
 // ---- STL import ---------------------------------------------------------------------------
 
 /** Triangles from a binary or ASCII STL (corners not shared yet). */

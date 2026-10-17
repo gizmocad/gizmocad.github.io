@@ -44,7 +44,7 @@ import {
 } from "./model";
 import { Box3, Matrix4, Vector3 } from "three";
 import { CONSTRAINT_LABEL, constraintFits, measure as measureConstraint, refPoints as refPointsOf, solveSketch } from "./constraints";
-import { autosave, build3mf, loadAutosave, parseStl, svgToEntities, type MeshPart } from "./fileFormats";
+import { autosave, build3mf, loadAutosave, parse3mf, parseStl, svgToEntities, type ImportedPart, type MeshPart } from "./fileFormats";
 import { SketchEditor, type MenuItem, type SketchTool } from "./sketcher";
 import { gearOuterRadius, removePoint } from "./sketchGeometry";
 import { HEDRON_FACES, HEDRON_NAMES, type HedronFaces } from "./hedron";
@@ -3262,10 +3262,13 @@ async function restoreAutosave() {
 // ---- Import and 3MF -------------------------------------------------------------------
 
 async function importFile() {
-  const file = await openImportFile($("#import-input"), ["stl", "svg"], "STL mesh or SVG drawing");
+  const file = await openImportFile($("#import-input"), ["stl", "3mf", "svg"], "STL or 3MF mesh, or SVG drawing");
   if (!file) return;
   try {
-    if (/\.svg$/i.test(file.name)) {
+    if (/\.3mf$/i.test(file.name)) {
+      setStatus(`Importing ${file.name}…`);
+      await import3mf(file.name, await parse3mf(file.data));
+    } else if (/\.svg$/i.test(file.name)) {
       const entities = svgToEntities(new TextDecoder().decode(file.data), newId);
       const f = createFeature("sketch", doc.features) as SketchFeature;
       f.name = file.name.replace(/\.svg$/i, "");
@@ -3296,6 +3299,55 @@ async function importFile() {
   } catch (err) {
     setStatus(`Couldn't import ${file.name}: ${(err as Error).message}`, true);
   }
+}
+
+/**
+ * A 3MF's parts as mesh objects, keeping their names, colours and where they
+ * sit relative to each other; the whole set lands centred on the grid. Several
+ * parts go into a group named after the file.
+ */
+async function import3mf(fileName: string, parts: ImportedPart[]) {
+  const title = fileName.replace(/\.3mf$/i, "");
+  // Bounds of everything, and of each part.
+  const boxes = parts.map((p) => {
+    const b = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
+    for (let i = 0; i < p.vertices.length; i += 3)
+      for (let k = 0; k < 3; k++) {
+        b.min[k] = Math.min(b.min[k], p.vertices[i + k]);
+        b.max[k] = Math.max(b.max[k], p.vertices[i + k]);
+      }
+    return b;
+  });
+  const lo = [0, 1, 2].map((k) => Math.min(...boxes.map((b) => b.min[k])));
+  const hi = [0, 1, 2].map((k) => Math.max(...boxes.map((b) => b.max[k])));
+  const shift = [-(lo[0] + hi[0]) / 2, -(lo[1] + hi[1]) / 2, -lo[2]];
+  const r = (v: number) => Math.round(v * 1e4) / 1e4 + 0;
+  const group = parts.length > 1 ? createFeature("group", doc.features) : null;
+  if (group) group.name = title;
+  const made: Feature[] = [];
+  parts.forEach((part, i) => {
+    // Each mesh's own origin is the middle of its base, so it moves and turns about itself.
+    const b = boxes[i];
+    const anchor = [(b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2, b.min[2]];
+    const local = part.vertices.slice();
+    for (let k = 0; k < local.length; k += 3) for (let a = 0; a < 3; a++) local[k + a] -= anchor[a];
+    const f = createFeature("sculpt", [...doc.features, ...made], group?.id ?? null) as SculptFeature;
+    f.name = parts.length > 1 ? part.name : title;
+    f.params = importedMesh(local, part.triangles);
+    f.position = { x: r(anchor[0] + shift[0]), y: r(anchor[1] + shift[1]), z: r(anchor[2] + shift[2]) };
+    if (part.color) f.color = part.color;
+    made.push(f);
+  });
+  stopSketchEdit();
+  commit((features) => insertFeatures(features, group ? [group, ...made] : made));
+  selectedId = group?.id ?? made[0].id;
+  selectedIds = [selectedId];
+  renderPanels();
+  viewport.fitView();
+  const tris = parts.reduce((s, p) => s + p.triangles.length / 3, 0);
+  setNotice(
+    `Imported ${fileName}: ${parts.length === 1 ? "1 part" : `${parts.length} parts (grouped)`}, ${tris.toLocaleString()} triangles, as meshes you can move, sculpt and export. Meshes can't be holes or take fillets.`,
+  );
 }
 
 function finishImport(f: Feature) {
