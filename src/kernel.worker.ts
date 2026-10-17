@@ -2,7 +2,7 @@
 
 import opencascade from "replicad-opencascadejs";
 import wasmUrl from "replicad-opencascadejs/wasm?url";
-import { EdgeFinder, assembleWire, cast, deserializeShape, draw, drawCircle, drawEllipse, drawText, genericSweep, getOC, importSTEP, loadFont, makeBaseBox, makeBox, makeCircle, makeCylinder, makeHelix, makeLine, makeEllipsoid, makePolygon, makeSolid, makeSphere, setOC, type Drawing, type Shape3D } from "replicad";
+import { EdgeFinder, type Edge, assembleWire, cast, deserializeShape, draw, drawCircle, drawEllipse, drawText, genericSweep, getOC, importSTEP, loadFont, makeBaseBox, makeBox, makeCircle, makeCompound, makeCylinder, makeHelix, makeLine, makeEllipsoid, makePolygon, makeSolid, makeSphere, setOC, type Drawing, type Shape3D } from "replicad";
 import {
   PLANE_ROTATIONS,
   SCREW_SIZES,
@@ -245,6 +245,105 @@ function buildSketch(p: SketchParams, featureLean: Lean, taper = 0): Shape3D | n
 
 type EdgeFilter = Parameters<Shape3D["fillet"]>[1];
 
+/**
+ * Set while building a solid made from a mesh: its curves are many small flat
+ * facets, and only the edges at real corners (not the seams between facets)
+ * count for "all", "top", "bottom" and "vertical" edges.
+ */
+let facetedBuild = false;
+
+/** Facets meeting at less than this angle are one smooth surface. */
+const FACET_ANGLE = 30;
+
+/** Upper bound for OpenCascade shape hashes (as replicad uses). */
+const HASH_MAX = 2147483647;
+
+type OcShape = { delete(): void };
+
+/** A faceted solid's corner edges (with the faces either side), worked out once per shape. */
+const cornerCache = new WeakMap<Shape3D, { edge: OcShape; faces: OcShape[]; normals: (Vector3 | null)[] }[]>();
+
+/**
+ * The edges where a faceted solid's faces meet at more than FACET_ANGLE (or
+ * where a face is curved), with their faces. Found with OpenCascade's own
+ * shape map: listing a shape's edges through replicad compares each with
+ * every other, which takes minutes on thousands of facets.
+ */
+function cornerEdges(shape: Shape3D) {
+  let corners = cornerCache.get(shape);
+  if (corners) return corners;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const oc = getOC() as any;
+  // Each edge comes up once per face it bounds: the same edge is found by its hash, then IsSame.
+  const byHash = new Map<number, { edge: { IsSame(o: unknown): boolean }; faces: OcShape[]; normals: (Vector3 | null)[] }[]>();
+  const all: { edge: { IsSame(o: unknown): boolean }; faces: OcShape[]; normals: (Vector3 | null)[] }[] = [];
+  const faces = new oc.TopExp_Explorer((shape as unknown as { wrapped: unknown }).wrapped, oc.TopAbs_ShapeEnum.TopAbs_FACE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
+  for (; faces.More(); faces.Next()) {
+    const face = oc.TopoDS.Face(faces.Current());
+    const wrapped = cast(face) as unknown as { geomType: string; normalAt(): { toTuple(): [number, number, number] } };
+    const normal = wrapped.geomType === "PLANE" ? new Vector3(...wrapped.normalAt().toTuple()) : null;
+    const edges = new oc.TopExp_Explorer(face, oc.TopAbs_ShapeEnum.TopAbs_EDGE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
+    for (; edges.More(); edges.Next()) {
+      const edge = oc.TopoDS.Edge(edges.Current());
+      const hash = oc.ReplicadShapeHasher.HashCode(edge, HASH_MAX) as number;
+      const bucket = byHash.get(hash) ?? [];
+      let entry = bucket.find((x) => x.edge.IsSame(edge));
+      if (!entry) {
+        entry = { edge, faces: [], normals: [] };
+        bucket.push(entry);
+        all.push(entry);
+        byHash.set(hash, bucket);
+      }
+      entry.faces.push(face);
+      entry.normals.push(normal);
+    }
+    edges.delete();
+  }
+  faces.delete();
+  const limit = Math.cos((FACET_ANGLE * Math.PI) / 180);
+  corners = [];
+  for (const { edge, faces, normals } of all) {
+    if (faces.length !== 2) continue; // A seam (or an open edge): nothing to round between.
+    // Faces may face either way round here, so it's the line's angle that counts.
+    if (normals[0] && normals[1] && Math.abs(normals[0].dot(normals[1])) >= limit) continue;
+    corners.push({ edge: edge as unknown as OcShape, faces, normals });
+  }
+  cornerCache.set(shape, corners);
+  return corners;
+}
+
+/** A faceted solid's corner edges that an op's target picks. */
+function facetedTargets(shape: Shape3D, op: EdgeOp) {
+  const filter = edgeFilter(shape, op);
+  const finder = filter ? (filter(new EdgeFinder(), shape) as unknown as { shouldKeep(e: Edge): boolean }) : null;
+  return cornerEdges(shape).filter((c) => !finder || finder.shouldKeep(cast(c.edge as never) as unknown as Edge));
+}
+
+/** A fillet, chamfer or bevel on a faceted solid's corners (see cornerEdges). */
+function facetedEdgeOp(shape: Shape3D, op: EdgeOp, size: number): Shape3D {
+  const targets = facetedTargets(shape, op);
+  if (!targets.length) throw new Error("No edge matches.");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const oc = getOC() as any;
+  const wrapped = (shape as unknown as { wrapped: unknown }).wrapped;
+  const builder = op.type === "fillet" ? new oc.BRepFilletAPI_MakeFillet(wrapped, oc.ChFi3d_FilletShape.ChFi3d_Rational) : new oc.BRepFilletAPI_MakeChamfer(wrapped);
+  try {
+    for (const { edge, faces, normals } of targets) {
+      if (op.type !== "bevel") builder.Add(size, edge);
+      else {
+        // As bevel(): the distance runs along the flatter face (or the other, flipped).
+        const flatness = (k: number) => Math.abs(normals[k]?.z ?? 0);
+        let k = flatness(1) > flatness(0) + 1e-6 ? 1 : 0;
+        if (op.flip) k = 1 - k;
+        builder.AddDA(size, (Math.min(89, Math.max(1, op.angle ?? 45)) * Math.PI) / 180, edge, faces[k]);
+      }
+    }
+    return cast(builder.Shape()) as Shape3D;
+  } finally {
+    builder.delete();
+  }
+}
+
 function edgeFilter(shape: Shape3D, op: EdgeOp): EdgeFilter | undefined {
   const [[, , zMin], [, , zMax]] = shape.boundingBox.bounds;
   switch (op.target) {
@@ -281,6 +380,10 @@ let adjusted: Record<string, number> = {};
 /** The op at `size`, or null if OpenCascade fails or returns invalid geometry. */
 function tryEdgeOp(shape: Shape3D, op: EdgeOp, size: number): Shape3D | null {
   try {
+    if (facetedBuild) {
+      const result = facetedEdgeOp(shape, op, size);
+      return isValidShape(result) ? result : null;
+    }
     const filter = edgeFilter(shape, op);
     const result = op.type === "fillet" ? shape.fillet(size, filter) : op.type === "bevel" ? bevel(shape, op, size, filter) : shape.chamfer(size, filter);
     return isValidShape(result) ? result : null;
@@ -373,10 +476,12 @@ function flattestFit(shape: Shape3D, op: EdgeOp): { shape: Shape3D; angle: numbe
 function applyEdgeOps(shape: Shape3D, ops: EdgeOp[]): Shape3D {
   for (const [i, op] of ops.entries()) {
     if (op.size <= 0 || (op.target === "picked" && op.points.length === 0)) continue;
+    const label = `${op.type === "fillet" ? "Fillet" : op.type === "bevel" ? "Bevel" : "Chamfer"} ${i + 1}`;
+    if (facetedBuild && op.target !== "picked" && !facetedTargets(shape, op).length)
+      throw new Error(`${label}: there are no corners there to ${op.type === "fillet" ? "round" : "cut"} (its curves are smooth).`);
     try {
       shape = safeEdgeOp(shape, op);
     } catch {
-      const label = `${op.type === "fillet" ? "Fillet" : op.type === "bevel" ? "Bevel" : "Chamfer"} ${i + 1}`;
       throw new Error(`${label}: its edges no longer exist; pick them again.`);
     }
   }
@@ -396,7 +501,14 @@ function buildOwn(f: Feature): Shape3D | null {
   }
   // Text takes neither: OpenCascade can't round or hollow font outlines reliably (see the Text panel).
   const finished = f.kind !== "group" && f.kind !== "text";
-  if (shape && finished && f.edgeOps.length) shape = applyEdgeOps(shape, f.edgeOps);
+  if (shape && finished && f.edgeOps.length) {
+    facetedBuild = isFaceted(f);
+    try {
+      shape = applyEdgeOps(shape, f.edgeOps);
+    } finally {
+      facetedBuild = false;
+    }
+  }
   if (shape && finished && f.shell) shape = applyShell(shape, f.shell);
   return shape && f.clips?.length ? applyClips(shape, f.clips) : shape;
 }
@@ -838,51 +950,133 @@ function importedShape(p: ImportedParams): Shape3D {
  * flat (triangles on one plane are merged back into one face), curves become
  * small facets.
  */
-function stretchSolid(shape: Shape3D, [sx, sy, sz]: [number, number, number]): Shape3D {
+function stretchSolid(shape: Shape3D, scale: [number, number, number]): Shape3D {
   const [lo, hi] = shape.boundingBox.bounds;
   const diag = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
   const m = shape.mesh({ tolerance: Math.max(0.005, diag * 2e-4), angularTolerance: 0.1 });
   shape.delete();
-  // A binary STL of the stretched triangles, read back by OpenCascade (which joins their corners into a shell).
-  const n = m.triangles.length / 3;
+  return solidFromTriangles(m.vertices, m.triangles, scale, false);
+}
+
+/**
+ * A solid from triangles (scaled along each axis): OpenCascade reads them as an
+ * STL, sews their corners into closed shells and merges each flat area back
+ * into one face. `separate`: each closed shell is its own solid (a mesh file
+ * with several bodies), and a mesh with gaps is refused; otherwise the shells
+ * are one solid's outside and voids.
+ */
+function solidFromTriangles(vertices: ArrayLike<number>, triangles: ArrayLike<number>, [sx, sy, sz]: number[], separate: boolean): Shape3D {
+  const lo = [Infinity, Infinity, Infinity];
+  const hi = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < vertices.length; i++) {
+    lo[i % 3] = Math.min(lo[i % 3], vertices[i] * [sx, sy, sz][i % 3]);
+    hi[i % 3] = Math.max(hi[i % 3], vertices[i] * [sx, sy, sz][i % 3]);
+  }
+  const diag = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+  const n = triangles.length / 3;
   const stl = new DataView(new ArrayBuffer(84 + n * 50));
+  // OpenCascade takes a file whose first bytes are all plain text for a text STL: mark it binary.
+  stl.setUint8(0, 0xff);
   stl.setUint32(80, n, true);
   for (let t = 0; t < n; t++)
     for (let c = 0; c < 3; c++) {
-      const v = m.triangles[t * 3 + c] * 3;
+      const v = triangles[t * 3 + c] * 3;
       const at = 84 + t * 50 + 12 + c * 12;
-      stl.setFloat32(at, m.vertices[v] * sx, true);
-      stl.setFloat32(at + 4, m.vertices[v + 1] * sy, true);
-      stl.setFloat32(at + 8, m.vertices[v + 2] * sz, true);
+      stl.setFloat32(at, vertices[v] * sx, true);
+      stl.setFloat32(at + 4, vertices[v + 1] * sy, true);
+      stl.setFloat32(at + 8, vertices[v + 2] * sz, true);
     }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const oc = getOC() as any;
-  const file = `/stretch-${Date.now()}-${Math.random().toString(36).slice(2)}.stl`;
+  const file = `/mesh-${Date.now()}-${Math.random().toString(36).slice(2)}.stl`;
   oc.FS.writeFile(file, new Uint8Array(stl.buffer));
   const reader = new oc.StlAPI_Reader();
   const shell = new oc.TopoDS_Shell();
+  const temps: { delete(): void }[] = [];
   try {
-    if (!reader.Read(shell, file)) throw new Error("couldn't stretch this solid.");
-    // The reader gives loose triangles: sew them into a closed shell, merge each flat area back into one face.
+    if (!reader.Read(shell, file)) throw new Error("OpenCascade couldn't read the triangles.");
+    // The reader gives loose triangles: sew them into closed shells, merge each flat area back into one face.
     const sew = new oc.BRepBuilderAPI_Sewing(Math.max(1e-5, diag * 1e-6), true, true, true, false);
     sew.Add(shell);
     const progress = new oc.Message_ProgressRange();
     sew.Perform(progress);
+    temps.push(sew, progress);
+    if (separate && sew.NbFreeEdges() > 0) throw new Error("the mesh has gaps (it isn't closed), so it can't be a solid.");
     const sewed = sew.SewedShape();
     const unify = new oc.ShapeUpgrade_UnifySameDomain(sewed, true, true, false);
     unify.Build();
     const unified = unify.Shape();
-    const make = new oc.BRepBuilderAPI_MakeSolid();
     const shells = new oc.TopExp_Explorer(unified, oc.TopAbs_ShapeEnum.TopAbs_SHELL, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
-    for (; shells.More(); shells.Next()) make.Add(oc.TopoDS.Shell(shells.Current()));
-    const solid = cast(make.Solid()) as Shape3D;
-    for (const o of [sew, progress, sewed, unify, unified, shells, make]) o.delete();
-    return solid;
+    temps.push(sewed, unify, unified, shells);
+    if (!separate) {
+      const make = new oc.BRepBuilderAPI_MakeSolid();
+      temps.push(make);
+      for (; shells.More(); shells.Next()) make.Add(oc.TopoDS.Shell(shells.Current()));
+      return cast(make.Solid()) as Shape3D;
+    }
+    const solids: Shape3D[] = [];
+    for (; shells.More(); shells.Next()) {
+      const make = new oc.BRepBuilderAPI_MakeSolid();
+      make.Add(oc.TopoDS.Shell(shells.Current()));
+      const solid = make.Solid();
+      make.delete();
+      // Triangles facing inwards would make a solid of everything but the shape: turn it the right way out.
+      oc.BRepLib.OrientClosedSolid(solid);
+      solids.push(cast(solid) as Shape3D);
+    }
+    if (!solids.length) throw new Error("the mesh has no closed shape in it.");
+    const shape = (solids.length === 1 ? solids[0] : makeCompound(solids)) as Shape3D;
+    if (!isValidShape(shape)) throw new Error("the mesh crosses through itself, so it can't be a solid.");
+    return shape;
   } finally {
+    for (const o of temps) o.delete();
     oc.FS.unlink(file);
     reader.delete();
     shell.delete();
   }
+}
+
+/** An imported solid whose curves are small flat facets: made from a mesh, or stretched unevenly. */
+function isFaceted(f: Feature): boolean {
+  return f.kind === "imported" && (!!f.params.faceted || !isEven(f.params.scale));
+}
+
+/**
+ * A faceted solid's mesh, shaded smooth across the seams between facets and
+ * outlined only at real corners (and only those edges can be picked).
+ */
+function softenFacets(m: MeshData): MeshData {
+  const g = new BufferGeometry();
+  g.setAttribute("position", new BufferAttribute(m.vertices, 3));
+  g.setIndex(new BufferAttribute(m.triangles, 1));
+  const creased = toCreasedNormals(g, (FACET_ANGLE * Math.PI) / 180);
+  const corners = new EdgesGeometry(g, FACET_ANGLE);
+  const key = (a: ArrayLike<number>, i: number) => `${Math.round(a[i] * 1e3)},${Math.round(a[i + 1] * 1e3)},${Math.round(a[i + 2] * 1e3)}`;
+  const segment = (a: ArrayLike<number>, i: number) => [key(a, i), key(a, i + 3)].sort().join("|");
+  const cp = corners.getAttribute("position").array;
+  const sharp = new Set<string>();
+  for (let i = 0; i < cp.length; i += 6) sharp.add(segment(cp, i));
+  // Keep the exact shape's edges whose every piece lies along a corner.
+  const edges: number[] = [];
+  const groups: number[] = [];
+  for (let gi = 0; gi < m.edgeGroups.length; gi += 3) {
+    const [start, count, edgeId] = [m.edgeGroups[gi], m.edgeGroups[gi + 1], m.edgeGroups[gi + 2]];
+    let keep = true;
+    for (let v = start; v < start + count && keep; v += 2) keep = sharp.has(segment(m.edges, v * 3));
+    if (!keep) continue;
+    groups.push(edges.length / 3, count, edgeId);
+    for (let k = start * 3; k < (start + count) * 3; k++) edges.push(m.edges[k]);
+  }
+  const out: MeshData = {
+    id: m.id,
+    vertices: creased.getAttribute("position").array as Float32Array,
+    normals: creased.getAttribute("normal").array as Float32Array,
+    triangles: Uint32Array.from({ length: creased.getAttribute("position").count }, (_, i) => i),
+    edges: new Float32Array(edges),
+    edgeGroups: new Int32Array(groups),
+  };
+  for (const x of [g, creased, corners]) x.dispose();
+  return out;
 }
 
 /** Stretched with nothing else done to it: shown as its exact shape's mesh, stretched (smooth, with its real edges). */
@@ -915,8 +1109,10 @@ async function importSolids(files: ImportSource[]): Promise<ImportedSolid[]> {
   for (const file of files) {
     let shape: Shape3D;
     try {
-      shape = (file.format === "step" ? await importSTEP(new Blob([file.data])) : deserializeShape(typeof file.data === "string" ? file.data : new TextDecoder().decode(file.data))) as Shape3D;
+      if (file.format === "mesh") shape = solidFromTriangles(file.vertices!, file.triangles!, [1, 1, 1], true);
+      else shape = (file.format === "step" ? await importSTEP(new Blob([file.data!])) : deserializeShape(typeof file.data === "string" ? file.data : new TextDecoder().decode(file.data))) as Shape3D;
     } catch (err) {
+      if (file.format === "mesh") throw new Error(`${file.name}: ${message(err)}`);
       throw new Error(`${file.name}: ${file.format === "step" ? "this isn't a STEP file OpenCascade can read" : "this isn't a BREP shape OpenCascade can read"} (${message(err)}).`);
     }
     // FreeCAD objects inside a Part container are placed by it (nearest container first).
@@ -937,6 +1133,7 @@ async function importSolids(files: ImportSource[]): Promise<ImportedSolid[]> {
         brep: local.serialize(),
         size: [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]],
         anchor,
+        ...(file.format === "mesh" ? { faceted: true } : {}),
       });
     });
     if (!solids.length && shape.faces.length) {
@@ -1058,7 +1255,8 @@ function ownMesh(f: Feature): MeshData | null {
       if (plainStretch(f)) meshCache.set(key, { mesh: textured(f, stretchMesh(toMesh("", importedBase(f.params)), f.params.scale)), adjusted });
       else {
         const shape = buildOwn(f);
-        meshCache.set(key, { mesh: shape ? textured(f, toMesh("", shape, f.kind)) : null, adjusted });
+        const mesh = shape && toMesh("", shape, f.kind);
+        meshCache.set(key, { mesh: mesh && textured(f, isFaceted(f) ? softenFacets(mesh) : mesh), adjusted });
       }
     } finally {
       adjusted = Object.assign(outer, adjusted);

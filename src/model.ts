@@ -242,6 +242,8 @@ export interface ImportedParams {
    * exact shape kept so evening it out again brings it back.
    */
   scale: [number, number, number];
+  /** Made from a mesh: its curves are small flat facets (shaded smooth, and only real corners count as edges). */
+  faceted?: boolean;
 }
 
 export type TexturePattern = "knurl" | "ribs" | "rings" | "bumps" | "honeycomb" | "grid" | "bricks" | "waves" | "wood" | "rough";

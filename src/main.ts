@@ -4,6 +4,7 @@ import {
   childrenOf,
   createFeature,
   FINISHABLE,
+  baseMatrix,
   emptyDocument,
   isCadDocument,
   nextColour,
@@ -54,7 +55,7 @@ import { SketchEditor, type MenuItem, type SketchTool } from "./sketcher";
 import { bounds as sketchBounds, gearOuterRadius, removePoint } from "./sketchGeometry";
 import { HEDRON_FACES, HEDRON_NAMES, type HedronFaces } from "./hedron";
 import { BUILT_IN_FONTS, CUSTOM_FONT, builtInFont, builtInFontUrl, fontFamily, isCustomFont } from "./fonts";
-import { addDetail, appendToStl, baseMesh, decodeFloats, encodeFloats, importedMesh, meshToSculpt, scaleSculpt, sculptTriangles, vertexCount, type BrushKind, type BrushSettings, type SculptBase } from "./sculpt";
+import { addDetail, appendToStl, baseMesh, decodeFloats, decodeIndices, encodeFloats, importedMesh, meshToSculpt, scaleSculpt, sculptTriangles, vertexCount, type BrushKind, type BrushSettings, type SculptBase } from "./sculpt";
 import { openImportFiles, openTextFile, saveFile } from "./storage";
 import { formatLength, parseLength } from "./units";
 import { onThemeChange, setThemeSetting, themeSetting, type ThemeSetting } from "./theme";
@@ -488,6 +489,49 @@ async function convertToSculpt(id: string) {
   } catch (err) {
     setStatus(`Couldn't turn it into clay: ${(err as Error).message}`, true);
   }
+}
+
+/**
+ * Turn a mesh (an imported one, or clay) into a solid, so it takes fillets,
+ * chamfers, holes, shells and textures like any other object. Flat areas
+ * become single faces; curves stay as their small flat facets.
+ */
+async function convertToSolid(id: string) {
+  const f = findFeature(id);
+  if (!f || f.kind !== "sculpt") return;
+  const tris = decodeIndices(f.params.indices);
+  setStatus(tris.length / 3 > SOLID_MESH_LIMIT ? "Making it a solid (a mesh this detailed takes a while)…" : "Making it a solid…");
+  let solids: ImportedSolid[];
+  try {
+    solids = await kernel.importSolids([{ name: f.name, format: "mesh", vertices: decodeFloats(f.params.positions), triangles: tris }]);
+  } catch (err) {
+    setStatus(`Couldn't make ${(err as Error).message.replace(`${f.name}: `, "it a solid: ")}`, true);
+    return;
+  }
+  const parts = solids.filter((s): s is Extract<ImportedSolid, { kind: "solid" }> => s.kind === "solid");
+  if (!parts.length) return setStatus("Couldn't make it a solid: the mesh has no closed shape in it.", true);
+  // Each solid's own origin is the middle of its base: move the object so it stays where it was.
+  const placed = baseMatrix(f);
+  const at = (anchor: number[]) => {
+    const v = new Vector3(...anchor).applyMatrix4(placed);
+    return { x: round4(v.x), y: round4(v.y), z: round4(v.z) };
+  };
+  commit((features) => {
+    const t = features.find((x) => x.id === id);
+    if (!t) return;
+    parts.forEach((p, i) => {
+      const params = { ref: newId(), brep: p.brep, size: p.size, scale: [1, 1, 1] as [number, number, number], faceted: true };
+      if (i === 0) {
+        Object.assign(t, { kind: "imported", mode: "solid", edgeOps: [], params, position: at(p.anchor) });
+        return;
+      }
+      // Separate bodies in one mesh become objects of their own beside it.
+      const extra = structuredClone(t) as Feature;
+      Object.assign(extra, { id: newId(), name: `${t.name} ${i + 1}`, params, position: at(p.anchor) });
+      features.push(extra);
+    });
+  });
+  setNotice(`${f.name} is now a solid${parts.length > 1 ? ` (${parts.length} pieces)` : ""}: it can take fillets, chamfers and holes. Ctrl+Z turns it back into a mesh.`);
 }
 
 // ---- Edge picking --------------------------------------------------------
@@ -1313,7 +1357,7 @@ function tiltSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
   const deg = { unit: "°", plain: true };
   const canLean = LEAN_KINDS.has(f.kind) && !(f.kind === "sketch" && (f.params.operation !== "extrude" || f.params.plane !== "XY"));
   // Round-all-over shapes have no sides to taper (and can't lean).
-  if (!canLean && f.kind !== "sketch") return [];
+  if (!canLean && f.kind !== "sketch" && f.kind !== "imported") return [];
   const items: HTMLElement[] = [section("Tilt"), lengthField("Taper sides", tilt.taper, (v) => set("taper", v), deg)];
   if (canLean) items.push(lengthField("Lean X", tilt.leanX, (v) => set("leanX", v), deg), lengthField("Lean Y", tilt.leanY, (v) => set("leanY", v), deg));
   items.push(
@@ -1341,13 +1385,21 @@ function importedFields(f: Extract<Feature, { kind: "imported" }>, update: (muta
   if (even) {
     items.push(
       lengthField("Scale", Math.round(scale[0] * 1e6) / 1e4, (v) => setScale([v / 100, v / 100, v / 100]), { min: 0, unit: "%" }),
-      hint("An exact solid from another CAD program: it can be a hole, take fillets and chamfers, and be split. Sizes that change in proportion keep it exact."),
+      hint(
+        f.params.faceted
+          ? "A solid made from a mesh: it can be a hole, take fillets and chamfers (on its corners; curves are small smooth facets), and be split."
+          : "An exact solid from another CAD program: it can be a hole, take fillets and chamfers, and be split. Sizes that change in proportion keep it exact.",
+      ),
     );
   } else {
     // The most it was resized along any axis, for all of them.
     const k = scale.reduce((a, b) => (Math.abs(Math.log(b)) > Math.abs(Math.log(a)) ? b : a));
     items.push(
-      hint("Stretched unevenly: for holes, fillets and exports its curved faces become small flat facets (an exact solid can only be scaled evenly). Even it out to get the exact shape back."),
+      hint(
+        f.params.faceted
+          ? "Stretched unevenly. Even it out to resize it in proportion again."
+          : "Stretched unevenly: for holes, fillets and exports its curved faces become small flat facets (an exact solid can only be scaled evenly). Even it out to get the exact shape back.",
+      ),
       button(`Even out (${fmt(k * 100)}% all round)`, () => setScale([k, k, k]), "wide"),
     );
   }
@@ -2313,7 +2365,18 @@ function renderPropertiesPanel() {
   }
 
   if (f.kind === "sculpt") {
-    items.push(button("✋ Sculpt", () => startSculpt(f.id), "primary wide"), section("Size"), ...meshSizeFields(f, update), section("Clay"), ...sculptSettings(f, update));
+    const solid = button("◆ Make it a solid", () => void convertToSolid(f.id), "wide");
+    solid.title = "Turn the mesh into a solid that takes fillets, chamfers, holes and textures like any other object (Ctrl+Z to undo)";
+    items.push(
+      button("✋ Sculpt", () => startSculpt(f.id), "primary wide"),
+      section("Size"),
+      ...meshSizeFields(f, update),
+      section("Solid"),
+      solid,
+      hint("A mesh can't be a hole or take fillets, chamfers, shells or textures. As a solid it can; flat areas become single faces, curves keep their small facets."),
+      section("Clay"),
+      ...sculptSettings(f, update),
+    );
   } else if (f.kind === "sketch") {
     items.push(section("Sketch"), ...sketchSettings(f, update), button("✎ Edit sketch", () => startSketchEdit(f.id), "primary wide"));
   } else if (f.kind === "spring") {
@@ -2339,7 +2402,7 @@ function renderPropertiesPanel() {
       ),
     );
   }
-  if (f.kind !== "group" && f.kind !== "plane" && f.kind !== "sculpt" && f.kind !== "imported" && !(f.kind === "sketch" && f.params.operation === "flat")) items.push(...tiltSection(f, update));
+  if (f.kind !== "group" && f.kind !== "plane" && f.kind !== "sculpt" && !(f.kind === "sketch" && f.params.operation === "flat")) items.push(...tiltSection(f, update));
   if (f.kind === "thread") {
     items.push(hint("For a nut or threaded hole, make it a <b>Hole</b> inside the part. For 3D printing, add about 0.3 mm to a hole's diameter so the bolt fits."));
   }
@@ -3718,13 +3781,36 @@ function meshPiece(part: ImportedPart, name: string): Placed {
   return { feature: f, min, max };
 }
 
-const MESH_TAIL = "Meshes can be moved, sculpted and exported, and holes cut them (if the mesh is closed); they can't be holes themselves or take fillets.";
+const MESH_TAIL = "Big meshes and ones with gaps stay meshes: they can be moved, sculpted and exported, and holes cut them. Select one and click Make it a solid to try for fillets, chamfers and the rest.";
+const SOLID_TAIL = "Imported solids are exact: they can be holes, take fillets and chamfers, and be split; they resize evenly.";
 
-function meshBatch(title: string, fileName: string, parts: ImportedPart[]): ImportBatch {
+/** Meshes up to this many triangles come in as solids (sewing bigger ones together takes too long). */
+const SOLID_MESH_LIMIT = 20000;
+
+/** A mesh as solids, one per closed body; null if it can't be one (gaps, or crossing itself). */
+async function meshSolids(part: ImportedPart, name: string): Promise<Extract<ImportedSolid, { kind: "solid" }>[] | null> {
+  try {
+    const solids = await kernel.importSolids([{ name, format: "mesh", vertices: part.vertices, triangles: part.triangles, color: part.color }]);
+    return solids.every((s) => s.kind === "solid") && solids.length ? (solids as Extract<ImportedSolid, { kind: "solid" }>[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function meshBatch(title: string, fileName: string, parts: ImportedPart[]): Promise<ImportBatch> {
   if (parts.length > MAX_IMPORT_PARTS) parts = mergeByColor(parts, title);
-  const pieces = parts.map((p) => meshPiece(p, parts.length > 1 ? p.name : title));
+  const pieces: Placed[] = [];
+  let meshes = 0;
+  for (const p of parts) {
+    const name = parts.length > 1 ? p.name : title;
+    const solids = p.triangles.length / 3 <= SOLID_MESH_LIMIT ? await meshSolids(p, name) : null;
+    if (solids) pieces.push(...solids.map(solidPiece));
+    else (pieces.push(meshPiece(p, name)), meshes++);
+  }
   const tris = parts.reduce((s, p) => s + p.triangles.length / 3, 0);
-  return placeBatch(title, pieces, `${fileName}: ${parts.length === 1 ? "1 mesh" : `${parts.length} meshes (grouped)`}, ${tris.toLocaleString()} triangles`, MESH_TAIL);
+  const solids = pieces.length - meshes;
+  const what = [solids && `${solids} solid${solids === 1 ? "" : "s"}`, meshes && `${meshes} mesh${meshes === 1 ? "" : "es"}`].filter(Boolean).join(" and ");
+  return placeBatch(title, pieces, `${fileName}: ${what}${pieces.length > 1 ? " (grouped)" : ""}, ${tris.toLocaleString()} triangles`, meshes ? MESH_TAIL : SOLID_TAIL);
 }
 
 /** One part per colour. */
@@ -3748,20 +3834,22 @@ function mergeByColor(parts: ImportedPart[], title: string): ImportedPart[] {
 /** Exact solids (and any loose surfaces, as meshes) from STEP, BREP or FreeCAD files. */
 function solidBatch(title: string, fileName: string, parts: ImportedSolid[]): ImportBatch {
   if (!parts.length) throw new Error("it has no solids or surfaces in it.");
-  const pieces = parts.map((p): Placed => {
-    if (p.kind === "mesh") return meshPiece(p, p.name);
-    const f = createFeature("imported", doc.features) as Extract<Feature, { kind: "imported" }>;
-    f.name = p.name;
-    f.params = { ref: newId(), brep: p.brep, size: p.size, scale: [1, 1, 1] };
-    f.position = { x: p.anchor[0], y: p.anchor[1], z: p.anchor[2] };
-    if (p.color) f.color = p.color;
-    const [w, d, h] = p.size;
-    return { feature: f, min: [p.anchor[0] - w / 2, p.anchor[1] - d / 2, p.anchor[2]], max: [p.anchor[0] + w / 2, p.anchor[1] + d / 2, p.anchor[2] + h] };
-  });
+  const pieces = parts.map((p): Placed => (p.kind === "mesh" ? meshPiece(p, p.name) : solidPiece(p)));
   const solids = parts.filter((p) => p.kind === "solid").length;
   const meshes = parts.length - solids;
   const what = [solids && `${solids} solid${solids === 1 ? "" : "s"}`, meshes && `${meshes} surface mesh${meshes === 1 ? "" : "es"}`].filter(Boolean).join(" and ");
-  return placeBatch(title, pieces, `${fileName}: ${what}${parts.length > 1 ? " (grouped)" : ""}`, "Imported solids are exact: they can be holes, take fillets and chamfers, and be split; they resize evenly.");
+  return placeBatch(title, pieces, `${fileName}: ${what}${parts.length > 1 ? " (grouped)" : ""}`, SOLID_TAIL);
+}
+
+/** An imported solid as an object whose own origin is the middle of its base. */
+function solidPiece(p: Extract<ImportedSolid, { kind: "solid" }>): Placed {
+  const f = createFeature("imported", doc.features) as Extract<Feature, { kind: "imported" }>;
+  f.name = p.name;
+  f.params = { ref: newId(), brep: p.brep, size: p.size, scale: [1, 1, 1], ...(p.faceted ? { faceted: true } : {}) };
+  f.position = { x: p.anchor[0], y: p.anchor[1], z: p.anchor[2] };
+  if (p.color) f.color = p.color;
+  const [w, d, h] = p.size;
+  return { feature: f, min: [p.anchor[0] - w / 2, p.anchor[1] - d / 2, p.anchor[2]], max: [p.anchor[0] + w / 2, p.anchor[1] + d / 2, p.anchor[2] + h] };
 }
 
 /** A 2D drawing as a sketch, extruded 3 mm. */

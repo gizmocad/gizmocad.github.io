@@ -16,8 +16,11 @@ export interface MeshData {
 /** A STEP or BREP file (or one FreeCAD object's shape) to import. */
 export interface ImportSource {
   name: string;
-  format: "step" | "brep";
-  data: ArrayBuffer | string;
+  format: "step" | "brep" | "mesh";
+  data?: ArrayBuffer | string;
+  /** A "mesh": its triangles, made into a solid (a mesh with gaps is refused). */
+  vertices?: Float32Array;
+  triangles?: Uint32Array;
   color?: string;
   /** FreeCAD Part containers it sits in, nearest first: turn (degrees about `axis`), then move. */
   placements?: { position: [number, number, number]; axis: [number, number, number]; angle: number }[];
@@ -25,7 +28,7 @@ export interface ImportSource {
 
 /** One solid from an imported file (its own origin moved to the middle of its base), or its loose surfaces as a mesh. */
 export type ImportedSolid =
-  | { kind: "solid"; name: string; color?: string; brep: string; size: [number, number, number]; anchor: [number, number, number] }
+  | { kind: "solid"; name: string; color?: string; brep: string; size: [number, number, number]; anchor: [number, number, number]; faceted?: boolean }
   | { kind: "mesh"; name: string; color?: string; vertices: Float32Array; triangles: Uint32Array };
 
 export type KernelRequest =

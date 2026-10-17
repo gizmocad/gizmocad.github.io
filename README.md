@@ -82,7 +82,10 @@
   with colours). **Import** several files at once (or drop them on the window); they land side by side:
   - **STEP**, **FreeCAD (.FCStd)** and **BREP** as exact solids that can be holes, take fillets and be split
     (FreeCAD files keep each visible object's name, colour and placement);
-  - **STL**, **3MF**, **OBJ** (with its .mtl), **PLY**, **OFF** and **glTF/GLB** as meshes (3MF keeps part names, colours and layout);
+  - **STL**, **3MF**, **OBJ** (with its .mtl), **PLY**, **OFF** and **glTF/GLB** meshes (3MF keeps part names, colours and layout).
+    Closed meshes up to 20,000 triangles become solids with all the usual options (holes, fillets, chamfers, tapers,
+    shells, textures): flat areas become single faces, curves keep their facets but are shaded smooth, and only real
+    corners count as edges. Bigger or open meshes stay meshes; **Make it a solid** converts one (or a sculpt) later;
   - **DXF** and **SVG** drawings as sketches (lines and arcs that join up become shapes, holes included);
   - another **GizmoCAD** model, brought into this one.
 - **AI assistant (MCP):** let Claude (or any MCP-capable assistant) build and edit the model while you watch. See below.
