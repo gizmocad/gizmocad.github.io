@@ -1380,7 +1380,7 @@ function importedFields(f: Extract<Feature, { kind: "imported" }>, update: (muta
   const { size, scale } = f.params;
   const even = Math.abs(scale[0] - scale[1]) < 1e-9 && Math.abs(scale[1] - scale[2]) < 1e-9;
   const items: HTMLElement[] = SIZE_LABELS.map((label, i) =>
-    lengthField(label, Math.round(size[i] * scale[i] * 1e4) / 1e4, (v) => size[i] > 1e-9 && setScale(scale.map((k, j) => (j === i ? v / size[i] : k))), { min: 0 }),
+    lengthField(label, Math.round(size[i] * scale[i] * 1e4) / 1e4, (v) => size[i] > 1e-9 && resizeAlong(f.id, i, v / (size[i] * scale[i]), (size[2] * scale[2]) / 2), { min: 0 }),
   );
   if (even) {
     items.push(
@@ -1418,19 +1418,23 @@ function meshSizeFields(f: SculptFeature, update: (mutate: (f: Feature) => void)
     }
   return SIZE_LABELS.map((label, i) => {
     const now = hi[i] - lo[i];
-    return lengthField(label, Math.round(now * 1e4) / 1e4, (v) => {
-      if (!(now > 1e-9)) return;
-      // Scaled about its own origin (the middle of its base), like the resize handles.
-      const factor = v / now;
-      update((t) => {
-        if (t.kind !== "sculpt") return;
-        const p = decodeFloats(t.params.positions);
-        for (let k = i; k < p.length; k += 3) p[k] *= factor;
-        t.params.positions = encodeFloats(p);
-        const extent = [0, 1, 2].map((a) => (a === i ? now * factor : hi[a] - lo[a]));
-        t.params.size = Math.round(Math.max(...extent) * 100) / 100;
-      });
-    }, { min: 0 });
+    return lengthField(label, Math.round(now * 1e4) / 1e4, (v) => now > 1e-9 && resizeAlong(f.id, i, v / now, (lo[2] + hi[2]) / 2), { min: 0 });
+  });
+}
+
+/**
+ * Resize an imported object along its own axis `i` by `factor` from the side
+ * panel, as the resize handles do: its height grows up and down from its
+ * middle (`midZ`, in its own frame), so typing a height doesn't lift it.
+ */
+function resizeAlong(id: string, i: number, factor: number, midZ: number) {
+  const s = { x: 1, y: 1, z: 1 };
+  s[(["x", "y", "z"] as const)[i]] = factor;
+  commit((features) => {
+    const f = features.find((x) => x.id === id);
+    if (!f) return;
+    const up = new Vector3(0, 0, 1).transformDirection(baseMatrix(f));
+    resizeFeature(features, id, s, 0, i === 2 ? { axis: "z", at: midZ, dir: { x: up.x, y: up.y, z: up.z } } : undefined);
   });
 }
 
