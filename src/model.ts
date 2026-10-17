@@ -987,6 +987,21 @@ export function ignoresHole(features: Feature[], f: Feature, holeId: string): bo
   return false;
 }
 
+/**
+ * An object's colour. A group with none of its own takes its parts' colour
+ * when they all share one (it's shown, and exported, as one shape).
+ */
+export function colourOf(features: Iterable<Feature>, f: Feature): string | undefined {
+  if (f.color || f.kind !== "group") return f.color;
+  const all = [...features];
+  const inside = (x: Feature) => {
+    for (let p = x.parentId; p; p = all.find((y) => y.id === p)?.parentId ?? null) if (p === f.id) return true;
+    return false;
+  };
+  const colours = new Set(all.filter((x) => x.kind !== "group" && x.mode === "solid" && inside(x)).map((x) => x.color));
+  return colours.size === 1 ? [...colours][0] : undefined;
+}
+
 /** A hole's sweep (null for solids and groups). */
 export const sweepOf = (f: Feature) => (f.mode === "hole" && f.kind !== "group" && f.kind !== "plane" && f.sweep ? f.sweep : null);
 

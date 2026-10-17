@@ -48,6 +48,7 @@ import {
   type SketchConstraint,
   type SketchRef,
   type ConstraintType,
+  colourOf,
 } from "./model";
 import { Box3, BufferAttribute, BufferGeometry, EdgesGeometry, Matrix4, Vector3 } from "three";
 import { CONSTRAINT_LABEL, constraintFits, measure as measureConstraint, refPoints as refPointsOf, solveSketch } from "./constraints";
@@ -4317,7 +4318,7 @@ async function file3mf(): Promise<Blob> {
   const meshes = await kernel.parts(features);
   const parts: MeshPart[] = meshes.map((m) => {
     const f = features.find((x) => x.id === m.id)!;
-    return { name: f.name, color: f.color ?? "#3ddc97", vertices: m.vertices, triangles: m.triangles };
+    return { name: f.name, color: colourOf(features, f) ?? "#3ddc97", vertices: m.vertices, triangles: m.triangles };
   });
   // Sculpts (meshes) go in as their own objects, with any holes cut through them.
   const cut = await kernel.cutMeshes(features);

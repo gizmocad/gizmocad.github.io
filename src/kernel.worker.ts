@@ -1308,7 +1308,11 @@ function branchTriangles(features: Feature[], f: Feature | null, inherited: Mesh
   // Fillets on a merged group, or a split, need the exact result.
   if (f && ((f.kind === "group" && isMergedGroup(f)) || f.clips?.length)) {
     const s = branch(features, f);
-    return s && cutAll(shapeTriangles(s), reaching(inherited, f), f);
+    // A merged group's triangles are kept with its shape (triangulating a big rounded one takes a while).
+    const entry = f.kind === "group" ? branchCache.get(branchKey(features, f)) : undefined;
+    const tris = entry && entry.shape ? (entry.tris ??= s && shapeTriangles(s)) : s && shapeTriangles(s);
+    s?.delete();
+    return tris && cutAll(tris, reaching(inherited, f), f);
   }
   if (inherited.length || anyIgnoredHoles(features)) {
     // Some objects ignore some holes: each piece is cut by the holes that reach it (as branchIgnoring does).
@@ -1826,7 +1830,43 @@ function branchIgnoring(features: Feature[], self: Feature | null, inherited: Cu
   return result;
 }
 
+/**
+ * Merged groups' finished shapes (joining and rounding them can take many
+ * seconds), by what's in them, with the failures and size adjustments made on
+ * the way. Callers get copies: placing a shape uses it up.
+ */
+const branchCache = new Map<string, { shape: Shape3D | null; failures: Record<string, string>; adjusted: Record<string, number>; tris?: WorldMesh | null }>();
+const branchKey = (features: Feature[], self: Feature) => JSON.stringify([geometryKey(features, self.id), excludeTextured]);
+
 function branch(features: Feature[], self: Feature | null, inherited: Cutter[] = []): Shape3D | null {
+  // A merged group's shape depends only on what's inside it (unless something in it waits for outside holes).
+  if (self && isMergedGroup(self) && !inherited.length && !features.some((x) => subtreeIds(features, self.id).has(x.id) && hasAfterHoles(x))) {
+    const key = branchKey(features, self);
+    let hit = branchCache.get(key);
+    if (!hit) {
+      const [outerFailures, outerAdjusted] = [failures, adjusted];
+      [failures, adjusted] = [{}, {}];
+      try {
+        hit = { shape: branchNow(features, self, []), failures, adjusted };
+      } finally {
+        [failures, adjusted] = [Object.assign(outerFailures, failures), Object.assign(outerAdjusted, adjusted)];
+      }
+      branchCache.set(key, hit);
+      if (branchCache.size > 12) {
+        const [oldKey, old] = branchCache.entries().next().value!;
+        branchCache.delete(oldKey);
+        old.shape?.delete();
+      }
+      return hit.shape && copyShape(hit.shape);
+    }
+    Object.assign(failures, hit.failures);
+    Object.assign(adjusted, hit.adjusted);
+    return hit.shape && copyShape(hit.shape);
+  }
+  return branchNow(features, self, inherited);
+}
+
+function branchNow(features: Feature[], self: Feature | null, inherited: Cutter[] = []): Shape3D | null {
   if (inherited.length || anyIgnoredHoles(features)) {
     let result = branchIgnoring(features, self, inherited);
     if (result && self) result = finishBranch(self, result, childrenOf(features, self.id).length > 0);
@@ -1892,7 +1932,7 @@ function toMesh(id: string, shape: Shape3D, kind?: Feature["kind"]): MeshData {
 }
 
 // Local geometry doesn't depend on placement, so moving things never re-meshes.
-const meshCache = new Map<string, { mesh: MeshData | null; adjusted: Record<string, number> }>();
+const meshCache = new Map<string, { mesh: MeshData | null; adjusted: Record<string, number>; failures?: Record<string, string> }>();
 
 function ownMesh(f: Feature): MeshData | null {
   // An imported solid's geometry is named by its ref (its BREP text can be megabytes).
@@ -1994,10 +2034,9 @@ function cutMesh(features: Feature[], f: Feature): MeshData | null {
     let mesh: MeshData | null = null;
     let error: string | undefined;
     try {
-      // A solid made from a mesh (the object or a hole) is cut as triangles: far quicker than OpenCascade (it's only for the view).
-      const facetedHole = holes.some((h) => hasFaceted(features.filter((x) => subtreeIds(features, h.id).has(x.id))));
-      const quick = (isFaceted(f) || facetedHole) && !isTextured(f);
-      if (quick) {
+      // Cut as triangles (Manifold): far quicker than OpenCascade's exact cut, and it's only for the view.
+      // A textured object needs its exact shape for the pattern; if the triangles won't cut, the exact way still can.
+      const quickCut = () => {
         const own = f.kind === "group" ? branchTriangles(features, f) : f.kind === "imported" && plainFaceted(f) ? facetOwn(f) : shapeTriangles(buildOwn(f)!);
         let w = own ? transformMesh(own, world) : null;
         const [lo, hi] = w ? meshBounds(w) : [[0, 0, 0], [-1, -1, -1]];
@@ -2012,7 +2051,8 @@ function cutMesh(features: Feature[], f: Feature): MeshData | null {
           cut = true;
         }
         if (cut && w) mesh = f.kind === "imported" && plainFaceted(f) ? facetView(transformMesh(w, world.clone().invert())) : meshForView(f.id, w, world);
-      } else {
+      };
+      const exactCut = () => {
         const own = f.kind === "group" ? branch(features, f) : buildOwn(f);
         if (own) {
           let shape = placeInWorld(features, f, own);
@@ -2029,6 +2069,15 @@ function cutMesh(features: Feature[], f: Feature): MeshData | null {
             cut = true;
           }
           if (cut) mesh = textured(f, toLocal(toMesh(f.id, shape, f.kind), world));
+        }
+      };
+      if (isTextured(f)) exactCut();
+      else if (isFaceted(f)) quickCut();
+      else {
+        try {
+          logged("cut as triangles", quickCut);
+        } catch {
+          logged("cut exactly (the triangles wouldn't cut)", exactCut);
         }
       }
     } catch (err) {
@@ -2437,9 +2486,24 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
             if (cut) meshes.push(cut);
             else if (isMergedGroup(f)) {
               failures = {};
-              const shape = branch(req.features, f);
-              Object.assign(errors, failures);
-              if (shape) meshes.push(textured(f, toMesh(f.id, shape)));
+              // Its mesh is kept like an object's own (see ownMesh): the group's shape is cached, but meshing it isn't quick.
+              const key = `group|${branchKey(req.features, f)}|${JSON.stringify(isTextured(f) ? f.texture : null)}`;
+              let kept = meshCache.get(key);
+              if (!kept) {
+                const outer = adjusted;
+                adjusted = {};
+                try {
+                  const shape = logged(`${f.name}: its merged shape`, () => branch(req.features, f));
+                  kept = { mesh: shape && textured(f, toMesh(f.id, shape)), adjusted, failures: { ...failures } };
+                  shape?.delete();
+                } finally {
+                  adjusted = Object.assign(outer, adjusted);
+                }
+                meshCache.set(key, kept);
+              } else Object.assign(adjusted, kept.adjusted);
+              Object.assign(errors, kept.failures ?? {});
+              const m = kept.mesh;
+              if (m) meshes.push({ id: f.id, vertices: m.vertices.slice(), normals: m.normals.slice(), triangles: m.triangles.slice(), edges: m.edges.slice(), edgeGroups: m.edgeGroups.slice() });
             } else {
               const m = logged(`${f.name}: its mesh for the view`, () => ownMesh(f));
               if (m) meshes.push(m);

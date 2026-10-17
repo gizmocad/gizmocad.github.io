@@ -8,7 +8,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import type { MeshData } from "./kernel";
 import { scenePalette } from "./theme";
-import { PLANE_ROTATIONS, baseMatrix, clampJoint, jointMatrix, localMatrix, worldMatrix, type Feature, type Joint, type SketchParams, type Vec3 } from "./model";
+import { PLANE_ROTATIONS, baseMatrix, clampJoint, colourOf, jointMatrix, localMatrix, worldMatrix, type Feature, type Joint, type SketchParams, type Vec3 } from "./model";
 import { featureExtents, isTilted, rulerLength, staysRound, type ResizeAnchor } from "./resize";
 import { isClosed, outline, prismPoints } from "./sketchGeometry";
 import { hedron } from "./hedron";
@@ -1008,7 +1008,8 @@ export class Viewport {
       const mat = o.material as THREE.MeshStandardMaterial;
       const isHole = f?.mode === "hole";
       const selected = !this.combined && this.selectedIds.has(o.userData.id);
-      const own = f?.color ? new THREE.Color(f.color).getHex() : COLORS.solid;
+      const colour = f && colourOf(this.features.values(), f);
+      const own = colour ? new THREE.Color(colour).getHex() : COLORS.solid;
       // The sketch being edited shows as its drawing only: its extruded (or revolved) solid is hidden until editing ends.
       o.visible = !(sketchId && o.userData.id === sketchId && !o.userData.flat);
       mat.clippingPlanes = this.section && !this.sketch ? [this.section.plane] : null;
