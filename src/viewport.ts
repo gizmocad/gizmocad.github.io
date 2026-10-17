@@ -909,6 +909,8 @@ export class Viewport {
       const isHole = f?.mode === "hole";
       const selected = !this.combined && this.selectedIds.has(o.userData.id);
       const own = f?.color ? new THREE.Color(f.color).getHex() : COLORS.solid;
+      // The sketch being edited shows as its drawing only: its extruded (or revolved) solid is hidden until editing ends.
+      o.visible = !(sketchId && o.userData.id === sketchId && !o.userData.flat);
       mat.clippingPlanes = this.section && !this.sketch ? [this.section.plane] : null;
       for (const c of o.children) if (c instanceof THREE.LineSegments) (c.material as THREE.Material).clippingPlanes = mat.clippingPlanes;
       if (f?.kind === "plane") {
@@ -925,7 +927,7 @@ export class Viewport {
       const pickingThis = this.edgePick?.id === o.userData.id;
       mat.color.setHex(pickingThis ? scenePalette().picking : selected && !sketchId && !this.sculpt ? COLORS.selected : isHole ? COLORS.hole : own);
       let opacity = isHole ? 0.35 : 1;
-      if (sketchId) opacity = o.userData.id === sketchId ? 0.3 : 0.1;
+      if (sketchId) opacity = 0.1;
       mat.opacity = opacity;
       mat.transparent = opacity < 1;
       mat.depthWrite = opacity === 1;
