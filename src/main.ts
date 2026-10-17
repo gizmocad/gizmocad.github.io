@@ -820,6 +820,27 @@ function hideMenu() {
 
 window.addEventListener("pointerdown", (e) => !menuEl.contains(e.target as Node) && hideMenu(), true);
 
+/** Groups folded shut in the list (remembered in this browser). */
+const folded = new Set<string>(
+  (() => {
+    try {
+      return JSON.parse(localStorage.getItem("gizmocad.folded") ?? "[]") as string[];
+    } catch {
+      return [];
+    }
+  })(),
+);
+
+function toggleFolded(id: string) {
+  if (!folded.delete(id)) folded.add(id);
+  try {
+    localStorage.setItem("gizmocad.folded", JSON.stringify([...folded].filter((x) => findFeature(x))));
+  } catch {
+    // Not remembered; it still works for now.
+  }
+  renderObjectList();
+}
+
 function renderObjectList() {
   const list = $("#object-list");
   const rows: HTMLLIElement[] = [];
@@ -829,8 +850,10 @@ function renderObjectList() {
   const shown = upTo.map((f) => (f.parentId && !listed.has(f.parentId) ? { ...f, parentId: null } : f));
   const walk = (parentId: string | null, depth: number) => {
     for (const f of childrenOf(shown, parentId)) {
-      rows.push(objectRow(f, depth));
-      walk(f.id, depth + 1);
+      const inside = subtreeIds(shown, f.id);
+      inside.delete(f.id);
+      rows.push(objectRow(f, depth, inside));
+      if (!folded.has(f.id)) walk(f.id, depth + 1);
     }
   };
   walk(null, 0);
@@ -839,12 +862,27 @@ function renderObjectList() {
 
 let draggingId: string | null = null;
 
-function objectRow(f: Feature, depth: number) {
+function objectRow(f: Feature, depth: number, inside: Set<string>) {
   const li = document.createElement("li");
-  li.className = [selectedIds.includes(f.id) ? "selected" : "", buildErrors[f.id] ? "failed" : "", hiddenInView(f) ? "hidden-obj" : "", f.suppressed ? "suppressed" : ""].join(" ");
+  const shut = inside.size > 0 && folded.has(f.id);
+  // Folded shut with the selection inside: the group's row shows where it is.
+  const holdsSelected = shut && selectedIds.some((id) => inside.has(id));
+  li.className = [selectedIds.includes(f.id) ? "selected" : "", holdsSelected ? "holds-selected" : "", buildErrors[f.id] ? "failed" : "", hiddenInView(f) ? "hidden-obj" : "", f.suppressed ? "suppressed" : ""].join(" ");
   li.style.paddingLeft = `${8 + depth * 16}px`;
   li.draggable = true;
-  li.innerHTML = `<span class="name"><span class="kind"></span><span></span></span><span class="row-end"><span class="tag ${f.mode}">${f.kind === "group" ? "group" : f.mode}</span><button class="eye ghost-btn"></button><button class="eye"></button></span>`;
+  li.innerHTML = `<span class="name"><button class="fold"></button><span class="kind"></span><span></span></span><span class="row-end"><span class="tag ${f.mode}"></span><button class="eye ghost-btn"></button><button class="eye"></button></span>`;
+  li.querySelector(".tag")!.textContent = (f.kind === "group" ? "group" : f.mode) + (shut ? ` · ${inside.size}` : "");
+  const fold = li.querySelector<HTMLButtonElement>(".fold")!;
+  if (inside.size) {
+    fold.textContent = shut ? "▸" : "▾";
+    fold.title = shut ? `Open (${inside.size} inside)` : "Fold shut";
+    fold.setAttribute("aria-expanded", String(!shut));
+    fold.onclick = (e) => {
+      e.stopPropagation();
+      toggleFolded(f.id);
+    };
+    fold.ondblclick = (e) => e.stopPropagation();
+  } else fold.disabled = true;
   const ghost = li.querySelector<HTMLButtonElement>(".ghost-btn")!;
   ghost.innerHTML = GHOST;
   ghost.title = f.ghost ? "Make solid again (G)" : "Ghost (G): see-through, and click or place things through it";

@@ -192,6 +192,11 @@ body.sketching .panel.left .shape-buttons { opacity: 0.6; }
   justify-content: space-between;
 }
 #object-list li:hover { background: var(--accent-soft); }
+#object-list .fold { flex: none; width: 10px; margin: 0 -2px 0 -1px; padding: 0; border: 0; background: none; color: var(--muted); font-size: 11px; line-height: 1; cursor: pointer; }
+#object-list .name > span:last-child { overflow: hidden; text-overflow: ellipsis; }
+#object-list .fold:disabled { display: none; }
+#object-list .fold:hover { color: var(--text); }
+#object-list li.holds-selected { outline: 1px dashed var(--select); }
 #object-list li.selected { background: var(--select-soft); outline: 1px solid var(--select); }
 #object-list .tag { font-size: 11px; color: var(--muted); }
 #object-list .tag.hole { color: var(--hole); }
