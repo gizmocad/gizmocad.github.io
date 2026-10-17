@@ -54,24 +54,53 @@ export function bendPoint(a: P, b: P, bend: number): P {
   return add(mid(a, b), scale(leftNormal(a, b), bend));
 }
 
-/** Catmull-Rom tangents turned into cubic Bézier control points, closed loop. */
 /**
- * Smooth closed curve through the points, as Béziers. Each handle is scaled by its own segment's share of the
- * neighbouring spacing, so closely spaced points make tight bends without overshooting (evenly spaced points
- * give the usual Catmull-Rom curve).
+ * Smooth closed curve through the points, as cubic Béziers: a periodic C2 cubic
+ * spline (the curve and its curvature both flow smoothly through every point),
+ * like FreeCAD's interpolating B-spline. Points are spaced by chord length, so
+ * closely spaced points make tight bends without overshooting.
  */
 function splineSegments(points: P[]): Segment[] {
   const n = points.length;
-  const d = (a: P, b: P) => Math.hypot(b[0] - a[0], b[1] - a[1]) || 1e-9;
-  return points.map((p1, i) => {
-    const p0 = points[(i - 1 + n) % n];
-    const p2 = points[(i + 1) % n];
-    const p3 = points[(i + 2) % n];
-    const [d1, d2, d3] = [d(p0, p1), d(p1, p2), d(p2, p3)];
-    const c1 = add(p1, scale(sub(p2, p0), d2 / (d1 + d2) / 3));
-    const c2 = sub(p2, scale(sub(p3, p1), d2 / (d2 + d3) / 3));
-    return { kind: "bezier", c1, c2, to: p2 } as Segment;
+  const h = points.map((p, i) => Math.hypot(points[(i + 1) % n][0] - p[0], points[(i + 1) % n][1] - p[1]) || 1e-9);
+  // Tangent D_i at each point (per unit of chord length), from matching curvature either side:
+  // h_i·D_{i-1} + 2(h_{i-1}+h_i)·D_i + h_{i-1}·D_{i+1} = 3(h_i/h_{i-1}·(P_i−P_{i−1}) + h_{i−1}/h_i·(P_{i+1}−P_i)).
+  const A = points.map(() => new Array<number>(n).fill(0));
+  const rhs = points.map((p, i) => {
+    const prev = (i - 1 + n) % n;
+    const next = (i + 1) % n;
+    const [hp, hi] = [h[prev], h[i]];
+    A[i][prev] += hi;
+    A[i][i] += 2 * (hp + hi);
+    A[i][next] += hp;
+    return [0, 1].map((k) => 3 * ((hi / hp) * (p[k] - points[prev][k]) + (hp / hi) * (points[next][k] - p[k])));
   });
+  const D = solve(A, rhs);
+  return points.map((p, i) => {
+    const next = (i + 1) % n;
+    const c1: P = [p[0] + (D[i][0] * h[i]) / 3, p[1] + (D[i][1] * h[i]) / 3];
+    const c2: P = [points[next][0] - (D[next][0] * h[i]) / 3, points[next][1] - (D[next][1] * h[i]) / 3];
+    return { kind: "bezier", c1, c2, to: points[next] } as Segment;
+  });
+}
+
+/** Solve A·X = B (Gaussian elimination with partial pivoting); B and X have one row per unknown. */
+function solve(A: number[][], B: number[][]): number[][] {
+  const n = A.length;
+  const M = A.map((row, i) => [...row, ...B[i]]);
+  const w = M[0].length;
+  for (let c = 0; c < n; c++) {
+    let pivot = c;
+    for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[pivot][c])) pivot = r;
+    [M[c], M[pivot]] = [M[pivot], M[c]];
+    const d = M[c][c] || 1e-12;
+    for (let r = 0; r < n; r++) {
+      if (r === c || !M[r][c]) continue;
+      const f = M[r][c] / d;
+      for (let k = c; k < w; k++) M[r][k] -= f * M[c][k];
+    }
+  }
+  return M.map((row, i) => row.slice(n).map((v) => v / (M[i][i] || 1e-12)));
 }
 
 function polygonPath(points: P[], bends: number[] = []): Path {
