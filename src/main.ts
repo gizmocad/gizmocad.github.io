@@ -251,6 +251,8 @@ function describeStep(a: Feature[], b: Feature[]): string {
   if (only("edgeOps")) return `edge finishes on ${f.name}`;
   if (only("hidden")) return `${f.hidden ? "hiding" : "showing"} ${f.name}`;
   if (only("ghost")) return `ghosting ${f.name}`;
+  if (only("sweep")) return `the swing of ${f.name}`;
+  if (only("clearance")) return `the clearance of ${f.name}`;
   if (only("parentId", "position", "rotation")) return `regrouping ${f.name}`;
   if (only("params", "position")) return `editing ${f.name}`;
   return `changing ${f.name}`;
@@ -351,6 +353,12 @@ const viewport = new Viewport($("#viewport"), {
     commit((features) => {
       const f = features.find((x) => x.id === id);
       if (f) moveJointFrame(f, origin);
+    });
+  },
+  onSweepMoved(id, end, value) {
+    commit((features) => {
+      const f = features.find((x) => x.id === id);
+      if (f?.sweep) f.sweep[end] = value;
     });
   },
   onJointMoved(id, value) {

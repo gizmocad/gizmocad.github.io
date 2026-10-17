@@ -47,6 +47,8 @@ export interface ViewportEvents {
   onJointMoving(id: string, value: number): void;
   /** A joint drag finished. */
   onJointMoved(id: string, value: number): void;
+  /** One end of a swept clearance cut's swing (or slide) was dragged to a new value. */
+  onSweepMoved(id: string, end: "from" | "to", value: number): void;
   /** A connection's pivot was dragged to a new place (in the parent's frame). */
   onPivotMoved(id: string, origin: Vec3): void;
   /** Placing a shape (or picking a point) started or ended. */
@@ -384,6 +386,7 @@ export class Viewport {
 
     this.setupPointer();
     this.setupSculptPointer();
+    this.setupSwingPointer();
     this.setupBoxSelect();
     new ResizeObserver(() => this.resize()).observe(container);
     this.resize();
@@ -1058,6 +1061,184 @@ export class Viewport {
     this.drawRuler();
     this.drawSnapDots();
     this.drawSection();
+    this.drawSwing(target && f ? { f, node: target } : null);
+  }
+
+  // ---- A swept clearance cut's swing: its arc (or slide), with a handle at each end to drag ----------
+
+  private swing: {
+    id: string;
+    group: THREE.Group;
+    handles: { end: "from" | "to"; mesh: THREE.Mesh }[];
+    /** Where a joint value puts the handle, in the group's frame. */
+    at: (value: number) => THREE.Vector3;
+    /** The joint value nearest a point (in the group's frame), continuing on from `near`. */
+    valueAt: (p: THREE.Vector3, near: number) => number;
+    axis: THREE.Vector3;
+    centre: THREE.Vector3;
+    slider: boolean;
+    from: number;
+    to: number;
+    drag: { end: "from" | "to"; plane: THREE.Plane; value: number } | null;
+  } | null = null;
+
+  private drawSwing(sel: { f: Feature; node: THREE.Object3D } | null) {
+    const keepDrag = this.swing?.drag && this.swing.id === sel?.f.id ? this.swing.drag : null;
+    if (this.swing) {
+      this.swing.group.removeFromParent();
+      disposeTree(this.swing.group);
+      this.swing = null;
+    }
+    const s = sel?.f.mode === "hole" ? sel.f.sweep : undefined;
+    if (!sel || !s || this.selectedIds.size > 1) return;
+    const { f, node } = sel;
+    const j = s.joint;
+    // The sweep is kept in the frame the hole had when it was made; the hole may have moved since.
+    const frame = new THREE.Matrix4().fromArray(s.frame);
+    const group = new THREE.Group();
+    group.matrixAutoUpdate = false;
+    group.matrix.copy(localMatrix(f)).multiply(frame.clone().invert());
+    (node.parent ?? this.root).add(group);
+    const axis = new THREE.Vector3(j.axis.x, j.axis.y, j.axis.z).normalize();
+    const o = new THREE.Vector3(j.origin.x, j.origin.y, j.origin.z);
+    // The hole's own origin as it was made: where the joint's value put it (its shown shape is the whole swept area).
+    const centre = new THREE.Vector3().setFromMatrixPosition(frame);
+    const slider = j.type === "slider";
+    let at: (v: number) => THREE.Vector3;
+    let valueAt: (p: THREE.Vector3, near: number) => number;
+    let size: number;
+    if (slider) {
+      at = (v) => centre.clone().addScaledVector(axis, v - j.value);
+      valueAt = (p) => Math.round((j.value + p.clone().sub(centre).dot(axis)) * 10) / 10;
+      size = Math.max(1, Math.abs(s.to - s.from) * 0.04);
+    } else {
+      // Round the axis, through the hole's middle.
+      const along = axis.clone().multiplyScalar(centre.clone().sub(o).dot(axis));
+      const hub = o.clone().add(along);
+      let arm = centre.clone().sub(hub);
+      if (arm.length() < 1) arm = new THREE.Vector3(1, 0, 0).cross(axis).lengthSq() > 0.01 ? new THREE.Vector3(1, 0, 0).cross(axis) : new THREE.Vector3(0, 1, 0).cross(axis);
+      // On the cut's outer edge: as far out from the axis as its shape reaches.
+      let radius = Math.max(arm.length(), 10);
+      (node.parent ?? this.root).updateMatrixWorld(true);
+      group.updateMatrixWorld(true);
+      const toGroup = group.matrixWorld.clone().invert();
+      const v = new THREE.Vector3();
+      node.traverse((m) => {
+        if (!(m instanceof THREE.Mesh) || m.userData.id !== f.id) return;
+        const pos = m.geometry.getAttribute("position");
+        const toFrame = toGroup.clone().multiply(m.matrixWorld);
+        for (let i = 0; i < pos.count; i++) {
+          v.fromBufferAttribute(pos, i).applyMatrix4(toFrame).sub(hub);
+          radius = Math.max(radius, v.sub(axis.clone().multiplyScalar(v.dot(axis))).length());
+        }
+      });
+      arm.setLength(radius);
+      at = (v) => hub.clone().add(arm.clone().applyAxisAngle(axis, ((v - j.value) * Math.PI) / 180));
+      valueAt = (p, near) => {
+        const r = p.clone().sub(hub);
+        r.sub(axis.clone().multiplyScalar(r.dot(axis)));
+        let angle = (Math.atan2(arm.clone().cross(r).dot(axis), arm.dot(r)) * 180) / Math.PI + j.value;
+        // Keep going round (past 180°) rather than jumping back.
+        angle += Math.round((near - angle) / 360) * 360;
+        return Math.round(angle);
+      };
+      size = Math.max(1, radius * 0.06);
+    }
+    const color = 0xff8a00;
+    const line = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true }));
+    line.renderOrder = 32;
+    group.add(line);
+    const handles = (["from", "to"] as const).map((end) => {
+      const mesh = new THREE.Mesh(new THREE.SphereGeometry(size, 16, 12), new THREE.MeshBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.9 }));
+      mesh.renderOrder = 33;
+      mesh.userData.swingEnd = end;
+      group.add(mesh);
+      return { end, mesh };
+    });
+    this.swing = { id: f.id, group, handles, at, valueAt, axis, centre, slider, from: s.from, to: s.to, drag: keepDrag };
+    if (keepDrag) this.swing[keepDrag.end] = keepDrag.value;
+    this.placeSwing();
+  }
+
+  /** Lay the arc and the handles out for the current range. */
+  private placeSwing() {
+    const w = this.swing;
+    if (!w) return;
+    const [lo, hi] = [Math.min(w.from, w.to), Math.max(w.from, w.to)];
+    const steps = w.slider ? 1 : Math.max(2, Math.ceil((hi - lo) / 3));
+    const pts = Array.from({ length: steps + 1 }, (_, i) => w.at(lo + ((hi - lo) * i) / steps));
+    const line = w.group.children[0] as THREE.Line;
+    line.geometry.dispose();
+    line.geometry = new THREE.BufferGeometry().setFromPoints(pts);
+    for (const h of w.handles) h.mesh.position.copy(w.at(w[h.end]));
+    w.group.updateMatrixWorld(true);
+  }
+
+  private swingHandleAt(e: PointerEvent): { end: "from" | "to"; mesh: THREE.Mesh } | null {
+    const w = this.swing;
+    if (!w) return null;
+    this.raycaster.setFromCamera(this.ndc(e), this.camera);
+    const hit = this.raycaster.intersectObjects(w.handles.map((h) => h.mesh), false)[0];
+    return hit ? w.handles.find((h) => h.mesh === hit.object)! : null;
+  }
+
+  private setupSwingPointer() {
+    // Capture phase on the container: a handle is grabbed before the camera or the gizmo see the click.
+    const host = this.container;
+    host.addEventListener(
+      "pointerdown",
+      (e) => {
+        const w = this.swing;
+        if (!w || e.button !== 0 || e.target !== this.renderer.domElement) return;
+        const h = this.swingHandleAt(e);
+        if (!h) return;
+        e.stopPropagation();
+        this.renderer.domElement.setPointerCapture(e.pointerId);
+        // Drag across the plane square to the axis (a hinge), or along the rail facing the camera (a slider).
+        const toWorld = w.group.matrixWorld;
+        const point = h.mesh.getWorldPosition(new THREE.Vector3());
+        const axis = w.axis.clone().transformDirection(toWorld);
+        let normal = axis;
+        if (w.slider) {
+          const view = this.camera.getWorldDirection(new THREE.Vector3());
+          normal = axis.clone().cross(view.clone().cross(axis)).normalize();
+          if (normal.lengthSq() < 1e-6) normal = view;
+        }
+        w.drag = { end: h.end, plane: new THREE.Plane().setFromNormalAndCoplanarPoint(normal, point), value: w[h.end] };
+      },
+      true,
+    );
+    host.addEventListener(
+      "pointermove",
+      (e) => {
+        const w = this.swing;
+        if (!w) return;
+        if (!w.drag) {
+          if (!e.buttons && e.target === this.renderer.domElement) this.renderer.domElement.style.cursor = this.swingHandleAt(e) ? "grab" : "";
+          return;
+        }
+        e.stopPropagation();
+        this.raycaster.setFromCamera(this.ndc(e), this.camera);
+        const p = this.raycaster.ray.intersectPlane(w.drag.plane, new THREE.Vector3());
+        if (!p) return;
+        const value = w.valueAt(p.applyMatrix4(w.group.matrixWorld.clone().invert()), w.drag.value);
+        if (value === w.drag.value) return;
+        w.drag.value = value;
+        w[w.drag.end] = value;
+        this.placeSwing();
+        this.needsRender = true;
+      },
+      true,
+    );
+    const finish = () => {
+      const w = this.swing;
+      if (!w?.drag) return;
+      const { end, value } = w.drag;
+      w.drag = null;
+      this.events.onSweepMoved(w.id, end, value);
+    };
+    host.addEventListener("pointerup", finish, true);
+    host.addEventListener("pointercancel", finish, true);
   }
 
   /** An object's opacity, and the see-through view's wireframe and edges showing through. */
