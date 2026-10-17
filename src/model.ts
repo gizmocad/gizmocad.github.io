@@ -446,6 +446,22 @@ interface FeatureBase {
   ignoreHoles?: string[];
   /** Holes only: grown by this much (mm) on every side, so a part the same shape fits into what it cuts. */
   clearance?: number;
+  /** Holes only: swept through a hinge's swing (or a slider's travel), so a moving part clears all of it. */
+  sweep?: Sweep;
+}
+
+/**
+ * A hole swept along a joint's movement: the joint (in the hole's parent frame,
+ * its value where the hole sits), the moving object's position (for an orbit),
+ * the hole's own placement when it was made (so the sweep moves with the hole),
+ * and the range of joint values (degrees, or mm for a slider) to clear.
+ */
+export interface Sweep {
+  joint: Joint;
+  position: Vec3;
+  frame: number[];
+  from: number;
+  to: number;
 }
 
 export type Feature =
@@ -970,6 +986,9 @@ export function ignoresHole(features: Feature[], f: Feature, holeId: string): bo
   for (let n: Feature | undefined = f; n; n = features.find((x) => x.id === n!.parentId)) if (n.ignoreHoles?.includes(holeId)) return true;
   return false;
 }
+
+/** A hole's sweep (null for solids and groups). */
+export const sweepOf = (f: Feature) => (f.mode === "hole" && f.kind !== "group" && f.kind !== "plane" && f.sweep ? f.sweep : null);
 
 /** How much a hole is grown on every side (0 for solids and groups). */
 export const clearanceOf = (f: Feature) => (f.mode === "hole" && f.kind !== "group" && f.kind !== "plane" ? Math.max(0, f.clearance ?? 0) : 0);

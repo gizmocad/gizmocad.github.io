@@ -2150,19 +2150,54 @@ function holesReaching(features: Feature[], f: Feature): Feature[] {
 function fitSection(f: Feature, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
   if (f.kind === "sketch" && f.params.operation === "flat") return [];
   if (f.mode === "hole") {
-    return [
+    const items: HTMLElement[] = [
       section("Clearance"),
       lengthField("Clearance", f.clearance ?? 0, (v) => update((t) => (v > 0 ? (t.clearance = v) : delete t.clearance))),
       hint("Grows this hole by this much on every side, so a part the same shape fits into what it cuts. About 0.2 mm is a snug fit on most printers; 0.3–0.5 mm slides freely."),
     ];
+    const s = f.sweep;
+    if (s && f.kind !== "group") {
+      const unit = s.joint.type === "slider" ? {} : { unit: "°", plain: true };
+      items.push(
+        section(s.joint.type === "slider" ? "Slide" : "Swing"),
+        lengthField("From", s.from, (v) => update((t) => t.sweep && (t.sweep.from = v)), unit),
+        lengthField("To", s.to, (v) => update((t) => t.sweep && (t.sweep.to = v)), unit),
+        button("Stop sweeping", () => update((t) => delete t.sweep), "wide"),
+        hint(`Swept through its ${s.joint.type === "slider" ? "slider's travel" : "hinge's swing"} (the values the ${s.joint.type === "slider" ? "slider" : "hinge"} shows), so the moving part clears all of it.`),
+      );
+    }
+    return items;
   }
-  const make = button("Make a clearance cut", () => makeClearanceCut(f.id), "wide");
+  const make = button("Make a clearance cut", () => makeClearanceCut(f.id, !!f.joint && sweepNext), "wide");
   make.title = "Add a copy of this as a hole 0.2 mm bigger all round, which cuts what this overlaps but not this object";
-  return [section("Clearance cut"), make, hint("For a peg, lid or insert: place it where it goes, then this cuts a socket 0.2 mm bigger all round in whatever it overlaps. Change the clearance on the new hole.")];
+  const items: HTMLElement[] = [section("Clearance cut")];
+  if (f.joint) {
+    const j = f.joint;
+    const [from, to] = sweepRange(j);
+    const unit = j.type === "slider" ? " mm" : "°";
+    const row = checkToggle(j.type === "slider" ? "Clear the full slide" : "Clear the full swing", sweepNext, (on) => {
+      sweepNext = on;
+      renderPanels();
+    });
+    row.title = `Sweep the cut from ${fmt(from)}${unit} to ${fmt(to)}${unit} (the ${j.type === "slider" ? "slider" : "hinge"}'s limits), so it clears everywhere this moves`;
+    items.push(row);
+  }
+  items.push(make, hint(f.joint && sweepNext ? "Cuts a path 0.2 mm bigger all round everywhere this moves (between its connection's Min and Max limits), in whatever it passes through." : "For a peg, lid or insert: place it where it goes, then this cuts a socket 0.2 mm bigger all round in whatever it overlaps. Change the clearance on the new hole."));
+  return items;
+}
+
+/** Whether a new clearance cut sweeps through its object's movement. */
+let sweepNext = true;
+
+/** The joint values a swept clearance cut clears: its limits, or else from 0 to where it is now. */
+function sweepRange(j: NonNullable<Feature["joint"]>): [number, number] {
+  const from = j.min ?? Math.min(0, j.value);
+  const to = j.max ?? Math.max(0, j.value);
+  return [from, to];
 }
 
 /** A copy of an object as a hole with clearance, which the object itself ignores (so only what it sits in is cut). */
-function makeClearanceCut(id: string) {
+function makeClearanceCut(id: string, sweep = false) {
   const f = findFeature(id);
   if (!f) return;
   const hole = { ...structuredClone(f), id: newId(), name: `${f.name} clearance`, mode: "hole", clearance: 0.2 } as Feature;
@@ -2174,6 +2209,11 @@ function makeClearanceCut(id: string) {
     insertFeatures(features, [hole]);
     // Where the object is now: a hinge or slider may have moved it from its own position (the hole has no joint).
     setWorldMatrix(features, hole.id, worldMatrix(features, id));
+    const h = features.find((x) => x.id === hole.id);
+    if (sweep && t.joint && h) {
+      const [from, to] = sweepRange(t.joint);
+      h.sweep = { joint: structuredClone(t.joint), position: { ...t.position }, frame: localMatrix(h).toArray(), from, to };
+    }
   });
   selectedIds = [hole.id];
   selectedId = hole.id;
@@ -3442,8 +3482,10 @@ async function exportModel(format: "stl" | "step") {
   const sculpts = doc.features.filter((f): f is SculptFeature => f.kind === "sculpt");
   try {
     const blob = await modelFile(format);
+    const warning = kernel.exportWarning;
     await saveFile(blob, `gizmocad-model.${format}`, format.toUpperCase(), format);
-    setStatus(format === "step" && sculpts.length ? "Sculpted objects aren't in the STEP file (STEP only holds exact solids); export STL to include them." : "");
+    if (warning) setStatus(`Exported, but: ${warning}`, true);
+    else setStatus(format === "step" && sculpts.length ? "Sculpted objects aren't in the STEP file (STEP only holds exact solids); export STL to include them." : "");
   } catch (err) {
     setStatus(`Export failed: ${(err as Error).message}`, true);
   }

@@ -12,6 +12,8 @@ import {
   ignoresHole,
   anyIgnoredHoles,
   clearanceOf,
+  sweepOf,
+  type Sweep,
   worldMatrix,
   insideMergedGroup,
   isMergedGroup,
@@ -493,7 +495,7 @@ function applyEdgeOps(shape: Shape3D, ops: EdgeOp[], which: (op: EdgeOp) => bool
 }
 
 /** The feature's own geometry with its fillets/chamfers, in its local frame. */
-function buildOwn(f: Feature): Shape3D | null {
+function buildOwn(f: Feature, swept = true): Shape3D | null {
   let shape = buildBase(f);
   const taper = f.kind !== "group" ? (f.tilt?.taper ?? 0) : 0;
   if (shape && taper) {
@@ -525,6 +527,12 @@ function buildOwn(f: Feature): Shape3D | null {
     }
   }
   if (shape && clearanceOf(f)) shape = logged(`grow the hole by ${clearanceOf(f)} mm (clearance)`, () => growSolid(shape!, clearanceOf(f)));
+  if (shape && swept && sweepOf(f)) {
+    // Only exact results (a STEP export) need it as a solid; the view and meshes use its triangles.
+    const w = sweptTriangles(f, shape);
+    shape = logged("make the swept hole a solid", () => solidFromTriangles(w.vertices, w.triangles, [1, 1, 1], "bodies"));
+    knownTriangles.set(shape, w);
+  }
   return shape && f.clips?.length ? applyClips(shape, f.clips) : shape;
 }
 
@@ -691,6 +699,12 @@ function growMesh(w: WorldMesh, by: number): WorldMesh {
 
 /** A faceted solid's own triangles, grown if it's a hole with clearance. */
 function facetOwn(f: Extract<Feature, { kind: "imported" }>): WorldMesh {
+  if (sweepOf(f)) return sweptTriangles(f);
+  return facetGrown(f);
+}
+
+/** A faceted solid's triangles, grown if it's a hole with clearance. */
+function facetGrown(f: Extract<Feature, { kind: "imported" }>): WorldMesh {
   const w = facetTriangles(f.params);
   const by = clearanceOf(f);
   if (!by) return w;
@@ -704,6 +718,82 @@ function facetOwn(f: Extract<Feature, { kind: "imported" }>): WorldMesh {
   return grown;
 }
 const grownCache = new Map<string, WorldMesh>();
+
+/** An object's own shape as triangles (straight from them for faceted solids and swept holes), or null if it can't be made. */
+function ownTriangles(f: Feature): WorldMesh | null {
+  if (f.kind === "imported" && plainFaceted(f)) return facetOwn(f);
+  if (!sweepOf(f)) {
+    const s = buildOwnSafe(f);
+    return s && shapeTriangles(s);
+  }
+  try {
+    return logged(`${f.name}: its swept shape`, () => sweptTriangles(f));
+  } catch (err) {
+    failures[f.id] = message(err);
+    return null;
+  }
+}
+
+/** A swept hole's triangles in its own frame: its shape (grown by any clearance) at every step of the swing, joined. */
+function sweptTriangles(f: Feature, unswept?: Shape3D): WorldMesh {
+  const s = sweepOf(f)!;
+  const key = JSON.stringify([f.kind, keyParams(f), f.edgeOps, f.clips ?? [], f.shell ?? null, f.tilt ?? null]);
+  let w = sweptCache.get(key);
+  if (!w) {
+    const base = f.kind === "imported" && plainFaceted(f) ? facetGrown(f) : shapeTriangles(unswept ?? buildOwn(f, false)!);
+    w = logged(`sweep the hole through ${fmtRange(s)}`, () => sweepMesh(base, s));
+    sweptCache.set(key, w);
+    if (sweptCache.size > 16) sweptCache.delete(sweptCache.keys().next().value!);
+  }
+  return w;
+}
+const sweptCache = new Map<string, WorldMesh>();
+
+const fmtRange = (s: Sweep) => `${s.from} to ${s.to}${s.joint.type === "slider" ? " mm" : "°"}`;
+
+/** Triangles moved through a joint's range (copies close enough together that the gaps between them are tiny), joined into one shape. */
+function sweepMesh(w: WorldMesh, s: Sweep): WorldMesh {
+  const M = manifoldReady;
+  if (!M) throw new Error("The mesh library isn't loaded.");
+  const [lo, hi] = [Math.min(s.from, s.to), Math.max(s.from, s.to)];
+  const frame = new Matrix4().fromArray(s.frame);
+  // Copies close enough that the shape strays under 0.03 mm between them: for a hinge, by how far it reaches from the axis.
+  let step = 0.1;
+  if (s.joint.type !== "slider") {
+    const o = new Vector3(s.joint.origin.x, s.joint.origin.y, s.joint.origin.z);
+    const axis = new Vector3(s.joint.axis.x, s.joint.axis.y, s.joint.axis.z).normalize();
+    const v = new Vector3();
+    let reach = 1;
+    for (let i = 0; i < w.vertices.length; i += 3) {
+      v.fromArray(w.vertices, i).applyMatrix4(frame).sub(o);
+      reach = Math.max(reach, v.sub(axis.clone().multiplyScalar(v.dot(axis))).length());
+    }
+    step = Math.max(0.25, (2 * Math.acos(Math.max(-1, 1 - 0.03 / reach)) * 180) / Math.PI);
+  }
+  const count = Math.min(240, Math.max(1, Math.ceil((hi - lo) / step)));
+  const back = frame.clone().invert();
+  const from = jointMatrix(s.joint, s.joint.value, s.position).invert();
+  const base = toManifold(M, w, "the hole's shape has gaps, so its swing can't be swept.");
+  const copies = [];
+  try {
+    for (let i = 0; i <= count; i++) {
+      const value = lo + ((hi - lo) * i) / count;
+      const m = back.clone().multiply(jointMatrix(s.joint, value, s.position)).multiply(from).multiply(frame);
+      copies.push(base.transform(m.elements as Parameters<typeof base.transform>[0]));
+    }
+    const joined = M.Manifold.union(copies);
+    // The seams between copies leave many tiny facets: merge those that change the shape by under 0.01 mm.
+    const simpler = joined.simplify(0.01);
+    try {
+      return fromManifold(simpler);
+    } finally {
+      joined.delete();
+      simpler.delete();
+    }
+  } finally {
+    for (const c of [base, ...copies]) c.delete();
+  }
+}
 
 /** A big box filling one side of a tilted cut plane, around the shape's bounds lo..hi. */
 function halfSpace(c: Clip, lo: number[], hi: number[]): Shape3D {
@@ -1094,7 +1184,7 @@ function rememberBreps(features: Feature[]) {
 /** An imported solid's parameters for cache keys: its geometry is named by its ref (the data can be megabytes). */
 const keyParams = (f: Feature) => {
   const p = f.kind === "imported" ? { ...f.params, brep: undefined, mesh: undefined } : f.params;
-  return clearanceOf(f) ? { ...p, clearance: clearanceOf(f) } : p;
+  return clearanceOf(f) || sweepOf(f) ? { ...p, clearance: clearanceOf(f), sweep: sweepOf(f) } : p;
 };
 
 // ---- Faceted solids as triangles ---------------------------------------------------------
@@ -1132,7 +1222,7 @@ function facetTriangles(p: ImportedParams): WorldMesh {
 }
 
 /** Whether the model has solids made from meshes (then results and STL/3MF exports are worked out as triangles). */
-const hasFaceted = (features: Feature[]) => features.some((f) => f.kind === "imported" && !!f.params.faceted);
+const hasFaceted = (features: Feature[]) => features.some((f) => (f.kind === "imported" && !!f.params.faceted) || !!sweepOf(f));
 
 /** A faceted solid with nothing done to it that needs the exact solid (fillets, hollowing, tilt, splits). */
 function plainFaceted(f: Feature): boolean {
@@ -1231,10 +1321,7 @@ function branchTriangles(features: Feature[], f: Feature | null, inherited: Mesh
     const cutters = reaching([...own, ...inherited], f);
     let w: WorldMesh | null = null;
     if (f && !(excludeTextured && isTextured(f) && f.kind !== "group") && f.kind !== "group") {
-      const mine = f.kind === "imported" && plainFaceted(f) ? facetOwn(f) : (() => {
-        const s = buildOwnSafe(f);
-        return s && shapeTriangles(s);
-      })();
+      const mine = ownTriangles(f);
       if (mine) w = cutAll(mine, cutters, f);
     }
     for (const k of kids.filter((c) => c.mode === "solid")) {
@@ -1251,11 +1338,7 @@ function branchTriangles(features: Feature[], f: Feature | null, inherited: Mesh
   let w: WorldMesh | null = null;
   // As in branch(): with textures added as their own meshes, a textured object's own shape is left out.
   if (!f || (excludeTextured && isTextured(f) && f.kind !== "group")) w = null;
-  else if (f.kind === "imported" && plainFaceted(f)) w = facetOwn(f);
-  else if (f.kind !== "group") {
-    const own = buildOwnSafe(f);
-    if (own) w = shapeTriangles(own);
-  }
+  else if (f.kind !== "group") w = ownTriangles(f);
   const kids = childrenOf(features, f?.id ?? null);
   for (const c of kids.filter((c) => c.mode === "solid")) {
     if (excludeTextured && isTextured(c) && c.kind === "group") continue;
@@ -1378,19 +1461,33 @@ function solidFromTriangles(vertices: ArrayLike<number>, triangles: ArrayLike<nu
     hi[i % 3] = Math.max(hi[i % 3], vertices[i] * [sx, sy, sz][i % 3]);
   }
   const diag = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
-  const n = triangles.length / 3;
+  const sewTolerance = Math.max(1e-5, diag * 1e-6);
+  // OpenCascade can't make a face from a triangle with no area (mesh booleans leave a few):
+  // leave out any thinner than the sewing tolerance, which closes the hairline gaps they leave.
+  const keep: number[] = [];
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  for (let t = 0; t < triangles.length; t += 3) {
+    a.fromArray(vertices, triangles[t] * 3).multiply(new Vector3(sx, sy, sz));
+    b.fromArray(vertices, triangles[t + 1] * 3).multiply(new Vector3(sx, sy, sz));
+    c.fromArray(vertices, triangles[t + 2] * 3).multiply(new Vector3(sx, sy, sz));
+    const longest = Math.max(a.distanceTo(b), b.distanceTo(c), c.distanceTo(a));
+    const twiceArea = b.clone().sub(a).cross(c.clone().sub(a)).length();
+    if (longest > 0 && twiceArea / longest > sewTolerance / 2) keep.push(t);
+  }
+  const n = keep.length;
   const stl = new DataView(new ArrayBuffer(84 + n * 50));
   // OpenCascade takes a file whose first bytes are all plain text for a text STL: mark it binary.
   stl.setUint8(0, 0xff);
   stl.setUint32(80, n, true);
-  for (let t = 0; t < n; t++)
-    for (let c = 0; c < 3; c++) {
-      const v = triangles[t * 3 + c] * 3;
-      const at = 84 + t * 50 + 12 + c * 12;
+  keep.forEach((t0, t) => {
+    for (let k = 0; k < 3; k++) {
+      const v = triangles[t0 + k] * 3;
+      const at = 84 + t * 50 + 12 + k * 12;
       stl.setFloat32(at, vertices[v] * sx, true);
       stl.setFloat32(at + 4, vertices[v + 1] * sy, true);
       stl.setFloat32(at + 8, vertices[v + 2] * sz, true);
     }
+  });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const oc = getOC() as any;
   const file = `/mesh-${Date.now()}-${Math.random().toString(36).slice(2)}.stl`;
@@ -1401,7 +1498,7 @@ function solidFromTriangles(vertices: ArrayLike<number>, triangles: ArrayLike<nu
   try {
     if (!reader.Read(shell, file)) throw new Error("OpenCascade couldn't read the triangles.");
     // The reader gives loose triangles: sew them into closed shells, merge each flat area back into one face.
-    const sew = new oc.BRepBuilderAPI_Sewing(Math.max(1e-5, diag * 1e-6), true, true, true, false);
+    const sew = new oc.BRepBuilderAPI_Sewing(sewTolerance, true, true, true, false);
     sew.Add(shell);
     const progress = new oc.Message_ProgressRange();
     sew.Perform(progress);
@@ -1804,7 +1901,8 @@ function ownMesh(f: Feature): MeshData | null {
     const outer = adjusted;
     adjusted = {};
     try {
-      if (f.kind === "imported" && plainFaceted(f)) meshCache.set(key, { mesh: textured(f, facetView(facetOwn(f))), adjusted });
+      if (sweepOf(f)) meshCache.set(key, { mesh: meshForView("", sweptTriangles(f), null), adjusted });
+      else if (f.kind === "imported" && plainFaceted(f)) meshCache.set(key, { mesh: textured(f, facetView(facetOwn(f))), adjusted });
       else if (plainStretch(f)) meshCache.set(key, { mesh: textured(f, stretchMesh(toMesh("", importedBase(f.params)), f.params.scale)), adjusted });
       else {
         const shape = buildOwn(f);
@@ -2463,7 +2561,9 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
         if (!shape) throw new Error("Nothing to export: add at least one solid shape.");
         blob = req.format === "step" ? shape.blobSTEP() : shape.blobSTL({ binary: true, tolerance: 0.01, angularTolerance: 0.1 });
       }
-      post({ type: "exported", requestId: req.requestId, blob });
+      // Anything that couldn't be built is missing from the file: say so rather than export it quietly without.
+      const missing = Object.entries(failures).map(([id, why]) => `${req.features.find((f) => f.id === id)?.name ?? id} (${why})`);
+      post({ type: "exported", requestId: req.requestId, blob, ...(missing.length ? { warning: `Left out of the file because they couldn't be built: ${missing.join("; ")}` } : {}) });
     } else if (req.type === "cutMeshes") {
       // Mesh objects with holes through them, as world triangles (for STL and 3MF exports).
       const out: Record<string, Float32Array> = {};

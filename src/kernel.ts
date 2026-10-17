@@ -49,7 +49,7 @@ export type KernelResponse =
   | { type: "ready" }
   /** `facets`: triangles of faceted solids from older files (saved without them), by ref, for the app to keep. */
   | { type: "built"; requestId: number; meshes: MeshData[]; errors: Record<string, string>; adjusted: Record<string, number>; facets?: Record<string, { vertices: Float32Array; triangles: Uint32Array }>; log?: BuildStep[] }
-  | { type: "exported"; requestId: number; blob: Blob }
+  | { type: "exported"; requestId: number; blob: Blob; warning?: string }
   | { type: "mesh"; requestId: number; mesh: MeshData | null }
   | { type: "parts"; requestId: number; parts: MeshData[] }
   | { type: "importedSolids"; requestId: number; parts: ImportedSolid[] }
@@ -100,10 +100,16 @@ export class Kernel {
         else if (msg.type === "parts" || msg.type === "importedSolids") p.resolve(msg.parts as never);
         else if (msg.type === "fontLoaded") p.resolve(msg.name as never);
         else if (msg.type === "cutMeshes") p.resolve(msg.meshes as never);
-        else p.resolve(msg.blob as never);
+        else {
+          this.exportWarning = msg.warning ?? "";
+          p.resolve(msg.blob as never);
+        }
       };
     });
   }
+
+  /** What the last export had to leave out (objects that couldn't be built), or "". */
+  exportWarning = "";
 
   /** Imported solids whose geometry (BREP text or triangles) the worker already has (it keeps them by ref). */
   private sentBreps = new Set<string>();
