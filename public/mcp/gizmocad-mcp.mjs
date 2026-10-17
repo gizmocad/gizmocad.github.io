@@ -238,6 +238,7 @@ const objectFields = {
   mirrored: { type: "boolean", description: "Mirror it across its own YZ plane (X → −X)." },
   hidden: { type: "boolean", description: "Hide it in the view (still part of the model)." },
   ghost: { type: "boolean", description: "Ghost it: see-through in the view, and clicks and placing go through it (still part of the model and exports)." },
+  clearance: { type: "number", description: "Holes only: grow the hole by this many mm on every side, so a part the same shape fits into what it cuts (0.2 snug, 0.3-0.5 loose). To fit a peg into a socket: add a copy of the peg as a hole with clearance, and set the peg to ignore_holes that copy. 0 removes it." },
   ignore_holes: { type: "array", items: { type: "string" }, description: "Ids of holes that must not cut this object (or anything inside it), though they'd otherwise reach it; they still cut everything else. [] lets every hole cut it again." },
 };
 

@@ -2108,6 +2108,39 @@ function holesReaching(features: Feature[], f: Feature): Feature[] {
   return holes;
 }
 
+/** Clearance on a hole; on a solid, a quick way to make a hole it fits into. */
+function fitSection(f: Feature, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
+  if (f.kind === "sketch" && f.params.operation === "flat") return [];
+  if (f.mode === "hole") {
+    return [
+      section("Clearance"),
+      lengthField("Clearance", f.clearance ?? 0, (v) => update((t) => (v > 0 ? (t.clearance = v) : delete t.clearance))),
+      hint("Grows this hole by this much on every side, so a part the same shape fits into what it cuts. About 0.2 mm is a snug fit on most printers; 0.3–0.5 mm slides freely."),
+    ];
+  }
+  const make = button("Make a fitting hole", () => makeFittingHole(f.id), "wide");
+  make.title = "Add a copy of this as a hole 0.2 mm bigger all round, which cuts what this overlaps but not this object";
+  return [section("Fit"), make, hint("For a peg, lid or insert: place it where it goes, then this cuts a socket 0.2 mm bigger all round in whatever it overlaps. Change the clearance on the new hole.")];
+}
+
+/** A copy of an object as a hole with clearance, which the object itself ignores (so only what it sits in is cut). */
+function makeFittingHole(id: string) {
+  const f = findFeature(id);
+  if (!f) return;
+  const hole = { ...structuredClone(f), id: newId(), name: `${f.name} fit`, mode: "hole", clearance: 0.2 } as Feature;
+  for (const k of ["shell", "texture", "joint", "ignoreHoles", "color"] as const) delete hole[k];
+  commit((features) => {
+    const t = features.find((x) => x.id === id);
+    if (!t) return;
+    t.ignoreHoles = [...(t.ignoreHoles ?? []), hole.id];
+    insertFeatures(features, [hole]);
+  });
+  selectedIds = [hole.id];
+  selectedId = hole.id;
+  renderPanels();
+  setNotice(`${hole.name} cuts a socket 0.2 mm bigger than ${f.name} in whatever it overlaps. ${f.name} isn't cut by it. Move them together by selecting both.`);
+}
+
 /** Which holes cut this object: untick one and it leaves this object (and everything inside it) alone. */
 function holesSection(f: Feature, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
   const holes = holesReaching(activeFeatures(doc.features), f);
@@ -2465,6 +2498,7 @@ function renderPropertiesPanel() {
         (m) => update((t) => (t.mode = m)),
         "mode",
       ),
+      ...fitSection(f, update),
     );
   }
 
@@ -3771,6 +3805,19 @@ function toggleSection() {
 const nearSide = (axis: Axis, at: number) => viewport.cameraPosition[axis] < at;
 
 $("#section").onclick = toggleSection;
+
+/** See-through view: off → X-ray → wireframe → off. */
+const SEE_THROUGH = ["off", "xray", "wire"] as const;
+let seeThrough: (typeof SEE_THROUGH)[number] = "off";
+function cycleSeeThrough() {
+  seeThrough = SEE_THROUGH[(SEE_THROUGH.indexOf(seeThrough) + 1) % SEE_THROUGH.length];
+  viewport.setSeeThrough(seeThrough);
+  const b = $("#see-through");
+  b.classList.toggle("on", seeThrough !== "off");
+  b.textContent = seeThrough === "wire" ? "▦" : "◫";
+  setStatus(seeThrough === "xray" ? "X-ray: objects are see-through, with every edge showing. X again for wireframe." : seeThrough === "wire" ? "Wireframe: every object drawn as its triangles. X again turns it off." : "");
+}
+$("#see-through").onclick = cycleSeeThrough;
 $("#section-close").onclick = () => setSectionView(null);
 ($("#section-at") as HTMLInputElement).oninput = (e) => sectionView && setSectionView({ ...sectionView, at: parseFloat((e.target as HTMLInputElement).value) });
 $("#section-flip").onclick = () => sectionView && setSectionView({ ...sectionView, flip: !sectionView.flip });
@@ -4313,6 +4360,7 @@ window.addEventListener("keydown", (e) => {
     return;
   }
   if (!mod && key === "m") return setMeasuring(true);
+  if (!mod && key === "x") return cycleSeeThrough();
   if (e.key === "Home") return viewport.fitView();
   if (e.key === "." && !mod) return viewport.fitView(true);
   if (mod && key === "a") {

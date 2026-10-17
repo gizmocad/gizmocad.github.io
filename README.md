@@ -71,8 +71,8 @@
   Drag an object near another's point and it snaps there, so faces and edges line up exactly.
   The Points menu can hide the dots (snapping still works) or turn point snapping off.
 - **View cube** in the corner of the 3D view turns with the camera; click a face, edge or corner to look from that side.
-  Below it: fit everything in view (Home), zoom to the selection (.), a **section view**
-  that cuts the model open along X, Y or Z, and Measure.
+  Below it: fit everything in view (Home), zoom to the selection (.), **see-through** (X: X-ray with every edge
+  showing, then wireframe), a **section view** that cuts the model open along X, Y or Z, and Measure.
 - **History** along the bottom: every object is a step. Roll back to see (and edit) the model as it was at any step;
   new objects go in at the marker, and changes flow through to the later steps. Right-click a step to switch it off.
 - **Autosave:** your work is kept in the browser/app and comes back next time you open GizmoCAD.
@@ -88,6 +88,8 @@
     corners count as edges. Bigger or open meshes stay meshes; **Make it a solid** converts one (or a sculpt) later;
   - **DXF** and **SVG** drawings as sketches (lines and arcs that join up become shapes, holes included);
   - another **GizmoCAD** model, brought into this one.
+- **Clearance:** a hole can grow by a set amount on every side, so a part the same shape fits into what it cuts.
+  On a solid, **Make a fitting hole** adds a copy of it as a hole 0.2 mm bigger all round that cuts what it sits in but not itself.
 - **Cut by holes:** untick a hole in an object's panel and it leaves that object (and anything inside it) alone, while still cutting everything else it reaches.
 - **AI assistant (MCP):** let Claude (or any MCP-capable assistant) build and edit the model while you watch. See below.
 

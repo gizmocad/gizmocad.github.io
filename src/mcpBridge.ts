@@ -335,6 +335,12 @@ function applyFields(f: Feature, a: Args) {
     if (ids.length) f.ignoreHoles = [...new Set(ids)];
     else delete f.ignoreHoles;
   }
+  if (a.clearance !== undefined) {
+    const c = Number(a.clearance);
+    if (!Number.isFinite(c) || c < 0) throw new Error("clearance is in mm, 0 or more (0 removes it).");
+    if (c > 0) f.clearance = c;
+    else delete f.clearance;
+  }
   if (a.ghost !== undefined) {
     if (a.ghost) f.ghost = true;
     else delete f.ghost;
@@ -542,6 +548,7 @@ function describeModel(host: BridgeHost, sketchGeometry: boolean) {
     if (f.hidden) o.hidden = true;
     if (f.ghost) o.ghost = true;
     if (f.ignoreHoles?.length) o.ignore_holes = f.ignoreHoles;
+    if (f.clearance) o.clearance = f.clearance;
     if (f.suppressed) o.switched_off = true;
     if (f.joint) o.joint = f.joint.type;
     if (f.clips?.length) o.split_piece = true;

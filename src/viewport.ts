@@ -191,6 +191,8 @@ export class Viewport {
   /** Section view: a plane cutting everything, showing the inside. */
   private section: { plane: THREE.Plane; axis: "x" | "y" | "z"; at: number; flip: boolean } | null = null;
   private sectionGroup = new THREE.Group();
+  /** See-through view: everything faint with every edge showing ("xray"), or drawn as its triangles ("wire"). */
+  private seeThrough: "off" | "xray" | "wire" = "off";
   /** The print bed outline. */
   private bedGroup = new THREE.Group();
   /** Camera flying to fit objects in view. */
@@ -996,8 +998,12 @@ export class Viewport {
 
   private applyAppearance() {
     const sketchId = this.sketch?.id;
+    const see = sketchId || this.sculpt ? "off" : this.seeThrough;
     this.root.traverse((o) => {
-      if (!(o instanceof THREE.Mesh) || !o.userData.id) return;
+      if (!(o instanceof THREE.Mesh)) return;
+      // Show result's shapes belong to no one object: they only take the see-through view.
+      if (!o.userData.id && this.combined && o.parent === this.root) return this.setLook(o, see === "xray" ? 0.22 : see === "wire" ? 0.45 : 1, see);
+      if (!o.userData.id) return;
       const f = this.features.get(o.userData.id);
       const mat = o.material as THREE.MeshStandardMaterial;
       const isHole = f?.mode === "hole";
@@ -1023,9 +1029,9 @@ export class Viewport {
       let opacity = isHole ? 0.35 : 1;
       if (sketchId) opacity = 0.1;
       if (this.isGhost(o)) opacity = Math.min(opacity, selected ? 0.35 : 0.2);
-      mat.opacity = opacity;
-      mat.transparent = opacity < 1;
-      mat.depthWrite = opacity === 1;
+      if (see === "xray") opacity = Math.min(opacity, selected ? 0.4 : 0.22);
+      if (see === "wire") opacity = Math.min(opacity, selected ? 0.7 : 0.45);
+      this.setLook(o, opacity, see);
     });
 
     let target = !this.combined && !this.sketch && !this.edgePick && !this.sculpt && !this.placement && !this.measure && this.selectedId ? this.nodes.get(this.selectedId) : undefined;
@@ -1051,6 +1057,19 @@ export class Viewport {
     this.drawRuler();
     this.drawSnapDots();
     this.drawSection();
+  }
+
+  /** An object's opacity, and the see-through view's wireframe and edges showing through. */
+  private setLook(o: THREE.Mesh, opacity: number, see: "off" | "xray" | "wire") {
+    const mat = o.material as THREE.MeshStandardMaterial;
+    mat.wireframe = see === "wire";
+    // Edges behind other objects show too.
+    for (const c of o.children) if (c instanceof THREE.LineSegments) (c.material as THREE.Material).depthTest = see === "off";
+    mat.opacity = opacity;
+    // An opaque material's shader ignores opacity: switching it needs a recompile.
+    if (mat.transparent !== opacity < 1) mat.needsUpdate = true;
+    mat.transparent = opacity < 1;
+    mat.depthWrite = opacity === 1;
   }
 
   setGizmoMode(mode: GizmoMode) {
@@ -1290,6 +1309,13 @@ export class Viewport {
     const mid = new THREE.Vector3().fromBufferAttribute(pos, 0).add(new THREE.Vector3().fromBufferAttribute(pos, 1)).multiplyScalar(0.5).project(this.camera);
     const { clientWidth: w, clientHeight: h } = this.renderer.domElement;
     m.label.style.transform = `translate(${((mid.x + 1) / 2) * w}px, ${((1 - mid.y) / 2) * h}px) translate(-50%, -140%)`;
+  }
+
+  // ---- See-through view ------------------------------------------------------------
+
+  setSeeThrough(style: "off" | "xray" | "wire") {
+    this.seeThrough = style;
+    this.applyAppearance();
   }
 
   // ---- Section view -------------------------------------------------------------

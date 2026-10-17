@@ -442,6 +442,8 @@ interface FeatureBase {
   suppressed?: boolean;
   /** Holes (by id) that don't cut it, or anything inside it, though they'd otherwise reach it. */
   ignoreHoles?: string[];
+  /** Holes only: grown by this much (mm) on every side, so a part the same shape fits into what it cuts. */
+  clearance?: number;
 }
 
 export type Feature =
@@ -966,6 +968,9 @@ export function ignoresHole(features: Feature[], f: Feature, holeId: string): bo
   for (let n: Feature | undefined = f; n; n = features.find((x) => x.id === n!.parentId)) if (n.ignoreHoles?.includes(holeId)) return true;
   return false;
 }
+
+/** How much a hole is grown on every side (0 for solids and groups). */
+export const clearanceOf = (f: Feature) => (f.mode === "hole" && f.kind !== "group" && f.kind !== "plane" ? Math.max(0, f.clearance ?? 0) : 0);
 
 /** Whether anything in the model ignores a hole (when nothing does, holes are cut the quicker usual way). */
 export const anyIgnoredHoles = (features: Feature[]) => features.some((f) => f.ignoreHoles?.length);

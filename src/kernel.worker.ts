@@ -11,6 +11,7 @@ import {
   subtreeIds,
   ignoresHole,
   anyIgnoredHoles,
+  clearanceOf,
   worldMatrix,
   insideMergedGroup,
   isMergedGroup,
@@ -513,6 +514,7 @@ function buildOwn(f: Feature): Shape3D | null {
     }
   }
   if (shape && finished && f.shell) shape = applyShell(shape, f.shell);
+  if (shape && clearanceOf(f)) shape = logged(`grow the hole by ${clearanceOf(f)} mm (clearance)`, () => growSolid(shape!, clearanceOf(f)));
   return shape && f.clips?.length ? applyClips(shape, f.clips) : shape;
 }
 
@@ -546,6 +548,114 @@ function applyShell(shape: Shape3D, s: Shell): Shape3D {
     throw new Error(`Couldn't hollow this shape with ${s.thickness} mm walls: try thinner walls${s.open === "none" ? ", or open it at the top" : ""}.`);
   }
 }
+
+/**
+ * A solid grown by `by` mm on every side (its edges and corners rounded over),
+ * for a hole with clearance. A solid made from triangles is grown as triangles.
+ */
+function growSolid(shape: Shape3D, by: number): Shape3D {
+  const viaMesh = (w: WorldMesh) => {
+    const grown = growMesh(w, by);
+    const solid = solidFromTriangles(grown.vertices, grown.triangles, [1, 1, 1], "bodies");
+    knownTriangles.set(solid, grown);
+    return solid;
+  };
+  const known = knownTriangles.get(shape);
+  if (known) return viaMesh(known);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const oc = getOC() as any;
+  const maker = new oc.BRepOffsetAPI_MakeOffsetShape();
+  const temps: { delete(): void }[] = [maker];
+  try {
+    maker.PerformByJoin((shape as unknown as { wrapped: unknown }).wrapped, by, 1e-3);
+    if (!maker.IsDone()) throw new Error("offset failed");
+    let out = maker.Shape();
+    if (out.ShapeType() === oc.TopAbs_ShapeEnum.TopAbs_SHELL) {
+      // Sometimes it comes back as the closed skin only: make that a solid.
+      const make = new oc.BRepBuilderAPI_MakeSolid();
+      temps.push(make);
+      make.Add(oc.TopoDS.Shell(out));
+      out = make.Solid();
+      oc.BRepLib.OrientClosedSolid(out);
+    }
+    const result = cast(out) as Shape3D;
+    if (isValidShape(result)) return result;
+    throw new Error("invalid");
+  } catch {
+    // OpenCascade couldn't offset it exactly: grow its triangles instead.
+    return viaMesh(shapeTriangles(shape));
+  } finally {
+    for (const t of temps) t.delete();
+  }
+}
+
+/**
+ * Triangles grown by `by` mm: each corner moves out so every face it touches
+ * ends up `by` further out (flat faces stay flat; a closed mesh stays closed).
+ */
+function growMesh(w: WorldMesh, by: number): WorldMesh {
+  const { vertices, triangles } = w;
+  // Corners at the same place (the triangles of different faces) move together.
+  const weld = new Map<string, number>();
+  const group = new Int32Array(vertices.length / 3);
+  for (let i = 0; i < group.length; i++) {
+    const key = `${Math.round(vertices[i * 3] * 1e4)},${Math.round(vertices[i * 3 + 1] * 1e4)},${Math.round(vertices[i * 3 + 2] * 1e4)}`;
+    let g = weld.get(key);
+    if (g === undefined) weld.set(key, (g = weld.size));
+    group[i] = g;
+  }
+  const normals: number[][][] = Array.from({ length: weld.size }, () => []);
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  for (let t = 0; t < triangles.length; t += 3) {
+    a.fromArray(vertices, triangles[t] * 3);
+    b.fromArray(vertices, triangles[t + 1] * 3);
+    c.fromArray(vertices, triangles[t + 2] * 3);
+    const n = c.sub(b).cross(a.sub(b));
+    const len = n.length();
+    if (len < 1e-12) continue;
+    n.divideScalar(len);
+    for (let k = 0; k < 3; k++) {
+      const list = normals[group[triangles[t + k]]];
+      if (!list.some((m) => m[0] * n.x + m[1] * n.y + m[2] * n.z > 0.999)) list.push([n.x, n.y, n.z]);
+    }
+  }
+  // Each corner's move: the point `by` out from every face around it (found by repeated projection).
+  const moves = new Float32Array(weld.size * 3);
+  for (let g = 0; g < weld.size; g++) {
+    const list = normals[g];
+    let [x, y, z] = [0, 0, 0];
+    for (let it = 0; it < 24; it++)
+      for (const [nx, ny, nz] of list) {
+        const d = by - (x * nx + y * ny + z * nz);
+        x += d * nx;
+        y += d * ny;
+        z += d * nz;
+      }
+    // A needle-sharp tip would shoot far out: keep it near.
+    const len = Math.hypot(x, y, z);
+    const s = len > by * 4 ? (by * 4) / len : 1;
+    moves.set([x * s, y * s, z * s], g * 3);
+  }
+  const out = new Float32Array(vertices.length);
+  for (let i = 0; i < group.length; i++) for (let k = 0; k < 3; k++) out[i * 3 + k] = vertices[i * 3 + k] + moves[group[i] * 3 + k];
+  return { vertices: out, triangles };
+}
+
+/** A faceted solid's own triangles, grown if it's a hole with clearance. */
+function facetOwn(f: Extract<Feature, { kind: "imported" }>): WorldMesh {
+  const w = facetTriangles(f.params);
+  const by = clearanceOf(f);
+  if (!by) return w;
+  const key = `${f.params.ref}|${f.params.scale.join(",")}|${by}`;
+  let grown = grownCache.get(key);
+  if (!grown) {
+    grown = logged(`grow the hole by ${by} mm (clearance)`, () => growMesh(w, by));
+    grownCache.set(key, grown);
+    if (grownCache.size > 16) grownCache.delete(grownCache.keys().next().value!);
+  }
+  return grown;
+}
+const grownCache = new Map<string, WorldMesh>();
 
 /** A big box filling one side of a tilted cut plane, around the shape's bounds lo..hi. */
 function halfSpace(c: Clip, lo: number[], hi: number[]): Shape3D {
@@ -934,7 +1044,10 @@ function rememberBreps(features: Feature[]) {
 }
 
 /** An imported solid's parameters for cache keys: its geometry is named by its ref (the data can be megabytes). */
-const keyParams = (f: Feature) => (f.kind === "imported" ? { ...f.params, brep: undefined, mesh: undefined } : f.params);
+const keyParams = (f: Feature) => {
+  const p = f.kind === "imported" ? { ...f.params, brep: undefined, mesh: undefined } : f.params;
+  return clearanceOf(f) ? { ...p, clearance: clearanceOf(f) } : p;
+};
 
 // ---- Faceted solids as triangles ---------------------------------------------------------
 //
@@ -1070,7 +1183,7 @@ function branchTriangles(features: Feature[], f: Feature | null, inherited: Mesh
     const cutters = reaching([...own, ...inherited], f);
     let w: WorldMesh | null = null;
     if (f && !(excludeTextured && isTextured(f) && f.kind !== "group") && f.kind !== "group") {
-      const mine = f.kind === "imported" && plainFaceted(f) ? facetTriangles(f.params) : (() => {
+      const mine = f.kind === "imported" && plainFaceted(f) ? facetOwn(f) : (() => {
         const s = buildOwnSafe(f);
         return s && shapeTriangles(s);
       })();
@@ -1090,7 +1203,7 @@ function branchTriangles(features: Feature[], f: Feature | null, inherited: Mesh
   let w: WorldMesh | null = null;
   // As in branch(): with textures added as their own meshes, a textured object's own shape is left out.
   if (!f || (excludeTextured && isTextured(f) && f.kind !== "group")) w = null;
-  else if (f.kind === "imported" && plainFaceted(f)) w = facetTriangles(f.params);
+  else if (f.kind === "imported" && plainFaceted(f)) w = facetOwn(f);
   else if (f.kind !== "group") {
     const own = buildOwnSafe(f);
     if (own) w = shapeTriangles(own);
@@ -1325,7 +1438,7 @@ function softenFacets(m: MeshData): MeshData {
 
 /** Stretched with nothing else done to it: shown as its exact shape's mesh, stretched (smooth, with its real edges). */
 function plainStretch(f: Feature): f is Extract<Feature, { kind: "imported" }> {
-  return f.kind === "imported" && !f.params.faceted && !isEven(f.params.scale) && !f.edgeOps.length && !f.clips?.length && !f.shell;
+  return f.kind === "imported" && !f.params.faceted && !isEven(f.params.scale) && !f.edgeOps.length && !f.clips?.length && !f.shell && !clearanceOf(f);
 }
 
 function stretchMesh(m: MeshData, [sx, sy, sz]: number[]): MeshData {
@@ -1643,7 +1756,7 @@ function ownMesh(f: Feature): MeshData | null {
     const outer = adjusted;
     adjusted = {};
     try {
-      if (f.kind === "imported" && plainFaceted(f)) meshCache.set(key, { mesh: textured(f, facetView(facetTriangles(f.params))), adjusted });
+      if (f.kind === "imported" && plainFaceted(f)) meshCache.set(key, { mesh: textured(f, facetView(facetOwn(f))), adjusted });
       else if (plainStretch(f)) meshCache.set(key, { mesh: textured(f, stretchMesh(toMesh("", importedBase(f.params)), f.params.scale)), adjusted });
       else {
         const shape = buildOwn(f);
@@ -1738,7 +1851,7 @@ function cutMesh(features: Feature[], f: Feature): MeshData | null {
       const facetedHole = holes.some((h) => hasFaceted(features.filter((x) => subtreeIds(features, h.id).has(x.id))));
       const quick = (isFaceted(f) || facetedHole) && !isTextured(f);
       if (quick) {
-        const own = f.kind === "group" ? branchTriangles(features, f) : f.kind === "imported" && plainFaceted(f) ? facetTriangles(f.params) : shapeTriangles(buildOwn(f)!);
+        const own = f.kind === "group" ? branchTriangles(features, f) : f.kind === "imported" && plainFaceted(f) ? facetOwn(f) : shapeTriangles(buildOwn(f)!);
         let w = own ? transformMesh(own, world) : null;
         const [lo, hi] = w ? meshBounds(w) : [[0, 0, 0], [-1, -1, -1]];
         let cut = false;
