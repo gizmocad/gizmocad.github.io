@@ -36,6 +36,7 @@
 - **Colours** per object (new objects take turns through green, orange, purple, yellow and pink), shown in the view and saved into 3MF exports.
 - **Measure** (M): click two points (corners and edges snap) for the distance and its X/Y/Z parts; two faces also give their angle.
 - Mark any shape as a **hole**: what it cuts is shown cut as you work, with the hole itself see-through so you can still move it.
+  Holes cut imported meshes (STL, OBJ, 3MF…) too, using the Manifold mesh library, as long as the mesh is closed.
   **Show result** shows only the finished boolean result (parts merged), computed by the OpenCascade kernel.
 - **Sketches:** points, guide lines, rectangles (rounded corners, any angle), circles, ellipses,
   regular polygons, slots, polygons with arc edges, smooth curves (closer points make tighter bends), and freehand brush strokes, on the XY/XZ/YZ plane or any

@@ -31,6 +31,11 @@ import { hedron } from "./hedron";
 import { CUSTOM_FONT, builtInFontUrl, fontFamily, isCustomFont } from "./fonts";
 import { Matrix3, Vector3 } from "three";
 import { applyTexture } from "./texture";
+import { BufferAttribute, BufferGeometry, EdgesGeometry } from "three";
+import { toCreasedNormals } from "three/addons/utils/BufferGeometryUtils.js";
+import ManifoldModule from "manifold-3d/manifold.js";
+import manifoldWasm from "manifold-3d/manifold.wasm?url";
+import { decodeFloats, decodeIndices } from "./sculpt";
 
 type Font = Awaited<ReturnType<typeof loadFont>>;
 /** Loaded fonts by family (see fontFamily): built-in ones as texts first need them, imported ones when the app sends them. */
@@ -1274,6 +1279,134 @@ function stlBlob(meshes: { vertices: ArrayLike<number>; triangles: ArrayLike<num
   return new Blob([view.buffer], { type: "model/stl" });
 }
 
+// ---- Holes through meshes ------------------------------------------------------------------
+// Meshes (imported STL/OBJ/3MF, sculpts) can't go through OpenCascade's exact booleans; holes
+// cut them with Manifold, a mesh boolean library, instead.
+
+type ManifoldLib = Awaited<ReturnType<typeof ManifoldModule>>;
+let manifoldLib: Promise<ManifoldLib> | null = null;
+const manifold = () =>
+  (manifoldLib ??= ManifoldModule({ locateFile: () => manifoldWasm }).then((m) => {
+    m.setup();
+    return m;
+  }));
+
+/** A quick fingerprint of a long string (a mesh's data), for cache keys. */
+function fingerprint(text: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 16777619);
+  return `${text.length}:${h >>> 0}`;
+}
+
+type WorldMesh = { vertices: Float32Array; triangles: Uint32Array };
+const meshCutCache = new Map<string, WorldMesh | null>();
+
+/**
+ * A mesh object with the holes that reach it cut away, in world coordinates.
+ * Null when no hole reaches it. Throws if the mesh isn't closed (a boolean
+ * needs a watertight mesh).
+ */
+async function cutMeshObject(features: Feature[], f: Extract<Feature, { kind: "sculpt" }>): Promise<WorldMesh | null> {
+  const holes = cuttingHoles(features, f);
+  if (!holes.length) return null;
+  const world = worldMatrix(features, f.id);
+  const key = JSON.stringify([
+    fingerprint(f.params.positions),
+    fingerprint(f.params.indices),
+    world.elements.map(r6),
+    holes.map((h) => [geometryKey(features, h.id), worldMatrix(features, h.id).elements.map(r6)]),
+  ]);
+  if (meshCutCache.has(key)) return meshCutCache.get(key)!;
+  // The mesh in the world (a mirrored one's triangles turned back the right way out).
+  const local = decodeFloats(f.params.positions);
+  const tris = decodeIndices(f.params.indices).slice();
+  const v = new Vector3();
+  const pos = new Float32Array(local.length);
+  for (let i = 0; i < local.length; i += 3) pos.set(v.fromArray(local, i).applyMatrix4(world).toArray(), i);
+  if (world.determinant() < 0) for (let i = 0; i < tris.length; i += 3) [tris[i + 1], tris[i + 2]] = [tris[i + 2], tris[i + 1]];
+  const lo = [Infinity, Infinity, Infinity];
+  const hi = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < pos.length; i += 3)
+    for (let k = 0; k < 3; k++) {
+      lo[k] = Math.min(lo[k], pos[i + k]);
+      hi[k] = Math.max(hi[k], pos[i + k]);
+    }
+  // The holes that reach it, as meshes.
+  const cutters: WorldMesh[] = [];
+  const outerFailures = failures;
+  failures = {};
+  try {
+    for (const h of holes) {
+      const hs = branch(features, h);
+      if (!hs) continue;
+      const placed = placeInWorld(features, h, hs);
+      const [a, b] = placed.boundingBox.bounds;
+      if ([0, 1, 2].some((k) => a[k] > hi[k] || b[k] < lo[k])) continue;
+      const m = placed.mesh({ tolerance: 0.02, angularTolerance: 0.15 });
+      cutters.push({ vertices: new Float32Array(m.vertices), triangles: new Uint32Array(m.triangles) });
+    }
+  } finally {
+    failures = outerFailures;
+  }
+  let result: WorldMesh | null = null;
+  if (cutters.length) {
+    const M = await manifold();
+    const solid = (w: WorldMesh, what: string) => {
+      const mesh = new M.Mesh({ numProp: 3, vertProperties: w.vertices, triVerts: w.triangles });
+      mesh.merge(); // Join corners that sit at the same place (STL files repeat them).
+      try {
+        return new M.Manifold(mesh);
+      } catch {
+        throw new Error(`${what} has gaps or crossing faces, so holes can't cut it (holes need a closed, watertight mesh; repairing it in a slicer or mesh tool can fix this).`);
+      }
+    };
+    const body = solid({ vertices: pos, triangles: tris }, "This mesh");
+    const made = cutters.map((c) => solid(c, "A hole"));
+    let cut = body;
+    for (const c of made) {
+      const next = cut.subtract(c);
+      if (cut !== body) cut.delete();
+      cut = next;
+    }
+    const out = cut.getMesh();
+    const stride = out.numProp;
+    const vertices = new Float32Array((out.vertProperties.length / stride) * 3);
+    for (let i = 0, j = 0; i < out.vertProperties.length; i += stride, j += 3) vertices.set(out.vertProperties.subarray(i, i + 3), j);
+    result = { vertices, triangles: new Uint32Array(out.triVerts) };
+    for (const m of [body, ...made, cut]) m.delete();
+  }
+  meshCutCache.set(key, result);
+  if (meshCutCache.size > 50) meshCutCache.delete(meshCutCache.keys().next().value!);
+  return result;
+}
+
+/** A mesh for the view: sharp edges kept and outlined (like an imported CAD mesh). */
+function meshForView(id: string, w: WorldMesh, toFrame: import("three").Matrix4 | null): MeshData {
+  const g = new BufferGeometry();
+  const vertices = w.vertices.slice();
+  const triangles = w.triangles.slice();
+  if (toFrame) {
+    const inv = toFrame.clone().invert();
+    const v = new Vector3();
+    for (let i = 0; i < vertices.length; i += 3) vertices.set(v.fromArray(vertices, i).applyMatrix4(inv).toArray(), i);
+    if (toFrame.determinant() < 0) for (let i = 0; i < triangles.length; i += 3) [triangles[i + 1], triangles[i + 2]] = [triangles[i + 2], triangles[i + 1]];
+  }
+  g.setAttribute("position", new BufferAttribute(vertices, 3));
+  g.setIndex(new BufferAttribute(triangles, 1));
+  const creased = toCreasedNormals(g, Math.PI / 6);
+  const edges = new EdgesGeometry(g, 30);
+  const mesh: MeshData = {
+    id,
+    vertices: creased.getAttribute("position").array as Float32Array,
+    normals: creased.getAttribute("normal").array as Float32Array,
+    triangles: Uint32Array.from({ length: creased.getAttribute("position").count }, (_, i) => i),
+    edges: edges.getAttribute("position").array as Float32Array,
+    edgeGroups: new Int32Array(),
+  };
+  for (const x of [g, creased, edges]) x.dispose();
+  return mesh;
+}
+
 function post(msg: KernelResponse, transfer: Transferable[] = []) {
   (self as unknown as Worker).postMessage(msg, transfer);
 }
@@ -1322,6 +1455,16 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
             const t = texturedWorld(req.features, f as Feature & { texture: NonNullable<Feature["texture"]> });
             if (t) meshes.push({ id: "combined", ...t.display, edges: new Float32Array(), edgeGroups: new Int32Array() });
           }
+          // Meshes with holes through them (the view shows the others as they are).
+          for (const f of req.features) {
+            if (f.kind !== "sculpt") continue;
+            try {
+              const w = await cutMeshObject(req.features, f);
+              if (w) meshes.push(meshForView(f.id, w, null));
+            } catch (err) {
+              failures[f.id] = message(err);
+            }
+          }
         } finally {
           excludeTextured = false;
         }
@@ -1331,6 +1474,12 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
           // Shapes inside a merged group are shown as part of the group's mesh.
           if (insideMergedGroup(req.features, f.id)) continue;
           try {
+            if (f.kind === "sculpt") {
+              if (!req.cuts) continue;
+              const w = await cutMeshObject(req.features, f);
+              if (w) meshes.push(meshForView(f.id, w, worldMatrix(req.features, f.id)));
+              continue;
+            }
             const cut = req.cuts ? cutMesh(req.features, f) : null;
             if (cut) meshes.push(cut);
             else if (isMergedGroup(f)) {
@@ -1423,6 +1572,18 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
         blob = req.format === "step" ? shape.blobSTEP() : shape.blobSTL({ binary: true, tolerance: 0.01, angularTolerance: 0.1 });
       }
       post({ type: "exported", requestId: req.requestId, blob });
+    } else if (req.type === "cutMeshes") {
+      // Mesh objects with holes through them, as world triangles (for STL and 3MF exports).
+      const out: Record<string, Float32Array> = {};
+      for (const f of req.features) {
+        if (f.kind !== "sculpt") continue;
+        const w = await cutMeshObject(req.features, f);
+        if (!w) continue;
+        const soup = new Float32Array(w.triangles.length * 3);
+        for (let i = 0; i < w.triangles.length; i++) soup.set(w.vertices.subarray(3 * w.triangles[i], 3 * w.triangles[i] + 3), 3 * i);
+        out[f.id] = soup;
+      }
+      post({ type: "cutMeshes", requestId: req.requestId, meshes: out });
     } else if (req.type === "importSolids") {
       const parts = await importSolids(req.files);
       post({ type: "importedSolids", requestId: req.requestId, parts });

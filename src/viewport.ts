@@ -461,7 +461,8 @@ export class Viewport {
       for (const data of meshes) this.root.add(buildMesh(data, false));
       // Sculpts aren't part of the kernel result; show them in place.
       for (const f of features) {
-        if (f.kind !== "sculpt") continue;
+        // Meshes with holes through them came back from the kernel cut; the rest are shown as they are.
+        if (f.kind !== "sculpt" || meshes.some((m) => m.id === f.id)) continue;
         const mesh = buildSculptMesh(f);
         mesh.matrixAutoUpdate = false;
         mesh.matrix.copy(worldMatrix(features, f.id));
@@ -480,7 +481,9 @@ export class Viewport {
         node.visible = !f.hidden; // Hiding a node hides everything inside it too.
         if (f.kind === "group") node.add(new THREE.AxesHelper(8));
         if (f.kind === "plane") node.add(buildPlane(f.id, f.params.size));
-        if (f.kind === "sculpt") node.add(buildSculptMesh(f, this.sculpt?.session.id !== f.id));
+        // A mesh with holes through it comes back from the kernel cut (unless it's being sculpted: then the brushes need its own mesh).
+        const sculpting = this.sculpt?.session.id === f.id;
+        if (f.kind === "sculpt" && (sculpting || !meshes.some((m) => m.id === f.id))) node.add(buildSculptMesh(f, !sculpting));
         if (f.kind === "sketch" && f.params.operation === "flat") {
           const parts = buildFlatSketch(f);
           if (parts.length) node.add(...parts);
@@ -494,7 +497,7 @@ export class Viewport {
       for (const data of meshes) {
         const f = this.features.get(data.id);
         const node = this.nodes.get(data.id);
-        if (!f || !node) continue;
+        if (!f || !node || (f.kind === "sculpt" && this.sculpt?.session.id === f.id)) continue;
         const mesh = buildMesh(data, f.mode === "hole");
         mesh.userData.id = f.id;
         node.add(mesh);
@@ -2068,10 +2071,18 @@ export class Viewport {
     this.resizeAnchor = null;
     const obj = this.gizmo.object;
     const handle = this.gizmo.axis;
-    if (!obj || !this.oneSide || this.gizmo.mode !== "scale" || (handle !== "X" && handle !== "Y" && handle !== "Z")) return;
+    if (!obj || this.gizmo.mode !== "scale" || (handle !== "X" && handle !== "Y" && handle !== "Z")) return;
+    const f = this.features.get(obj.userData.id);
+    // An imported object (its origin is the bottom of the shape it came in as) grows up and down from its middle.
+    const imported = f?.kind === "imported" || (f?.kind === "sculpt" && f.params.base === "imported");
+    if (!this.oneSide && !(imported && handle === "Z")) return;
     const box = this.localBox(obj.userData.id, obj);
     if (!box) return;
     const axis = handle.toLowerCase() as "x" | "y" | "z";
+    if (!this.oneSide) {
+      this.resizeAnchor = { axis, at: (box.min[axis] + box.max[axis]) / 2, start: obj.position.clone() };
+      return;
+    }
     // Each axis has a handle on both ends; the grab point says which end this is.
     // pointStart (grab point relative to the object, world axes) is set by the gizmo but not in its types.
     const grab = (this.gizmo as unknown as { pointStart: THREE.Vector3 }).pointStart.clone().applyQuaternion(obj.getWorldQuaternion(new THREE.Quaternion()).invert());

@@ -38,7 +38,9 @@ export type KernelRequest =
   | { type: "meshOf"; requestId: number; features: Feature[]; id: string; preview?: boolean }
   | { type: "importSolids"; requestId: number; files: ImportSource[] }
   /** A font imported into the model, for texts whose font is "custom:<id>". */
-  | { type: "font"; requestId: number; id: string; data: ArrayBuffer };
+  | { type: "font"; requestId: number; id: string; data: ArrayBuffer }
+  /** Mesh objects that holes cut, as world triangles. */
+  | { type: "cutMeshes"; requestId: number; features: Feature[] };
 
 export type KernelResponse =
   | { type: "ready" }
@@ -48,6 +50,7 @@ export type KernelResponse =
   | { type: "parts"; requestId: number; parts: MeshData[] }
   | { type: "importedSolids"; requestId: number; parts: ImportedSolid[] }
   | { type: "fontLoaded"; requestId: number; name: string }
+  | { type: "cutMeshes"; requestId: number; meshes: Record<string, Float32Array> }
   | { type: "error"; requestId: number; message: string };
 
 export interface BuildResult {
@@ -81,6 +84,7 @@ export class Kernel {
         else if (msg.type === "mesh") p.resolve(msg.mesh as never);
         else if (msg.type === "parts" || msg.type === "importedSolids") p.resolve(msg.parts as never);
         else if (msg.type === "fontLoaded") p.resolve(msg.name as never);
+        else if (msg.type === "cutMeshes") p.resolve(msg.meshes as never);
         else p.resolve(msg.blob as never);
       };
     });
@@ -121,6 +125,11 @@ export class Kernel {
   /** Give the kernel an imported font; resolves to the font's name (rejects if it can't be read). */
   loadFont(id: string, data: ArrayBuffer): Promise<string> {
     return this.request({ type: "font", id, data });
+  }
+
+  /** Mesh objects (imported meshes, sculpts) that holes cut: their cut triangles in world coordinates, by id. */
+  cutMeshes(features: Feature[]): Promise<Record<string, Float32Array>> {
+    return this.request({ type: "cutMeshes", features });
   }
 
   export(features: Feature[], format: "stl" | "step"): Promise<Blob> {

@@ -3082,8 +3082,11 @@ async function modelFile(format: "stl" | "step"): Promise<Blob> {
     // A model made only of sculpts has nothing for the kernel to export.
     if (!(format === "stl" && sculpts.length && /Nothing to export/.test((err as Error).message))) throw err;
   }
-  // Sculpts are meshes: they go into STL, but STEP only holds exact solids.
-  if (format === "stl" && sculpts.length) blob = await appendToStl(blob, sculpts.map((f) => sculptTriangles(f.params, worldMatrix(doc.features, f.id))));
+  // Sculpts are meshes: they go into STL (with any holes cut through them), but STEP only holds exact solids.
+  if (format === "stl" && sculpts.length) {
+    const cut = await kernel.cutMeshes(structuredClone(activeFeatures(doc.features)));
+    blob = await appendToStl(blob, sculpts.map((f) => cut[f.id] ?? sculptTriangles(f.params, worldMatrix(doc.features, f.id))));
+  }
   return blob!;
 }
 
@@ -3688,7 +3691,7 @@ function meshPiece(part: ImportedPart, name: string): Placed {
   return { feature: f, min, max };
 }
 
-const MESH_TAIL = "Meshes can be moved, sculpted and exported, but can't be holes or take fillets.";
+const MESH_TAIL = "Meshes can be moved, sculpted and exported, and holes cut them (if the mesh is closed); they can't be holes themselves or take fillets.";
 
 function meshBatch(title: string, fileName: string, parts: ImportedPart[]): ImportBatch {
   if (parts.length > MAX_IMPORT_PARTS) parts = mergeByColor(parts, title);
@@ -3802,10 +3805,11 @@ async function file3mf(): Promise<Blob> {
     const f = features.find((x) => x.id === m.id)!;
     return { name: f.name, color: f.color ?? "#3ddc97", vertices: m.vertices, triangles: m.triangles };
   });
-  // Sculpts (meshes) go in as their own objects.
+  // Sculpts (meshes) go in as their own objects, with any holes cut through them.
+  const cut = await kernel.cutMeshes(structuredClone(features));
   for (const f of features) {
     if (f.kind !== "sculpt") continue;
-    const tris = sculptTriangles(f.params, worldMatrix(features, f.id));
+    const tris = cut[f.id] ?? sculptTriangles(f.params, worldMatrix(features, f.id));
     parts.push({ name: f.name, color: f.color ?? "#3ddc97", vertices: tris, triangles: new Uint32Array(tris.length / 3).map((_, i) => i) });
   }
   if (!parts.length) throw new Error("Nothing to export: add at least one solid shape.");
