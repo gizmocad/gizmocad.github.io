@@ -43,6 +43,8 @@ export interface BridgeHost {
   load(doc: CadDocument): void;
   document(): CadDocument;
   export(format: "stl" | "step" | "3mf"): Promise<Blob>;
+  /** Import files into the model (side by side, one undo step). */
+  importFiles(files: { name: string; data: ArrayBuffer }[]): Promise<{ ids: string[]; note: string; failed: string[] }>;
   screenshot(opts: { view: string; ids?: string[]; width: number; height: number; showResult: boolean }): Promise<string>;
   /** A short message in the status bar. */
   notify(text: string): void;
@@ -233,6 +235,18 @@ async function run(host: BridgeHost, method: string, a: Args): Promise<unknown> 
       return describeModel(host, false);
     }
 
+    case "import": {
+      const files = (Array.isArray(a.files) ? a.files : []).map((f: Args) => {
+        const bytes = Uint8Array.from(atob(String(f.base64)), (c) => c.charCodeAt(0));
+        return { name: String(f.name), data: bytes.buffer };
+      });
+      const result = await host.importFiles(files);
+      if (!result.ids.length) throw new Error(result.failed.join("; ") || "Nothing was imported.");
+      await host.settle();
+      const box = host.bounds(result.ids);
+      return { imported: result.ids, note: result.note, ...(result.failed.length ? { failed: result.failed } : {}), ...(box ? { world_bounds: roundBox(box) } : {}) };
+    }
+
     case "export": {
       await host.settle();
       const format = a.format;
@@ -360,6 +374,13 @@ function applyFields(f: Feature, a: Args) {
 function applyParams(f: Feature, given: unknown) {
   if (typeof given !== "object" || given === null || Array.isArray(given)) throw new Error("params must be an object.");
   if (f.kind === "sculpt") throw new Error("Sculpted objects can't be edited this way.");
+  if (f.kind === "imported") {
+    const keys = Object.keys(given as Args);
+    const scale = (given as Args).scale;
+    if (keys.some((k) => k !== "scale") || typeof scale !== "number" || !(scale > 0)) throw new Error("An imported solid only has a scale (a number above 0; 1 = as imported). It resizes evenly.");
+    f.params.scale = scale;
+    return;
+  }
   const params = f.params as unknown as Args;
   const next = { ...params };
   for (const [key, value] of Object.entries(given as Args)) {
@@ -472,6 +493,7 @@ function describeModel(host: BridgeHost, sketchGeometry: boolean) {
   const objects = host.features().map((f) => {
     const o: Args = { id: f.id, name: f.name, kind: f.kind, mode: f.mode, parent: f.parentId, position: f.position, rotation: f.rotation };
     if (f.kind === "sculpt") o.params = "(a sculpted mesh)";
+    else if (f.kind === "imported") o.params = { scale: f.params.scale, size: f.params.size.map((v) => r3(v * f.params.scale)), note: "an exact imported solid; only scale can change" };
     else if (f.kind === "sketch" && !sketchGeometry) {
       const { entities, constraints, ...rest } = f.params;
       o.params = { ...rest, entities: `${entities.length} shape(s): ${[...new Set(entities.map((e) => e.type))].join(", ") || "none"} (include_sketch_geometry for details)` };

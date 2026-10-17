@@ -14,7 +14,7 @@
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import { writeFile, readFile } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { basename, isAbsolute, resolve } from "node:path";
 
 const VERSION = "1.0.0";
 const PORT = Number(process.env.GIZMOCAD_MCP_PORT) || 7473;
@@ -316,6 +316,12 @@ const TOOLS = [
     inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
   },
   {
+    name: "import_files",
+    description:
+      "Import files from this computer into the current model (added side by side, centred on the floor; undoable). Reads STEP/.stp, FreeCAD .FCStd and BREP as exact solids; STL, 3MF, OBJ, PLY, OFF and glTF/GLB as meshes; DXF and SVG drawings as sketches; and other .gizmocad models. Include an OBJ's .mtl or a .gltf's .bin in the same call. Paths must be absolute.",
+    inputSchema: { type: "object", properties: { paths: { type: "array", items: { type: "string" } } }, required: ["paths"] },
+  },
+  {
     name: "open_file",
     description: "Open a .gizmocad model file from this computer in GizmoCAD (replacing the current model; undoable). `path` must be absolute.",
     inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
@@ -348,6 +354,7 @@ screw     (a hole for a metric screw, going DOWN from its position into what it 
           fit "tap"|"close"|"normal"|"loose", head "none"|"counterbore"|"countersink", depth. Put it on a top face, e.g. z = the part's top.
 group     no params: a container. Its solids merge into one part; holes inside a group cut only that group.
 plane     size: a reference plane (display only); sketches inside it are drawn on it.
+imported  (made by import_files from STEP/FreeCAD/BREP) an exact solid; its only param is scale (1 = as imported; resizes evenly). Can be a hole and take fillets.
 sketch    a 2D drawing made 3D:
           plane "XY"|"XZ"|"YZ" (U,V axes: XY→U=X,V=Y; XZ→U=X,V=Z; YZ→U=Y,V=Z), offset (shift along the plane's normal),
           operation "extrude"|"revolve"|"flat" (flat = drawing only), depth (extrude distance), direction "normal"|"reversed"|"both",
@@ -390,6 +397,15 @@ async function callTool(name, args = {}) {
       const bytes = Buffer.from(r.base64, "base64");
       await writeFile(path, bytes);
       return text(`Saved ${path} (${bytes.length.toLocaleString()} bytes).${r.note ? ` ${r.note}` : ""}`);
+    }
+    case "import_files": {
+      if (!Array.isArray(args.paths) || !args.paths.length) throw new Error("Give one or more absolute file paths in `paths`.");
+      const files = [];
+      for (const p of args.paths) {
+        const path = checkPath(p);
+        files.push({ name: basename(path), base64: (await readFile(path)).toString("base64") });
+      }
+      return json_(await callApp("import", { files }));
     }
     case "open_file": {
       const path = checkPath(args.path);

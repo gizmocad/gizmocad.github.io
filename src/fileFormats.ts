@@ -2,7 +2,7 @@
 // and SVG import. Kept free of app state so they're easy to test.
 
 import type { Point2, SketchEntity } from "./model";
-import { simplify } from "./sketchGeometry";
+import { bendPoint, simplify } from "./sketchGeometry";
 
 // ---- 3MF ----------------------------------------------------------------------------
 
@@ -119,10 +119,10 @@ export interface ImportedPart {
   triangles: Uint32Array;
 }
 
-type ZipEntry = { method: number; raw: Uint8Array };
+export type ZipEntry = { method: number; raw: Uint8Array };
 
-/** The files in a zip archive (read from its central directory; unpacked only when asked for). */
-function readZip(buffer: ArrayBuffer): Map<string, ZipEntry> {
+/** The files in a zip archive (read from its central directory; unpacked only when asked for). Names are lower-cased. */
+export function readZip(buffer: ArrayBuffer, kind = "3MF"): Map<string, ZipEntry> {
   const bytes = new Uint8Array(buffer);
   const view = new DataView(buffer);
   let end = -1;
@@ -132,7 +132,7 @@ function readZip(buffer: ArrayBuffer): Map<string, ZipEntry> {
       break;
     }
   }
-  if (end < 0) throw new Error("it isn't a 3MF file (3MF files are zip archives).");
+  if (end < 0) throw new Error(`it isn't a ${kind} file (${kind} files are zip archives).`);
   const count = view.getUint16(end + 10, true);
   let p = view.getUint32(end + 16, true);
   if (p === 0xffffffff) throw new Error("it uses ZIP64 (over 4 GB), which isn't supported.");
@@ -152,7 +152,7 @@ function readZip(buffer: ArrayBuffer): Map<string, ZipEntry> {
   return files;
 }
 
-async function unzipEntry(e: ZipEntry): Promise<Uint8Array> {
+export async function unzipEntry(e: ZipEntry): Promise<Uint8Array> {
   if (e.method === 0) return e.raw;
   if (e.method !== 8) throw new Error(`it uses zip compression method ${e.method}, which isn't supported.`);
   const stream = new Blob([e.raw as BlobPart]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
@@ -344,20 +344,39 @@ export function svgToEntities(text: string, newId: () => string): SketchEntity[]
       }
     }
     if (!rings.length) throw new Error("No closed shapes found in this SVG.");
-    // Centre the drawing on the origin.
-    const xs = rings.flat().map((p) => p[0]);
-    const ys = rings.flat().map((p) => p[1]);
-    const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
-    const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
-    const r4 = (v: number) => Math.round(v * 1e4) / 1e4 + 0;
-    const centred = rings.map((ring) => ring.map(([x, y]) => [r4(x - cx), r4(y - cy)] as Point2));
-    return centred.map((ring, i) => {
-      const depth = centred.filter((other, j) => j !== i && Math.abs(area(other)) > Math.abs(area(ring)) && inside(ring[0], other)).length;
-      return { id: newId(), mode: depth % 2 ? "subtract" : "add", type: "polygon", points: ring, bends: ring.map(() => 0) } as SketchEntity;
-    });
+    return outlinesToEntities(rings.map((points) => ({ points })), newId);
   } finally {
     host.remove();
   }
+}
+
+/** A closed outline from a drawing: corners, optionally with arcs (see the polygon's `bends`), or an exact circle. */
+export interface Outline {
+  points: Point2[];
+  bends?: number[];
+  circle?: { x: number; y: number; r: number };
+}
+
+/**
+ * Closed outlines as sketch shapes, centred on the origin. Shapes inside an odd
+ * number of others become cut-outs (like the usual even-odd fill rule).
+ */
+export function outlinesToEntities(outlines: Outline[], newId: () => string): SketchEntity[] {
+  const xs = outlines.flatMap((o) => o.points.map((p) => p[0]));
+  const ys = outlines.flatMap((o) => o.points.map((p) => p[1]));
+  const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+  const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+  const r4 = (v: number) => Math.round(v * 1e4) / 1e4 + 0;
+  const rings = outlines.map((o) => o.points.map(([x, y]) => [r4(x - cx), r4(y - cy)] as Point2));
+  // For telling what's inside what, arcs count by their middles too (two arcs can make a whole round end).
+  const filled = rings.map((ring, i) => ring.flatMap((a, k) => (outlines[i].bends?.[k] ? [a, bendPoint(a, ring[(k + 1) % ring.length], outlines[i].bends![k])] : [a])));
+  const areas = filled.map((ring) => Math.abs(area(ring)));
+  return outlines.map((o, i) => {
+    const depth = filled.filter((other, j) => j !== i && areas[j] > areas[i] && inside(filled[i][0], other)).length;
+    const mode = depth % 2 ? "subtract" : "add";
+    if (o.circle) return { id: newId(), mode, type: "circle", x: r4(o.circle.x - cx), y: r4(o.circle.y - cy), radius: r4(o.circle.r) } as SketchEntity;
+    return { id: newId(), mode, type: "polygon", points: rings[i], bends: o.bends?.map(r4) ?? rings[i].map(() => 0) } as SketchEntity;
+  });
 }
 
 function area(ring: Point2[]): number {

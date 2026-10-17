@@ -13,13 +13,29 @@ export interface MeshData {
   edgeGroups: Int32Array;
 }
 
+/** A STEP or BREP file (or one FreeCAD object's shape) to import. */
+export interface ImportSource {
+  name: string;
+  format: "step" | "brep";
+  data: ArrayBuffer | string;
+  color?: string;
+  /** FreeCAD Part containers it sits in, nearest first: turn (degrees about `axis`), then move. */
+  placements?: { position: [number, number, number]; axis: [number, number, number]; angle: number }[];
+}
+
+/** One solid from an imported file (its own origin moved to the middle of its base), or its loose surfaces as a mesh. */
+export type ImportedSolid =
+  | { kind: "solid"; name: string; color?: string; brep: string; size: [number, number, number]; anchor: [number, number, number] }
+  | { kind: "mesh"; name: string; color?: string; vertices: Float32Array; triangles: Uint32Array };
+
 export type KernelRequest =
   | { type: "build"; requestId: number; features: Feature[]; combined: boolean }
   | { type: "export"; requestId: number; features: Feature[]; format: "stl" | "step" }
   /** One finished mesh per top-level object, in world coordinates (for 3MF). */
   | { type: "parts"; requestId: number; features: Feature[] }
   /** `preview`: the normal display mesh (cached, so building the same shape next is instant). */
-  | { type: "meshOf"; requestId: number; features: Feature[]; id: string; preview?: boolean };
+  | { type: "meshOf"; requestId: number; features: Feature[]; id: string; preview?: boolean }
+  | { type: "importSolids"; requestId: number; files: ImportSource[] };
 
 export type KernelResponse =
   | { type: "ready" }
@@ -27,6 +43,7 @@ export type KernelResponse =
   | { type: "exported"; requestId: number; blob: Blob }
   | { type: "mesh"; requestId: number; mesh: MeshData | null }
   | { type: "parts"; requestId: number; parts: MeshData[] }
+  | { type: "importedSolids"; requestId: number; parts: ImportedSolid[] }
   | { type: "error"; requestId: number; message: string };
 
 export interface BuildResult {
@@ -58,7 +75,7 @@ export class Kernel {
         if (msg.type === "error") p.reject(new Error(msg.message));
         else if (msg.type === "built") p.resolve({ meshes: msg.meshes, errors: msg.errors, adjusted: msg.adjusted } as never);
         else if (msg.type === "mesh") p.resolve(msg.mesh as never);
-        else if (msg.type === "parts") p.resolve(msg.parts as never);
+        else if (msg.type === "parts" || msg.type === "importedSolids") p.resolve(msg.parts as never);
         else p.resolve(msg.blob as never);
       };
     });
@@ -89,6 +106,11 @@ export class Kernel {
   /** Each top-level object's finished mesh (world coordinates), with top-level holes cut from it. */
   parts(features: Feature[]): Promise<MeshData[]> {
     return this.request({ type: "parts", features });
+  }
+
+  /** Solids from STEP/BREP files, split into one per solid. */
+  importSolids(files: ImportSource[]): Promise<ImportedSolid[]> {
+    return this.request({ type: "importSolids", files });
   }
 
   export(features: Feature[], format: "stl" | "step"): Promise<Blob> {

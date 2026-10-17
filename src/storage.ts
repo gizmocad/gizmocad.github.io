@@ -38,24 +38,26 @@ export async function openTextFile(input: HTMLInputElement): Promise<string | nu
   });
 }
 
-/** Pick a file to import (by extension); returns its name and bytes, or null if cancelled. */
-export async function openImportFile(input: HTMLInputElement, extensions: string[], filterName: string): Promise<{ name: string; data: ArrayBuffer } | null> {
+/** Pick files to import (by extension); returns their names and bytes (empty if cancelled). */
+export async function openImportFiles(input: HTMLInputElement, extensions: string[], filterName: string): Promise<{ name: string; data: ArrayBuffer }[]> {
   if (isTauri) {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const { readFile } = await import("@tauri-apps/plugin-fs");
-    const path = await open({ multiple: false, filters: [{ name: filterName, extensions }] });
-    if (typeof path !== "string") return null;
-    const bytes = await readFile(path);
-    return { name: path.split(/[\\/]/).pop() ?? path, data: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer };
+    const picked = await open({ multiple: true, filters: [{ name: filterName, extensions }] });
+    const paths = Array.isArray(picked) ? picked : typeof picked === "string" ? [picked] : [];
+    return Promise.all(
+      paths.map(async (path) => {
+        const bytes = await readFile(path);
+        return { name: path.split(/[\\/]/).pop() ?? path, data: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer };
+      }),
+    );
   }
   return new Promise((resolve) => {
     input.value = "";
+    input.multiple = true;
     input.accept = extensions.map((e) => `.${e}`).join(",");
-    input.onchange = async () => {
-      const file = input.files?.[0];
-      resolve(file ? { name: file.name, data: await file.arrayBuffer() } : null);
-    };
-    input.oncancel = () => resolve(null);
+    input.onchange = async () => resolve(Promise.all([...(input.files ?? [])].map(async (file) => ({ name: file.name, data: await file.arrayBuffer() }))));
+    input.oncancel = () => resolve([]);
     input.click();
   });
 }

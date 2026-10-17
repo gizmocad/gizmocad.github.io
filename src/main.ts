@@ -1,4 +1,4 @@
-import { Kernel } from "./kernel";
+import { Kernel, type ImportedSolid } from "./kernel";
 import { featureExtents, resizeFeature, sizeReadout } from "./resize";
 import {
   childrenOf,
@@ -44,12 +44,13 @@ import {
 } from "./model";
 import { Box3, Matrix4, Vector3 } from "three";
 import { CONSTRAINT_LABEL, constraintFits, measure as measureConstraint, refPoints as refPointsOf, solveSketch } from "./constraints";
-import { autosave, build3mf, loadAutosave, parse3mf, parseStl, svgToEntities, type ImportedPart, type MeshPart } from "./fileFormats";
+import { autosave, build3mf, loadAutosave, outlinesToEntities, parse3mf, parseStl, svgToEntities, type ImportedPart, type MeshPart } from "./fileFormats";
+import { parseDxf, parseFcstd, parseGltf, parseObj, parseOff, parsePly, stem, type PickedFile } from "./importFormats";
 import { SketchEditor, type MenuItem, type SketchTool } from "./sketcher";
-import { gearOuterRadius, removePoint } from "./sketchGeometry";
+import { bounds as sketchBounds, gearOuterRadius, removePoint } from "./sketchGeometry";
 import { HEDRON_FACES, HEDRON_NAMES, type HedronFaces } from "./hedron";
 import { addDetail, appendToStl, baseMesh, importedMesh, meshToSculpt, scaleSculpt, sculptTriangles, vertexCount, type BrushKind, type BrushSettings, type SculptBase } from "./sculpt";
-import { openImportFile, openTextFile, saveFile } from "./storage";
+import { openImportFiles, openTextFile, saveFile } from "./storage";
 import { formatLength, parseLength } from "./units";
 import { onThemeChange, setThemeSetting, themeSetting, type ThemeSetting } from "./theme";
 import { Viewport, type GizmoMode, type PreviewSpec } from "./viewport";
@@ -631,6 +632,7 @@ const KIND_ICON: Record<ShapeKind, string> = {
   group: "▤",
   plane: "◇",
   sculpt: "✋",
+  imported: "◈",
 };
 
 const EYE_OPEN = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>`;
@@ -1185,6 +1187,20 @@ function tiltSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
   );
   if (f.tilt) items.push(button("Straighten", () => update((t) => (t.tilt = undefined)), "link"));
   return items;
+}
+
+/** An imported solid's size: it only resizes evenly, so each field sets the scale. */
+function importedFields(f: Extract<Feature, { kind: "imported" }>, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
+  const setScale = (k: number) => update((t) => t.kind === "imported" && (t.params.scale = Math.round(k * 1e6) / 1e6));
+  const { size, scale } = f.params;
+  const axes = ["Width (X)", "Depth (Y)", "Height (Z)"].map((label, i) =>
+    lengthField(label, Math.round(size[i] * scale * 1e4) / 1e4, (v) => size[i] > 1e-9 && setScale(v / size[i]), { min: 0 }),
+  );
+  return [
+    ...axes,
+    lengthField("Scale", Math.round(scale * 1e6) / 1e4, (v) => setScale(v / 100), { min: 0, unit: "%" }),
+    hint("An exact solid from another CAD program: it can be a hole, take fillets and chamfers, and be split. It resizes evenly (all sides together)."),
+  ];
 }
 
 function hedronFields(f: Extract<Feature, { kind: "hedron" }>, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
@@ -2055,6 +2071,8 @@ function renderPropertiesPanel() {
     items.push(section("Screw hole"), ...screwFields(f, update));
   } else if (f.kind === "hedron") {
     items.push(section("Size"), ...hedronFields(f, update));
+  } else if (f.kind === "imported") {
+    items.push(section("Size"), ...importedFields(f, update));
   } else if (PARAM_FIELDS[f.kind]) {
     items.push(
       section("Size"),
@@ -2068,7 +2086,7 @@ function renderPropertiesPanel() {
       ),
     );
   }
-  if (f.kind !== "group" && f.kind !== "plane" && f.kind !== "sculpt" && !(f.kind === "sketch" && f.params.operation === "flat")) items.push(...tiltSection(f, update));
+  if (f.kind !== "group" && f.kind !== "plane" && f.kind !== "sculpt" && f.kind !== "imported" && !(f.kind === "sketch" && f.params.operation === "flat")) items.push(...tiltSection(f, update));
   if (f.kind === "thread") {
     items.push(hint("For a nut or threaded hole, make it a <b>Hole</b> inside the part. For 3D printing, add about 0.3 mm to a hole's diameter so the bolt fits."));
   }
@@ -2899,6 +2917,19 @@ viewportEl.addEventListener("drop", (e) => {
   e.preventDefault();
   viewport.placementDrop(e.clientX, e.clientY);
 });
+// Files dropped anywhere on the window are imported (instead of the browser opening them).
+const draggingFiles = (e: DragEvent) => !!e.dataTransfer?.types.includes("Files");
+window.addEventListener("dragover", (e) => {
+  if (!draggingFiles(e)) return;
+  e.preventDefault();
+  e.dataTransfer!.dropEffect = "copy";
+});
+window.addEventListener("drop", (e) => {
+  if (!draggingFiles(e)) return;
+  e.preventDefault();
+  const files = [...e.dataTransfer!.files];
+  void Promise.all(files.map(async (f) => ({ name: f.name, data: await f.arrayBuffer() }))).then(importFiles);
+});
 $("#undo").onclick = () => restore(undoStack, redoStack);
 $("#redo").onclick = () => restore(redoStack, undoStack);
 $("#snap").onchange = (e) => {
@@ -3002,6 +3033,7 @@ const mcp = new McpBridge(
       refresh();
     },
     document: () => doc,
+    importFiles,
     export: (format) => (format === "3mf" ? file3mf() : modelFile(format)),
     async screenshot(opts) {
       const was = showCombined;
@@ -3265,102 +3297,265 @@ async function restoreAutosave() {
 
 // ---- Import and 3MF -------------------------------------------------------------------
 
+/** Everything Import reads. Support files (.mtl, .bin, textures) come along with the model that uses them. */
+const IMPORT_TYPES = ["step", "stp", "fcstd", "brep", "brp", "stl", "3mf", "obj", "ply", "off", "glb", "gltf", "svg", "dxf", "gizmocad", "mintcad", "json", "mtl", "bin", "png", "jpg", "jpeg"];
+const SUPPORT_FILE = /\.(mtl|bin|png|jpe?g)$/i;
+/** Space between files imported together (mm). */
+const IMPORT_GAP = 10;
+/** More parts than this (e.g. a game model's hundreds of pieces) are merged by colour. */
+const MAX_IMPORT_PARTS = 100;
+
+/** One imported file's new objects, centred on the grid. */
+interface ImportBatch {
+  features: Feature[];
+  /** The footprint: min X, max X, min Y, max Y (mm). */
+  box: [number, number, number, number];
+  /** What came in, e.g. "part.step: 3 solids". */
+  note: string;
+  /** What can be done with it (said once per kind). */
+  tail: string;
+}
+
 async function importFile() {
-  const file = await openImportFile($("#import-input"), ["stl", "3mf", "svg"], "STL or 3MF mesh, or SVG drawing");
-  if (!file) return;
-  try {
-    if (/\.3mf$/i.test(file.name)) {
-      setStatus(`Importing ${file.name}…`);
-      await import3mf(file.name, await parse3mf(file.data));
-    } else if (/\.svg$/i.test(file.name)) {
-      const entities = svgToEntities(new TextDecoder().decode(file.data), newId);
-      const f = createFeature("sketch", doc.features) as SketchFeature;
-      f.name = file.name.replace(/\.svg$/i, "");
-      f.params.entities = entities;
-      f.params.operation = "extrude";
-      f.params.depth = 3;
-      finishImport(f);
-      setNotice(`Imported ${entities.length} shape${entities.length === 1 ? "" : "s"} from ${file.name} as a sketch, extruded 3 mm (change it in the panel; double-click to edit the drawing).`);
-    } else {
-      const { vertices, triangles } = parseStl(file.data);
-      const f = createFeature("sculpt", doc.features) as SculptFeature;
-      f.name = file.name.replace(/\.stl$/i, "");
-      f.params = importedMesh(vertices, triangles);
-      // Sit it on the grid, centred.
-      const v = new Float32Array(vertices);
-      let [minX, minY, minZ, maxX, maxY] = [Infinity, Infinity, Infinity, -Infinity, -Infinity];
-      for (let i = 0; i < v.length; i += 3) {
-        minX = Math.min(minX, v[i]);
-        maxX = Math.max(maxX, v[i]);
-        minY = Math.min(minY, v[i + 1]);
-        maxY = Math.max(maxY, v[i + 1]);
-        minZ = Math.min(minZ, v[i + 2]);
-      }
-      f.position = { x: -(minX + maxX) / 2, y: -(minY + maxY) / 2, z: -minZ };
-      finishImport(f);
-      setNotice(`Imported ${file.name} (${(triangles.length / 3).toLocaleString()} triangles) as a mesh: move, sculpt and export it to STL or 3MF. Meshes can't be holes or take fillets.`);
+  const files = await openImportFiles($("#import-input"), IMPORT_TYPES, "3D models, CAD files and drawings");
+  if (files.length) await importFiles(files);
+}
+
+/** Import files side by side along X, all in one undo step. Returns the new top-level objects and what happened. */
+async function importFiles(files: PickedFile[]): Promise<{ ids: string[]; note: string; failed: string[] }> {
+  const models = files.filter((f) => !SUPPORT_FILE.test(f.name));
+  if (!models.length) {
+    const why = "Those files go along with a model: pick them together with the .obj or .gltf that uses them.";
+    setStatus(why, true);
+    return { ids: [], note: "", failed: [why] };
+  }
+  const batches: ImportBatch[] = [];
+  const failed: string[] = [];
+  for (const [i, file] of models.entries()) {
+    setStatus(`Importing ${file.name}${models.length > 1 ? ` (${i + 1} of ${models.length})` : ""}…`);
+    try {
+      batches.push(await importBatch(file, files));
+    } catch (err) {
+      failed.push(`${file.name}: ${(err as Error).message}`);
     }
-  } catch (err) {
-    setStatus(`Couldn't import ${file.name}: ${(err as Error).message}`, true);
+  }
+  if (batches.length) {
+    let right = batches[0].box[1];
+    for (const b of batches.slice(1)) {
+      const dx = right + IMPORT_GAP - b.box[0];
+      for (const f of topLevel(b.features)) f.position.x = round4(f.position.x + dx);
+      right = b.box[1] + dx;
+    }
+    const made = batches.flatMap((b) => b.features);
+    stopSketchEdit();
+    commit((features) => insertFeatures(features, made));
+    selectedIds = topLevel(made).map((f) => f.id);
+    selectedId = selectedIds[0];
+    renderPanels();
+    viewport.fitView();
+  }
+  const note = batches.length ? `Imported ${batches.map((b) => b.note).join("; ")}. ${[...new Set(batches.map((b) => b.tail))].join(" ")}`.trim() : "";
+  const problems = failed.length ? `Couldn't import ${failed.join(" · ")}` : "";
+  // With something imported, the rebuild shows the notice; with nothing, the error stays up.
+  if (note) setNotice(problems ? `${note} ${problems}` : note);
+  else setStatus(problems, true);
+  return { ids: batches.length ? selectedIds.slice() : [], note, failed };
+}
+
+/** The ones not inside another of them. */
+const topLevel = (features: Feature[]) => features.filter((f) => !f.parentId || !features.some((g) => g.id === f.parentId));
+
+async function importBatch(file: PickedFile, all: PickedFile[]): Promise<ImportBatch> {
+  const ext = /\.([^.]+)$/.exec(file.name)?.[1].toLowerCase() ?? "";
+  const title = stem(file.name);
+  switch (ext) {
+    case "step":
+    case "stp":
+      return solidBatch(title, file.name, await kernel.importSolids([{ name: title, format: "step", data: file.data }]));
+    case "brep":
+    case "brp":
+      return solidBatch(title, file.name, await kernel.importSolids([{ name: title, format: "brep", data: file.data }]));
+    case "fcstd": {
+      const { sources, skipped } = await parseFcstd(file);
+      if (!sources.length) throw new Error(skipped ? "its shapes are saved in FreeCAD's binary format, which can't be read here. Export it from FreeCAD as STEP instead." : "it has no visible solid objects.");
+      const batch = await solidBatch(title, file.name, await kernel.importSolids(sources));
+      if (skipped) batch.note += ` (${skipped} object${skipped === 1 ? "" : "s"} in FreeCAD's binary format left out)`;
+      return batch;
+    }
+    case "stl": {
+      const { vertices, triangles } = parseStl(file.data);
+      return meshBatch(title, file.name, [{ name: title, vertices, triangles }]);
+    }
+    case "3mf":
+      return meshBatch(title, file.name, await parse3mf(file.data));
+    case "obj":
+      return meshBatch(title, file.name, parseObj(file, all));
+    case "off":
+      return meshBatch(title, file.name, parseOff(file));
+    case "ply":
+      return meshBatch(title, file.name, await parsePly(file));
+    case "glb":
+    case "gltf":
+      return meshBatch(title, file.name, await parseGltf(file, all));
+    case "svg":
+      return sketchBatch(title, file.name, svgToEntities(new TextDecoder().decode(file.data), newId), 0);
+    case "dxf": {
+      const { outlines, open } = parseDxf(file);
+      return sketchBatch(title, file.name, outlinesToEntities(outlines, newId), open);
+    }
+    case "gizmocad":
+    case "mintcad":
+    case "json":
+      return modelBatch(title, file);
+    default:
+      throw new Error("GizmoCAD can't read this kind of file.");
   }
 }
 
+/** A piece placed where it sits in the file (its own origin is the middle of its base), and its extents there. */
+type Placed = { feature: Feature; min: number[]; max: number[] };
+
 /**
- * A 3MF's parts as mesh objects, keeping their names, colours and where they
- * sit relative to each other; the whole set lands centred on the grid. Several
- * parts go into a group named after the file.
+ * Centre the pieces on the grid together, keeping where they sit relative to
+ * each other; several go into a group named after the file.
  */
-async function import3mf(fileName: string, parts: ImportedPart[]) {
-  const title = fileName.replace(/\.3mf$/i, "");
-  // Bounds of everything, and of each part.
-  const boxes = parts.map((p) => {
-    const b = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
-    for (let i = 0; i < p.vertices.length; i += 3)
-      for (let k = 0; k < 3; k++) {
-        b.min[k] = Math.min(b.min[k], p.vertices[i + k]);
-        b.max[k] = Math.max(b.max[k], p.vertices[i + k]);
-      }
-    return b;
-  });
-  const lo = [0, 1, 2].map((k) => Math.min(...boxes.map((b) => b.min[k])));
-  const hi = [0, 1, 2].map((k) => Math.max(...boxes.map((b) => b.max[k])));
+function placeBatch(title: string, pieces: Placed[], note: string, tail: string): ImportBatch {
+  const lo = [0, 1, 2].map((k) => Math.min(...pieces.map((p) => p.min[k])));
+  const hi = [0, 1, 2].map((k) => Math.max(...pieces.map((p) => p.max[k])));
   const shift = [-(lo[0] + hi[0]) / 2, -(lo[1] + hi[1]) / 2, -lo[2]];
-  const r = (v: number) => Math.round(v * 1e4) / 1e4 + 0;
-  const group = parts.length > 1 ? createFeature("group", doc.features) : null;
+  const group = pieces.length > 1 ? createFeature("group", doc.features) : null;
   if (group) group.name = title;
-  const made: Feature[] = [];
-  parts.forEach((part, i) => {
-    // Each mesh's own origin is the middle of its base, so it moves and turns about itself.
-    const b = boxes[i];
-    const anchor = [(b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2, b.min[2]];
-    const local = part.vertices.slice();
-    for (let k = 0; k < local.length; k += 3) for (let a = 0; a < 3; a++) local[k + a] -= anchor[a];
-    const f = createFeature("sculpt", [...doc.features, ...made], group?.id ?? null) as SculptFeature;
-    f.name = parts.length > 1 ? part.name : title;
-    f.params = importedMesh(local, part.triangles);
-    f.position = { x: r(anchor[0] + shift[0]), y: r(anchor[1] + shift[1]), z: r(anchor[2] + shift[2]) };
-    if (part.color) f.color = part.color;
-    made.push(f);
-  });
-  stopSketchEdit();
-  commit((features) => insertFeatures(features, group ? [group, ...made] : made));
-  selectedId = group?.id ?? made[0].id;
-  selectedIds = [selectedId];
-  renderPanels();
-  viewport.fitView();
-  const tris = parts.reduce((s, p) => s + p.triangles.length / 3, 0);
-  setNotice(
-    `Imported ${fileName}: ${parts.length === 1 ? "1 part" : `${parts.length} parts (grouped)`}, ${tris.toLocaleString()} triangles, as meshes you can move, sculpt and export. Meshes can't be holes or take fillets.`,
-  );
+  for (const { feature: f } of pieces) {
+    f.position = { x: round4(f.position.x + shift[0]), y: round4(f.position.y + shift[1]), z: round4(f.position.z + shift[2]) };
+    if (group) f.parentId = group.id;
+  }
+  const features = pieces.map((p) => p.feature);
+  return { features: group ? [group, ...features] : features, box: [lo[0] + shift[0], hi[0] + shift[0], lo[1] + shift[1], hi[1] + shift[1]], note, tail };
 }
 
-function finishImport(f: Feature) {
-  stopSketchEdit();
-  commit((features) => insertFeatures(features, [f]));
-  selectedId = f.id;
-  selectedIds = [f.id];
-  renderPanels();
-  viewport.fitView();
+/** A mesh part as an object whose own origin is the middle of its base. */
+function meshPiece(part: ImportedPart, name: string): Placed {
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < part.vertices.length; i += 3)
+    for (let k = 0; k < 3; k++) {
+      min[k] = Math.min(min[k], part.vertices[i + k]);
+      max[k] = Math.max(max[k], part.vertices[i + k]);
+    }
+  const anchor = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, min[2]];
+  const local = part.vertices.slice();
+  for (let i = 0; i < local.length; i += 3) for (let k = 0; k < 3; k++) local[i + k] -= anchor[k];
+  const f = createFeature("sculpt", doc.features) as SculptFeature;
+  f.name = name;
+  f.params = importedMesh(local, part.triangles);
+  f.position = { x: anchor[0], y: anchor[1], z: anchor[2] };
+  if (part.color) f.color = part.color;
+  return { feature: f, min, max };
+}
+
+const MESH_TAIL = "Meshes can be moved, sculpted and exported, but can't be holes or take fillets.";
+
+function meshBatch(title: string, fileName: string, parts: ImportedPart[]): ImportBatch {
+  if (parts.length > MAX_IMPORT_PARTS) parts = mergeByColor(parts, title);
+  const pieces = parts.map((p) => meshPiece(p, parts.length > 1 ? p.name : title));
+  const tris = parts.reduce((s, p) => s + p.triangles.length / 3, 0);
+  return placeBatch(title, pieces, `${fileName}: ${parts.length === 1 ? "1 mesh" : `${parts.length} meshes (grouped)`}, ${tris.toLocaleString()} triangles`, MESH_TAIL);
+}
+
+/** One part per colour. */
+function mergeByColor(parts: ImportedPart[], title: string): ImportedPart[] {
+  const byColor = new Map<string, ImportedPart[]>();
+  for (const p of parts) byColor.set(p.color ?? "", [...(byColor.get(p.color ?? "") ?? []), p]);
+  return [...byColor].map(([color, list], i) => {
+    const vertices = new Float32Array(list.reduce((s, p) => s + p.vertices.length, 0));
+    const triangles = new Uint32Array(list.reduce((s, p) => s + p.triangles.length, 0));
+    let [v, t] = [0, 0];
+    for (const p of list) {
+      vertices.set(p.vertices, v);
+      for (let k = 0; k < p.triangles.length; k++) triangles[t + k] = p.triangles[k] + v / 3;
+      v += p.vertices.length;
+      t += p.triangles.length;
+    }
+    return { name: byColor.size > 1 ? `${title} ${i + 1}` : title, color: color || undefined, vertices, triangles };
+  });
+}
+
+/** Exact solids (and any loose surfaces, as meshes) from STEP, BREP or FreeCAD files. */
+function solidBatch(title: string, fileName: string, parts: ImportedSolid[]): ImportBatch {
+  if (!parts.length) throw new Error("it has no solids or surfaces in it.");
+  const pieces = parts.map((p): Placed => {
+    if (p.kind === "mesh") return meshPiece(p, p.name);
+    const f = createFeature("imported", doc.features) as Extract<Feature, { kind: "imported" }>;
+    f.name = p.name;
+    f.params = { ref: newId(), brep: p.brep, size: p.size, scale: 1 };
+    f.position = { x: p.anchor[0], y: p.anchor[1], z: p.anchor[2] };
+    if (p.color) f.color = p.color;
+    const [w, d, h] = p.size;
+    return { feature: f, min: [p.anchor[0] - w / 2, p.anchor[1] - d / 2, p.anchor[2]], max: [p.anchor[0] + w / 2, p.anchor[1] + d / 2, p.anchor[2] + h] };
+  });
+  const solids = parts.filter((p) => p.kind === "solid").length;
+  const meshes = parts.length - solids;
+  const what = [solids && `${solids} solid${solids === 1 ? "" : "s"}`, meshes && `${meshes} surface mesh${meshes === 1 ? "" : "es"}`].filter(Boolean).join(" and ");
+  return placeBatch(title, pieces, `${fileName}: ${what}${parts.length > 1 ? " (grouped)" : ""}`, "Imported solids are exact: they can be holes, take fillets and chamfers, and be split; they resize evenly.");
+}
+
+/** A 2D drawing as a sketch, extruded 3 mm. */
+function sketchBatch(title: string, fileName: string, entities: SketchEntity[], open: number): ImportBatch {
+  const f = createFeature("sketch", doc.features) as SketchFeature;
+  f.name = title;
+  f.params.entities = entities;
+  f.params.operation = "extrude";
+  f.params.depth = 3;
+  const boxes = entities.map((e) => sketchBounds(e));
+  const box: ImportBatch["box"] = [Math.min(...boxes.map((b) => b[0][0])), Math.max(...boxes.map((b) => b[1][0])), Math.min(...boxes.map((b) => b[0][1])), Math.max(...boxes.map((b) => b[1][1]))];
+  const skipped = open ? ` (${open} unclosed line${open === 1 ? "" : "s"} left out)` : "";
+  return {
+    features: [f],
+    box,
+    note: `${fileName}: ${entities.length} shape${entities.length === 1 ? "" : "s"} as a sketch${skipped}`,
+    tail: "Drawings come in as sketches extruded 3 mm: change it in the panel, or double-click to edit the drawing.",
+  };
+}
+
+/** Another GizmoCAD model brought into this one (as a group if it has several objects). */
+async function modelBatch(title: string, file: PickedFile): Promise<ImportBatch> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(file.data));
+  } catch {
+    throw new Error("it isn't a GizmoCAD model.");
+  }
+  if (!isCadDocument(parsed)) throw new Error("it isn't a GizmoCAD model.");
+  const incoming = normalizeDocument(parsed).features;
+  if (!incoming.length) throw new Error("it's empty.");
+  // New ids, so the same model can come in more than once.
+  const ids = new Map(incoming.map((f) => [f.id, newId()]));
+  for (const f of incoming) {
+    f.id = ids.get(f.id)!;
+    f.parentId = f.parentId ? (ids.get(f.parentId) ?? null) : null;
+    for (const op of f.edgeOps) op.id = newId();
+  }
+  const features = [...incoming];
+  let top = features.filter((f) => !f.parentId);
+  if (top.length > 1) {
+    const group = createFeature("group", doc.features);
+    group.name = title;
+    for (const f of top) f.parentId = group.id;
+    features.unshift(group);
+    top = [group];
+  }
+  // Its footprint, from the finished shapes.
+  const box = new Box3();
+  const v = new Vector3();
+  const live = features.filter((f) => !f.suppressed);
+  for (const m of await kernel.parts(structuredClone(live))) for (let i = 0; i < m.vertices.length; i += 3) box.expandByPoint(v.fromArray(m.vertices, i));
+  for (const f of live) if (f.kind === "sculpt") box.union(new Box3().setFromArray(sculptTriangles(f.params, worldMatrix(live, f.id))));
+  if (box.isEmpty()) box.set(new Vector3(), new Vector3());
+  const t = top[0];
+  t.position = { x: round4(t.position.x - (box.min.x + box.max.x) / 2), y: round4(t.position.y - (box.min.y + box.max.y) / 2), z: round4(t.position.z - box.min.z) };
+  const [hx, hy] = [(box.max.x - box.min.x) / 2, (box.max.y - box.min.y) / 2];
+  const n = incoming.length;
+  return { features, box: [-hx, hx, -hy, hy], note: `${file.name}: ${n} object${n === 1 ? "" : "s"}${top[0].kind === "group" && n > 1 ? " (grouped)" : ""}`, tail: "" };
 }
 
 /** The model as a 3MF file: each part its own object, with its colour. */

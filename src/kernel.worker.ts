@@ -2,7 +2,7 @@
 
 import opencascade from "replicad-opencascadejs";
 import wasmUrl from "replicad-opencascadejs/wasm?url";
-import { EdgeFinder, assembleWire, cast, draw, drawCircle, drawEllipse, drawText, genericSweep, getOC, loadFont, makeBaseBox, makeBox, makeCircle, makeCylinder, makeHelix, makeLine, makeEllipsoid, makePolygon, makeSolid, makeSphere, setOC, type Drawing, type Shape3D } from "replicad";
+import { EdgeFinder, assembleWire, cast, deserializeShape, draw, drawCircle, drawEllipse, drawText, genericSweep, getOC, importSTEP, loadFont, makeBaseBox, makeBox, makeCircle, makeCylinder, makeHelix, makeLine, makeEllipsoid, makePolygon, makeSolid, makeSphere, setOC, type Drawing, type Shape3D } from "replicad";
 import {
   PLANE_ROTATIONS,
   SCREW_SIZES,
@@ -19,6 +19,7 @@ import {
   jointMatrix,
   type EdgeOp,
   type Feature,
+  type ImportedParams,
   type SketchEntity,
   type SketchParams,
 } from "./model";
@@ -29,7 +30,7 @@ import serif700 from "@fontsource/roboto-slab/files/roboto-slab-latin-700-normal
 import mono400 from "@fontsource/roboto-mono/files/roboto-mono-latin-400-normal.woff?url";
 import mono700 from "@fontsource/roboto-mono/files/roboto-mono-latin-700-normal.woff?url";
 import { entityPath, gearPath, isProfile, outline, prismPoints, starPoints, strokePieces, type Path } from "./sketchGeometry";
-import type { KernelRequest, KernelResponse, MeshData } from "./kernel";
+import type { ImportedSolid, ImportSource, KernelRequest, KernelResponse, MeshData } from "./kernel";
 import { hedron } from "./hedron";
 
 /** Fonts for text, bundled with the app (Roboto family, OFL/Apache licensed). */
@@ -780,11 +781,74 @@ function buildBase(f: Feature, taper = 0): Shape3D | null {
       return buildScrewHole(f.params);
     case "sketch":
       return buildSketch(f.params, lean, taper);
+    case "imported":
+      return importedShape(f.params);
     case "group":
     case "plane":
     case "sculpt": // Meshes, drawn and exported outside the kernel.
       return null;
   }
+}
+
+// ---- Imported solids -----------------------------------------------------------------------
+
+/** Imported geometry, read once per `ref` (reading a big BREP takes a while). */
+const importedCache = new Map<string, Shape3D>();
+
+function importedShape(p: ImportedParams): Shape3D {
+  let shape = importedCache.get(p.ref);
+  if (!shape) {
+    if (!p.brep) throw new Error("This imported solid has no geometry.");
+    shape = deserializeShape(p.brep) as Shape3D;
+    importedCache.set(p.ref, shape);
+    if (importedCache.size > 64) importedCache.delete(importedCache.keys().next().value!);
+  }
+  if (!(p.scale > 0)) throw new Error("The scale needs to be above 0.");
+  // Transforms use up the shape they start from, so work on a copy of the cached one.
+  return p.scale === 1 ? shape.clone() : shape.clone().scale(p.scale, [0, 0, 0]);
+}
+
+/**
+ * Read STEP and BREP files and split them into their solids, each moved so its
+ * own origin is the middle of its base (`anchor` says where that was). Faces
+ * that aren't part of any solid come back as a mesh.
+ */
+async function importSolids(files: ImportSource[]): Promise<ImportedSolid[]> {
+  const out: ImportedSolid[] = [];
+  for (const file of files) {
+    let shape: Shape3D;
+    try {
+      shape = (file.format === "step" ? await importSTEP(new Blob([file.data])) : deserializeShape(typeof file.data === "string" ? file.data : new TextDecoder().decode(file.data))) as Shape3D;
+    } catch (err) {
+      throw new Error(`${file.name}: ${file.format === "step" ? "this isn't a STEP file OpenCascade can read" : "this isn't a BREP shape OpenCascade can read"} (${message(err)}).`);
+    }
+    // FreeCAD objects inside a Part container are placed by it (nearest container first).
+    for (const pl of file.placements ?? []) {
+      if (pl.angle) shape = shape.rotate(pl.angle, [0, 0, 0], pl.axis);
+      shape = shape.translate(...pl.position);
+    }
+    const solids = shape.solids as unknown as Shape3D[];
+    solids.forEach((solid, i) => {
+      const { bounds } = solid.boundingBox;
+      const [lo, hi] = bounds;
+      const anchor: [number, number, number] = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]];
+      const local = solid.translate(-anchor[0], -anchor[1], -anchor[2]);
+      out.push({
+        kind: "solid",
+        name: solids.length > 1 ? `${file.name} ${i + 1}` : file.name,
+        color: file.color,
+        brep: local.serialize(),
+        size: [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]],
+        anchor,
+      });
+    });
+    if (!solids.length && shape.faces.length) {
+      // Surfaces only (no closed solid): keep how it looks.
+      const m = shape.mesh({ tolerance: 0.01, angularTolerance: 0.1 });
+      out.push({ kind: "mesh", name: file.name, color: file.color, vertices: new Float32Array(m.vertices), triangles: new Uint32Array(m.triangles) });
+    }
+  }
+  return out;
 }
 
 function place(f: Feature, shape: Shape3D): Shape3D {
@@ -885,7 +949,9 @@ function toMesh(id: string, shape: Shape3D, kind?: Feature["kind"]): MeshData {
 const meshCache = new Map<string, { mesh: MeshData | null; adjusted: Record<string, number> }>();
 
 function ownMesh(f: Feature): MeshData | null {
-  const key = JSON.stringify([f.kind, f.params, f.edgeOps, f.clips ?? [], f.shell ?? null, f.tilt ?? null]);
+  // An imported solid's geometry is named by its ref (its BREP text can be megabytes).
+  const params = f.kind === "imported" ? { ...f.params, brep: undefined } : f.params;
+  const key = JSON.stringify([f.kind, params, f.edgeOps, f.clips ?? [], f.shell ?? null, f.tilt ?? null]);
   if (!meshCache.has(key)) {
     const outer = adjusted;
     adjusted = {};
@@ -1004,6 +1070,9 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
       if (!shape) throw new Error("Nothing to export: add at least one solid shape.");
       const blob = req.format === "step" ? shape.blobSTEP() : shape.blobSTL({ binary: true, tolerance: 0.01, angularTolerance: 0.1 });
       post({ type: "exported", requestId: req.requestId, blob });
+    } else if (req.type === "importSolids") {
+      const parts = await importSolids(req.files);
+      post({ type: "importedSolids", requestId: req.requestId, parts });
     }
   } catch (err) {
     post({ type: "error", requestId: req.requestId, message: message(err) });

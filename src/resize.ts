@@ -137,6 +137,14 @@ function scaleOwn(f: Feature, s: Vec3, snap: number) {
       // It only grows or shrinks as a whole: follow whichever axis changed most.
       f.params.radius = snapRadius(f.params.radius * dominantFactor(s), snap);
       break;
+    case "imported": {
+      // Also only as a whole; the length along the axis that changed most lands on the grid.
+      const k = dominantFactor(s);
+      const axis = ([s.x, s.y, s.z].findIndex((v) => v === k) + 3) % 3;
+      const len = f.params.size[axis] * f.params.scale;
+      f.params.scale = len > 1e-9 ? Math.round((snapLength(len * k, snap) / f.params.size[axis]) * 1e6) / 1e6 : f.params.scale * k;
+      break;
+    }
     case "thread":
       // The pitch is a standard size, so it stays; the diameter and length change.
       f.params.diameter = snapLength(f.params.diameter * roundFactor(s), snap);
@@ -357,6 +365,10 @@ function baseExtents(f: Feature): [Vec3, Vec3] | null {
       const xs = pts.map((p) => p[0]);
       const ys = pts.map((p) => p[1]);
       return [{ x: Math.min(...xs), y: Math.min(...ys), z: 0 }, { x: Math.max(...xs), y: Math.max(...ys), z: f.params.height }];
+    }
+    case "imported": {
+      const [x, y, z] = f.params.size.map((v) => (v * f.params.scale) / 2);
+      return [{ x: -x, y: -y, z: 0 }, { x, y, z: 2 * z }];
     }
     case "hedron": {
       const [a, b] = hedronBox(f.params.faces, f.params.radius);

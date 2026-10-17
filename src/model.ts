@@ -29,7 +29,8 @@ export type ShapeKind =
   | "sketch"
   | "group"
   | "plane"
-  | "sculpt";
+  | "sculpt"
+  | "imported";
 export type Mode = "solid" | "hole";
 
 export interface Vec3 {
@@ -223,6 +224,21 @@ export interface Joint {
 }
 
 /** Equal radii make a sphere; different ones stretch it into an ellipsoid. */
+/**
+ * A solid brought in from another CAD program (STEP, BREP, FreeCAD), kept as
+ * its exact OpenCascade geometry. Its own origin is the middle of its base.
+ */
+export interface ImportedParams {
+  /** Names this geometry (the same for copies), so the kernel reads `brep` only once. */
+  ref: string;
+  /** The shape in OpenCascade's BREP text format, at scale 1. */
+  brep: string;
+  /** Its size at scale 1 (X, Y, Z). */
+  size: [number, number, number];
+  /** Resized evenly (exact solids can't be stretched along one axis). */
+  scale: number;
+}
+
 export interface SphereParams {
   /** Radius along X. */
   radius: number;
@@ -346,7 +362,7 @@ export interface EdgeOp {
 }
 
 /** Kinds that can have fillets/chamfers. A group's apply to its merged result. */
-export const FINISHABLE: ShapeKind[] = ["box", "cylinder", "sphere", "cone", "tube", "torus", "wedge", "pyramid", "prism", "hedron", "gear", "star", "text", "sketch", "group"];
+export const FINISHABLE: ShapeKind[] = ["box", "cylinder", "sphere", "cone", "tube", "torus", "wedge", "pyramid", "prism", "hedron", "gear", "star", "text", "sketch", "group", "imported"];
 
 /** Hollow it out: walls `thickness` thick, optionally open at the top or bottom. */
 export interface Shell {
@@ -410,7 +426,9 @@ export type Feature =
   /** A reference plane (its local XY). Sketches placed inside it are drawn on it. */
   | (FeatureBase & { kind: "plane"; params: { size: number } })
   /** A free-form mesh shaped with sculpting brushes (not part of CAD booleans). */
-  | (FeatureBase & { kind: "sculpt"; params: SculptParams });
+  | (FeatureBase & { kind: "sculpt"; params: SculptParams })
+  /** An exact solid imported from a STEP, BREP or FreeCAD file. */
+  | (FeatureBase & { kind: "imported"; params: ImportedParams });
 
 export type SculptFeature = Extract<Feature, { kind: "sculpt" }>;
 
@@ -473,6 +491,8 @@ function defaultParams(kind: ShapeKind): Feature["params"] {
       return { size: 60 };
     case "sculpt":
       return defaultSculpt();
+    case "imported":
+      return { ref: "", brep: "", size: [0, 0, 0], scale: 1 };
   }
 }
 

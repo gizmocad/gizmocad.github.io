@@ -70,7 +70,12 @@
 - **Print bed:** pick your printer in the GizmoCAD menu to see its bed and get a warning when the model doesn't fit.
 - Snap to the grid, undo/redo. New, Open, Save, Export and Theme are in the menu under the GizmoCAD logo.
 - Export **STEP** (for other CAD programs), **STL** (for 3D printing) and **3MF** (for slicers, one object per part,
-  with colours). **Import** STL and 3MF meshes (3MF keeps part names, colours and layout; several parts come in as a group) and SVG drawings (closed shapes become a sketch, holes included).
+  with colours). **Import** several files at once (or drop them on the window); they land side by side:
+  - **STEP**, **FreeCAD (.FCStd)** and **BREP** as exact solids that can be holes, take fillets and be split
+    (FreeCAD files keep each visible object's name, colour and placement);
+  - **STL**, **3MF**, **OBJ** (with its .mtl), **PLY**, **OFF** and **glTF/GLB** as meshes (3MF keeps part names, colours and layout);
+  - **DXF** and **SVG** drawings as sketches (lines and arcs that join up become shapes, holes included);
+  - another **GizmoCAD** model, brought into this one.
 - **AI assistant (MCP):** let Claude (or any MCP-capable assistant) build and edit the model while you watch. See below.
 
 ## AI assistant (MCP)
@@ -89,7 +94,7 @@ The same dialog has a download button for the server and copy-ready setup lines.
 Tools: `get_model`, `list_shape_types`, `add_object` (every shape kind, sketches with extrude/revolve, groups),
 `update_object` (sizes, placement, solid/hole, colour, fillets/chamfers/bevels, hollow, tilt, mirror, parent),
 `delete_objects`, `group_objects`, `screenshot` (any view, optionally the finished boolean result), `select_objects`,
-`undo`, `redo`, `new_model`, `save_file` (.gizmocad, .stl, .3mf, .step) and `open_file`.
+`undo`, `redo`, `new_model`, `save_file` (.gizmocad, .stl, .3mf, .step), `open_file` and `import_files` (any of the import formats).
 Every change is a normal undoable step, and build errors and auto-shrunk fillets are reported back to the assistant.
 
 The bridge listens only on `127.0.0.1:7473` and accepts connections only from GizmoCAD's own pages (the website,
@@ -127,6 +132,7 @@ npm run tauri dev      # desktop app (needs Rust + system WebKit)
 | `src/sketchGeometry.ts` | Exact outlines of sketch shapes, shared by the kernel and the editor. |
 | `src/constraints.ts` | Sketch constraints and the solver that keeps drawings to them. |
 | `src/fileFormats.ts` | 3MF export and import, STL and SVG import, autosave. |
+| `src/importFormats.ts` | OBJ, OFF, PLY, glTF, DXF and FreeCAD import (STEP/BREP are read by the kernel). |
 | `src/viewCube.ts` | The view orientation cube. |
 | `src/main.ts` | UI: panels, undo/redo, commands, keyboard shortcuts. |
 | `src/storage.ts` | Save/open: native dialogs in the desktop app, downloads on the web. |
