@@ -2172,6 +2172,8 @@ function makeFittingHole(id: string) {
     if (!t) return;
     t.ignoreHoles = [...(t.ignoreHoles ?? []), hole.id];
     insertFeatures(features, [hole]);
+    // Where the object is now: a hinge or slider may have moved it from its own position (the hole has no joint).
+    setWorldMatrix(features, hole.id, worldMatrix(features, id));
   });
   selectedIds = [hole.id];
   selectedId = hole.id;
