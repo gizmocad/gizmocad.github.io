@@ -71,6 +71,31 @@
 - Snap to the grid, undo/redo. New, Open, Save, Export and Theme are in the menu under the GizmoCAD logo.
 - Export **STEP** (for other CAD programs), **STL** (for 3D printing) and **3MF** (for slicers, one object per part,
   with colours). **Import** STL meshes and SVG drawings (closed shapes become a sketch, holes included).
+- **AI assistant (MCP):** let Claude (or any MCP-capable assistant) build and edit the model while you watch. See below.
+
+## AI assistant (MCP)
+
+GizmoCAD can be driven by an AI assistant through the [Model Context Protocol](https://modelcontextprotocol.io).
+The assistant runs a small local server, [`public/mcp/gizmocad-mcp.mjs`](public/mcp/gizmocad-mcp.mjs) (Node 18+, no
+dependencies), and GizmoCAD connects to it when you switch on **Connect** in the GizmoCAD menu ▸ **AI assistant (MCP)**.
+The same dialog has a download button for the server and copy-ready setup lines.
+
+- **Claude Code:** `claude mcp add gizmocad -- node /full/path/to/gizmocad-mcp.mjs`
+- **Claude Desktop:** add to `claude_desktop_config.json` (Settings ▸ Developer ▸ Edit config), then restart it:
+  ```json
+  { "mcpServers": { "gizmocad": { "command": "node", "args": ["/full/path/to/gizmocad-mcp.mjs"] } } }
+  ```
+
+Tools: `get_model`, `list_shape_types`, `add_object` (every shape kind, sketches with extrude/revolve, groups),
+`update_object` (sizes, placement, solid/hole, colour, fillets/chamfers/bevels, hollow, tilt, mirror, parent),
+`delete_objects`, `group_objects`, `screenshot` (any view, optionally the finished boolean result), `select_objects`,
+`undo`, `redo`, `new_model`, `save_file` (.gizmocad, .stl, .3mf, .step) and `open_file`.
+Every change is a normal undoable step, and build errors and auto-shrunk fillets are reported back to the assistant.
+
+The bridge listens only on `127.0.0.1:7473` and accepts connections only from GizmoCAD's own pages (the website,
+the desktop app, or a local dev server). Set `GIZMOCAD_MCP_PORT` (and the same port in the dialog) to use another port,
+and `GIZMOCAD_MCP_ORIGINS` to allow another origin (e.g. a self-hosted copy). Safari blocks the website from reaching
+localhost; use Chrome, Edge, Firefox or the desktop app.
 
 ## Development
 
@@ -105,6 +130,8 @@ npm run tauri dev      # desktop app (needs Rust + system WebKit)
 | `src/viewCube.ts` | The view orientation cube. |
 | `src/main.ts` | UI: panels, undo/redo, commands, keyboard shortcuts. |
 | `src/storage.ts` | Save/open: native dialogs in the desktop app, downloads on the web. |
+| `src/mcpBridge.ts` | The app's side of MCP: carries out an AI assistant's tool calls as undoable edits. |
+| `public/mcp/gizmocad-mcp.mjs` | The MCP server the assistant runs (stdio), bridged to the app over a local WebSocket. |
 | `src-tauri/` | Desktop wrapper and installer config. |
 
 ## Roadmap

@@ -53,6 +53,7 @@ import { openImportFile, openTextFile, saveFile } from "./storage";
 import { formatLength, parseLength } from "./units";
 import { onThemeChange, setThemeSetting, themeSetting, type ThemeSetting } from "./theme";
 import { Viewport, type GizmoMode, type PreviewSpec } from "./viewport";
+import { DEFAULT_MCP_PORT, McpBridge, type BridgeState } from "./mcpBridge";
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T;
 
@@ -253,7 +254,22 @@ const viewport = new Viewport($("#viewport"), {
 });
 
 let buildToken = 0;
-async function rebuild() {
+/** The latest rebuild, so others (the AI bridge) can wait for the model to catch up. */
+let latestBuild: Promise<void> = Promise.resolve();
+function rebuild(): Promise<void> {
+  latestBuild = buildNow();
+  return latestBuild;
+}
+
+/** Wait until the model is built as it is now (a newer edit's build replaces an older one). */
+async function settle() {
+  for (let p = latestBuild; ; p = latestBuild) {
+    await p;
+    if (p === latestBuild) return;
+  }
+}
+
+async function buildNow() {
   const token = ++buildToken;
   const features = structuredClone(activeFeatures(doc.features));
   try {
@@ -1531,6 +1547,12 @@ function distributeObjects(ids: string[], axis: Axis) {
 function groupSelected() {
   const ids = topSelected();
   if (!ids.length) return;
+  groupIds(ids);
+  setNotice(`Grouped ${ids.length} objects.`);
+}
+
+/** Put objects (none inside another) into a new group around them; returns the group's id. */
+function groupIds(ids: string[]): string {
   const parents = new Set(ids.map((id) => findFeature(id)?.parentId ?? null));
   const parentId = parents.size === 1 ? [...parents][0] : null;
   const group = createFeature("group", doc.features, parentId);
@@ -1546,7 +1568,7 @@ function groupSelected() {
   selectedIds = [group.id];
   selectedId = group.id;
   renderPanels();
-  setNotice(`Grouped ${ids.length} objects.`);
+  return group.id;
 }
 
 // ---- Copy and paste --------------------------------------------------------------
@@ -2753,10 +2775,17 @@ function duplicateSelected() {
 function deleteSelected() {
   if (!selectedIds.length && selectedId) selectedIds = [selectedId];
   if (!selectedIds.length) return;
-  const ids = new Set(selectedIds.flatMap((id) => [...subtreeIds(doc.features, id)]));
+  deleteIds(selectedIds);
+}
+
+/** Delete objects and everything inside them. */
+function deleteIds(targets: string[]) {
+  const ids = new Set(targets.flatMap((id) => [...subtreeIds(doc.features, id)]));
   if (editingSketchId && ids.has(editingSketchId)) stopSketchEdit();
-  selectedId = null;
-  selectedIds = [];
+  if (sculptingId && ids.has(sculptingId)) stopSculpt();
+  if (edgePick && ids.has(edgePick.featureId)) stopEdgePick();
+  selectedIds = selectedIds.filter((id) => !ids.has(id));
+  selectedId = selectedId && !ids.has(selectedId) ? selectedId : (selectedIds[0] ?? null);
   commit((features) => {
     const before = features.length;
     const keep = features.filter((f) => !ids.has(f.id));
@@ -2766,20 +2795,27 @@ function deleteSelected() {
   });
 }
 
+/** The model as an STL or STEP file. */
+async function modelFile(format: "stl" | "step"): Promise<Blob> {
+  const sculpts = doc.features.filter((f): f is SculptFeature => f.kind === "sculpt");
+  let blob: Blob | null = null;
+  try {
+    blob = await kernel.export(structuredClone(doc.features), format);
+  } catch (err) {
+    // A model made only of sculpts has nothing for the kernel to export.
+    if (!(format === "stl" && sculpts.length && /Nothing to export/.test((err as Error).message))) throw err;
+  }
+  // Sculpts are meshes: they go into STL, but STEP only holds exact solids.
+  if (format === "stl" && sculpts.length) blob = await appendToStl(blob, sculpts.map((f) => sculptTriangles(f.params, worldMatrix(doc.features, f.id))));
+  return blob!;
+}
+
 async function exportModel(format: "stl" | "step") {
   setStatus(`Exporting ${format.toUpperCase()}…`);
   const sculpts = doc.features.filter((f): f is SculptFeature => f.kind === "sculpt");
   try {
-    let blob: Blob | null = null;
-    try {
-      blob = await kernel.export(structuredClone(doc.features), format);
-    } catch (err) {
-      // A model made only of sculpts has nothing for the kernel to export.
-      if (!(format === "stl" && sculpts.length && /Nothing to export/.test((err as Error).message))) throw err;
-    }
-    // Sculpts are meshes: they go into STL, but STEP only holds exact solids.
-    if (format === "stl" && sculpts.length) blob = await appendToStl(blob, sculpts.map((f) => sculptTriangles(f.params, worldMatrix(doc.features, f.id))));
-    await saveFile(blob!, `gizmocad-model.${format}`, format.toUpperCase(), format);
+    const blob = await modelFile(format);
+    await saveFile(blob, `gizmocad-model.${format}`, format.toUpperCase(), format);
     setStatus(format === "step" && sculpts.length ? "Sculpted objects aren't in the STEP file (STEP only holds exact solids); export STL to include them." : "");
   } catch (err) {
     setStatus(`Export failed: ${(err as Error).message}`, true);
@@ -2881,6 +2917,165 @@ $("#save").onclick = () => void saveDocument();
 $("#open").onclick = () => void openDocument();
 $("#export-stl").onclick = () => void exportModel("stl");
 $("#export-step").onclick = () => void exportModel("step");
+
+// ---- AI assistant (MCP) ------------------------------------------------------------
+
+/** Carries out an AI assistant's tool calls (via the local MCP server) as normal, undoable edits. */
+const mcp = new McpBridge(
+  {
+    features: () => doc.features,
+    commit,
+    insert: insertFeatures,
+    settle,
+    errors: () => buildErrors,
+    adjusted: () => edgeAdjustments,
+    bounds(ids) {
+      const box = ids.length ? viewport.modelBounds(new Set(ids), true) : null;
+      return box && { min: { x: box.min.x, y: box.min.y, z: box.min.z }, max: { x: box.max.x, y: box.max.y, z: box.max.z } };
+    },
+    select(ids) {
+      selectedIds = ids;
+      selectedId = ids[0] ?? null;
+      renderPanels();
+      viewport.select(selectedId, selectedIds);
+    },
+    deleteIds,
+    group(ids) {
+      // Only the outermost: anything inside another listed object goes along with it.
+      const set = new Set(ids);
+      const tops = ids.filter((id) => {
+        for (let p = findFeature(id)?.parentId ?? null; p; p = findFeature(p)?.parentId ?? null) if (set.has(p)) return false;
+        return true;
+      });
+      return tops.length ? groupIds(tops) : null;
+    },
+    undo() {
+      if (!undoStack.length) return false;
+      restore(undoStack, redoStack);
+      return true;
+    },
+    redo() {
+      if (!redoStack.length) return false;
+      restore(redoStack, undoStack);
+      return true;
+    },
+    load(next) {
+      stopSketchEdit();
+      stopSculpt();
+      stopEdgePick();
+      undoStack.push(JSON.stringify(doc));
+      redoStack.length = 0;
+      doc = next;
+      selectedId = null;
+      selectedIds = [];
+      historyMarker = null;
+      refresh();
+    },
+    document: () => doc,
+    export: (format) => (format === "3mf" ? file3mf() : modelFile(format)),
+    async screenshot(opts) {
+      const was = showCombined;
+      if (opts.showResult !== was) {
+        showCombined = opts.showResult;
+        void rebuild();
+        await settle();
+      }
+      try {
+        return viewport.snapshot(opts);
+      } finally {
+        if (showCombined !== was) {
+          showCombined = was;
+          void rebuild();
+        }
+      }
+    },
+    notify: setNotice,
+  },
+  (state) => showMcpState(state),
+);
+
+const mcpDialog = $("#mcp-dialog") as HTMLDialogElement;
+const mcpEnabled = $("#mcp-enabled") as HTMLInputElement;
+const mcpPort = $("#mcp-port") as HTMLInputElement;
+const MCP_KEYS = { enabled: "gizmocad.mcp.enabled", port: "gizmocad.mcp.port" };
+const stored = (key: string) => {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+};
+const store = (key: string, value: string) => {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Not remembered (private window): it's just a convenience.
+  }
+};
+
+const MCP_STATE_TEXT: Record<BridgeState, string> = {
+  off: "Off: no AI assistant can reach this model.",
+  connecting:
+    "Waiting for the MCP server… It starts when your AI assistant does. (If the browser asks to allow access to devices on your local network, allow it.)",
+  connected: "Connected ✓ The assistant can see and change this model.",
+};
+function showMcpState(state: BridgeState) {
+  $("#mcp-state").textContent = MCP_STATE_TEXT[state];
+  $("#mcp-state").dataset.state = state;
+  $("#mcp-menu-state").textContent = state === "connected" ? "connected" : state === "connecting" ? "waiting" : "off";
+  $("#mcp-badge").hidden = state !== "connected";
+}
+
+function mcpPortValue() {
+  const n = Math.round(Number(mcpPort.value));
+  return n > 0 && n < 65536 ? n : DEFAULT_MCP_PORT;
+}
+
+function updateMcpSnippets() {
+  const port = mcpPortValue();
+  const env = port === DEFAULT_MCP_PORT ? "" : ` --env GIZMOCAD_MCP_PORT=${port}`;
+  $("#mcp-snippet-code").textContent = `claude mcp add gizmocad${env} -- node /full/path/to/gizmocad-mcp.mjs`;
+  const envLine = port === DEFAULT_MCP_PORT ? "" : `,\n      "env": { "GIZMOCAD_MCP_PORT": "${port}" }`;
+  $("#mcp-snippet-desktop").textContent = `{\n  "mcpServers": {\n    "gizmocad": {\n      "command": "node",\n      "args": ["/full/path/to/gizmocad-mcp.mjs"]${envLine}\n    }\n  }\n}`;
+}
+
+mcpPort.value = stored(MCP_KEYS.port) ?? String(DEFAULT_MCP_PORT);
+mcpEnabled.checked = stored(MCP_KEYS.enabled) === "1";
+updateMcpSnippets();
+showMcpState("off");
+mcp.setEnabled(mcpEnabled.checked, mcpPortValue());
+
+mcpEnabled.onchange = () => {
+  store(MCP_KEYS.enabled, mcpEnabled.checked ? "1" : "0");
+  mcp.setEnabled(mcpEnabled.checked, mcpPortValue());
+};
+mcpPort.onchange = () => {
+  mcpPort.value = String(mcpPortValue());
+  store(MCP_KEYS.port, mcpPort.value);
+  updateMcpSnippets();
+  mcp.setEnabled(mcpEnabled.checked, mcpPortValue());
+};
+mcpPort.onkeydown = (e) => e.stopPropagation();
+const openMcpDialog = () => mcpDialog.showModal();
+$("#mcp-open").onclick = openMcpDialog;
+$("#mcp-badge").onclick = openMcpDialog;
+$("#mcp-download").onclick = async () => {
+  try {
+    const res = await fetch("./mcp/gizmocad-mcp.mjs");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    await saveFile(await res.blob(), "gizmocad-mcp.mjs", "JavaScript", "mjs");
+  } catch (err) {
+    setStatus(`Couldn't download the MCP server: ${(err as Error).message}`, true);
+  }
+};
+mcpDialog.querySelectorAll<HTMLButtonElement>("[data-copy]").forEach((b) => {
+  b.onclick = () => {
+    void navigator.clipboard?.writeText($(`#${b.dataset.copy}`).textContent ?? "").then(() => {
+      b.textContent = "Copied";
+      setTimeout(() => (b.textContent = "Copy"), 1500);
+    });
+  };
+});
 
 
 // ---- Measure, section, camera ------------------------------------------------------
@@ -3086,23 +3281,28 @@ function finishImport(f: Feature) {
   viewport.fitView();
 }
 
+/** The model as a 3MF file: each part its own object, with its colour. */
+async function file3mf(): Promise<Blob> {
+  const features = structuredClone(activeFeatures(doc.features));
+  const meshes = await kernel.parts(features);
+  const parts: MeshPart[] = meshes.map((m) => {
+    const f = features.find((x) => x.id === m.id)!;
+    return { name: f.name, color: f.color ?? "#3ddc97", vertices: m.vertices, triangles: m.triangles };
+  });
+  // Sculpts (meshes) go in as their own objects.
+  for (const f of features) {
+    if (f.kind !== "sculpt") continue;
+    const tris = sculptTriangles(f.params, worldMatrix(features, f.id));
+    parts.push({ name: f.name, color: f.color ?? "#3ddc97", vertices: tris, triangles: new Uint32Array(tris.length / 3).map((_, i) => i) });
+  }
+  if (!parts.length) throw new Error("Nothing to export: add at least one solid shape.");
+  return build3mf(parts);
+}
+
 async function export3mf() {
   setStatus("Exporting 3MF…");
   try {
-    const features = structuredClone(activeFeatures(doc.features));
-    const meshes = await kernel.parts(features);
-    const parts: MeshPart[] = meshes.map((m) => {
-      const f = features.find((x) => x.id === m.id)!;
-      return { name: f.name, color: f.color ?? "#3ddc97", vertices: m.vertices, triangles: m.triangles };
-    });
-    // Sculpts (meshes) go in as their own objects.
-    for (const f of features) {
-      if (f.kind !== "sculpt") continue;
-      const tris = sculptTriangles(f.params, worldMatrix(features, f.id));
-      parts.push({ name: f.name, color: f.color ?? "#3ddc97", vertices: tris, triangles: new Uint32Array(tris.length / 3).map((_, i) => i) });
-    }
-    if (!parts.length) throw new Error("Nothing to export: add at least one solid shape.");
-    await saveFile(build3mf(parts), "gizmocad-model.3mf", "3MF", "3mf");
+    await saveFile(await file3mf(), "gizmocad-model.3mf", "3MF", "3mf");
     setStatus("");
   } catch (err) {
     setStatus(`Export failed: ${(err as Error).message}`, true);

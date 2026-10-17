@@ -30,10 +30,13 @@
           <button id="export-3mf" role="menuitem">Export 3MF <span class="note">slicers, with colours</span></button>
           <button id="export-step" role="menuitem">Export STEP <span class="note">other CAD</span></button>
           <hr />
+          <button id="mcp-open" role="menuitem" title="Let an AI assistant such as Claude build and edit your model">AI assistant (MCP)… <span class="note" id="mcp-menu-state">off</span></button>
+          <hr />
           <label class="menu-field" title="Shows your printer's bed in the view and warns when the model doesn't fit">Print bed <select id="bed"></select></label>
           <button id="theme" role="menuitem" title="Theme: follow system, light or dark"></button>
         </div>
       </div>
+      <button id="mcp-badge" class="mcp-badge" hidden title="An AI assistant is connected and can change this model (click for settings)">● AI</button>
       <div class="group">
         <button id="undo" title="Undo (Ctrl+Z)">Undo</button>
         <button id="redo" title="Redo (Ctrl+Shift+Z)">Redo</button>
@@ -73,6 +76,37 @@
       </div>
       <input type="file" id="file-input" accept=".gizmocad,.mintcad,.json" hidden />
       <input type="file" id="import-input" hidden />
+    <dialog id="mcp-dialog" class="dialog" aria-labelledby="mcp-title">
+      <form method="dialog" class="dialog-head">
+        <h2 id="mcp-title">AI assistant (MCP)</h2>
+        <button class="icon" value="close" aria-label="Close">✕</button>
+      </form>
+      <p>Let an AI assistant such as Claude build and change your model: describe a part, and watch it appear here. It connects through <b>MCP</b> (Model Context Protocol), using a small server that runs on your computer.</p>
+      <label class="toggle mcp-connect"><input type="checkbox" id="mcp-enabled" /> Connect to an AI assistant</label>
+      <p class="mcp-state" id="mcp-state"></p>
+      <h3>Set up once</h3>
+      <ol class="mcp-steps">
+        <li>Install <a href="https://nodejs.org" target="_blank" rel="noopener">Node.js</a> (version 18 or newer).</li>
+        <li><button id="mcp-download">Download gizmocad-mcp.mjs</button> and keep it somewhere safe, such as your home folder.</li>
+        <li>
+          Add it to your assistant, with the file's full path:
+          <div class="snippet">
+            <div class="snippet-label">Claude Code (in a terminal)</div>
+            <pre id="mcp-snippet-code"></pre>
+            <button class="link" data-copy="mcp-snippet-code">Copy</button>
+          </div>
+          <div class="snippet">
+            <div class="snippet-label">Claude Desktop (Settings ▸ Developer ▸ Edit config, then restart it)</div>
+            <pre id="mcp-snippet-desktop"></pre>
+            <button class="link" data-copy="mcp-snippet-desktop">Copy</button>
+          </div>
+          Other MCP apps: run <code>node gizmocad-mcp.mjs</code> as a stdio server.
+        </li>
+        <li>Switch on <b>Connect</b> above, then ask the assistant to make something.</li>
+      </ol>
+      <p class="hint">Everything it does is a normal step you can undo (Ctrl+Z). Only programs on this computer can connect: the server listens on 127.0.0.1 and only accepts GizmoCAD. Safari can't reach it from the website; use Chrome, Edge, Firefox or the desktop app.</p>
+      <label class="menu-field mcp-port">Port <input id="mcp-port" type="text" inputmode="numeric" /></label>
+    </dialog>
     </header>
 
     <aside class="panel left">

@@ -1240,7 +1240,7 @@ export class Viewport {
   }
 
   /** The model's world bounds (shown objects), or null if there's nothing. */
-  modelBounds(onlyIds?: Set<string>): THREE.Box3 | null {
+  modelBounds(onlyIds?: Set<string>, solidOnly = false): THREE.Box3 | null {
     this.root.updateMatrixWorld(true);
     const box = new THREE.Box3();
     this.root.traverse((o) => {
@@ -1252,7 +1252,8 @@ export class Viewport {
         for (let p = o.parent; p; p = p.parent) if (p.userData.id && onlyIds.has(p.userData.id)) inside = true;
         if (!inside) return;
       }
-      if (!onlyIds && id && this.features.get(id)?.mode === "hole") return;
+      // Holes cut the model rather than adding to it (unless one was asked about itself).
+      if ((!onlyIds || (solidOnly && !onlyIds.has(id ?? ""))) && id && this.features.get(id)?.mode === "hole") return;
       box.expandByObject(o);
     });
     return box.isEmpty() ? null : box;
@@ -1341,6 +1342,68 @@ export class Viewport {
       this.orthoCamera.updateProjectionMatrix();
     }
     if (t >= 1) this.viewFly = null;
+  }
+
+  /**
+   * A picture of the model (PNG, base64) from a set direction, framed to fit it
+   * (or `ids`), at any size. It's drawn off screen with its own camera, so the
+   * user's view doesn't move. Gizmo and snap dots are left out.
+   */
+  snapshot(opts: { view: string; ids?: string[]; width: number; height: number }): string {
+    const { width: w, height: h } = opts;
+    const fov = this.perspCamera.fov;
+    const cam = new THREE.PerspectiveCamera(fov, w / h, 0.1, 100000);
+    const box = this.modelBounds(opts.ids?.length ? new Set(opts.ids) : undefined);
+    const sphere = box ? box.getBoundingSphere(new THREE.Sphere()) : new THREE.Sphere(new THREE.Vector3(0, 0, 10), 40);
+    const r = Math.max(sphere.radius, 5) * 1.1;
+    const DIRS: Record<string, [number, number, number]> = {
+      iso: [1, -1.25, 0.95],
+      front: [0, -1, 0],
+      back: [0, 1, 0],
+      left: [-1, 0, 0],
+      right: [1, 0, 0],
+      top: [0, 0, 1],
+      bottom: [0, 0, -1],
+    };
+    if (opts.view === "current") {
+      cam.position.copy(this.camera.position);
+      cam.up.set(0, 0, 1);
+      cam.lookAt(this.orbit.target);
+    } else {
+      const dir = new THREE.Vector3(...(DIRS[opts.view] ?? DIRS.iso)).normalize();
+      const halfFov = THREE.MathUtils.degToRad(fov / 2);
+      const fit = Math.min(Math.tan(halfFov), Math.tan(halfFov) * (w / h));
+      cam.position.copy(sphere.center).addScaledVector(dir, r / fit);
+      // Straight down/up: +Y is up in the picture, like the view cube's Top.
+      cam.up.set(0, Math.abs(dir.z) > 0.999 ? 1 : 0, Math.abs(dir.z) > 0.999 ? 0 : 1);
+      cam.lookAt(sphere.center);
+    }
+    cam.updateProjectionMatrix();
+
+    const hidden = [this.gizmo.getHelper(), this.snapHint, this.brushRing, ...this.snapDots].filter((o) => o.visible);
+    hidden.forEach((o) => (o.visible = false));
+    const target = new THREE.WebGLRenderTarget(w, h, { samples: 4, colorSpace: THREE.SRGBColorSpace });
+    const pixels = new Uint8Array(w * h * 4);
+    try {
+      this.renderer.setRenderTarget(target);
+      this.renderer.clear();
+      this.renderer.render(this.scene, cam);
+      this.renderer.readRenderTargetPixels(target, 0, 0, w, h, pixels);
+    } finally {
+      this.renderer.setRenderTarget(null);
+      target.dispose();
+      hidden.forEach((o) => (o.visible = true));
+    }
+    // WebGL rows run bottom-up; images run top-down.
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const g = canvas.getContext("2d")!;
+    const image = g.createImageData(w, h);
+    const row = w * 4;
+    for (let y = 0; y < h; y++) image.data.set(pixels.subarray((h - 1 - y) * row, (h - y) * row), y * row);
+    g.putImageData(image, 0, 0);
+    return canvas.toDataURL("image/png").slice("data:image/png;base64,".length);
   }
 
   /** World size of one screen pixel at a point (for pick tolerances). */

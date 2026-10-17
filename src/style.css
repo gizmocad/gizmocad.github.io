@@ -494,3 +494,26 @@ body.menu-open .panel.left { overflow-y: hidden; }
 .point-list .point-row.head { position: sticky; top: 0; z-index: 1; background: var(--panel); margin-bottom: 4px; padding-bottom: 4px; box-shadow: 0 1px 0 var(--border); }
 .point-row.active { background: color-mix(in srgb, #f09a2a 18%, transparent); border-radius: 6px; outline: 1px solid #f09a2a; }
 .point-row.active > span:first-child { color: #c46f00; font-weight: 700; }
+
+/* AI assistant (MCP): the setup dialog, and a badge in the toolbar while one is connected. */
+.dialog { width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow-y: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); color: var(--text); padding: 18px 20px; box-shadow: 0 16px 48px var(--shadow); }
+.dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
+.dialog-head { display: flex; align-items: center; justify-content: space-between; margin: 0 0 8px; }
+.dialog h2 { font-size: 17px; margin: 0; }
+.dialog h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 18px 0 6px; }
+.dialog p { line-height: 1.5; margin: 6px 0; }
+.dialog a { color: var(--accent-strong); }
+.mcp-connect { display: flex; align-items: center; gap: 8px; font-weight: 600; margin-top: 12px; }
+.mcp-state { font-size: 13px; color: var(--muted); }
+.mcp-state[data-state="connected"] { color: var(--accent-strong); font-weight: 600; }
+.mcp-state[data-state="connecting"] { color: var(--warn-text); }
+.mcp-steps { padding-left: 20px; margin: 0; line-height: 1.5; }
+.mcp-steps li { margin-bottom: 8px; }
+.snippet { position: relative; margin: 6px 0 8px; }
+.snippet-label { font-size: 12px; color: var(--muted); margin-bottom: 2px; }
+.snippet pre { margin: 0; padding: 8px 10px; padding-right: 56px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+.snippet [data-copy] { position: absolute; right: 6px; bottom: 6px; font-size: 12px; padding: 2px 6px; }
+.dialog code { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; font-size: 12px; }
+.mcp-port { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+.mcp-port input { width: 80px; border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; background: var(--bg); color: var(--text); }
+.mcp-badge { border: 1px solid var(--accent); background: var(--accent-soft); color: var(--accent-strong); font-size: 12px; font-weight: 700; padding: 3px 8px; border-radius: 999px; }
