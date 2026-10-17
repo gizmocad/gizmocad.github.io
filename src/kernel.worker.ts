@@ -25,34 +25,32 @@ import {
   type SketchEntity,
   type SketchParams,
 } from "./model";
-import sans400 from "@fontsource/roboto/files/roboto-latin-400-normal.woff?url";
-import sans700 from "@fontsource/roboto/files/roboto-latin-700-normal.woff?url";
-import serif400 from "@fontsource/roboto-slab/files/roboto-slab-latin-400-normal.woff?url";
-import serif700 from "@fontsource/roboto-slab/files/roboto-slab-latin-700-normal.woff?url";
-import mono400 from "@fontsource/roboto-mono/files/roboto-mono-latin-400-normal.woff?url";
-import mono700 from "@fontsource/roboto-mono/files/roboto-mono-latin-700-normal.woff?url";
 import { entityPath, gearPath, isProfile, outline, prismPoints, starPoints, strokePieces, type Path } from "./sketchGeometry";
 import type { ImportedSolid, ImportSource, KernelRequest, KernelResponse, MeshData } from "./kernel";
 import { hedron } from "./hedron";
+import { CUSTOM_FONT, builtInFontUrl, fontFamily, isCustomFont } from "./fonts";
 import { Matrix3, Vector3 } from "three";
 
-/** Fonts for text, bundled with the app (Roboto family, OFL/Apache licensed). */
-const FONT_FILES: Record<string, string> = {
-  "sans-400": sans400,
-  "sans-700": sans700,
-  "serif-400": serif400,
-  "serif-700": serif700,
-  "mono-400": mono400,
-  "mono-700": mono700,
-};
 type Font = Awaited<ReturnType<typeof loadFont>>;
+/** Loaded fonts by family (see fontFamily): built-in ones as texts first need them, imported ones when the app sends them. */
 const fonts: Record<string, Font> = {};
 
 const ready = (async () => {
   const oc = await opencascade({ locateFile: () => wasmUrl });
   setOC(oc as Parameters<typeof setOC>[0]);
-  await Promise.all(Object.entries(FONT_FILES).map(async ([name, url]) => (fonts[name] = await loadFont(url, name))));
 })();
+
+/** Load the built-in fonts these texts use (each once). */
+async function ensureFonts(features: Feature[]) {
+  const families = new Set(features.flatMap((f) => (f.kind === "text" ? [fontFamily(f.params.font, f.params.bold)] : [])));
+  await Promise.all(
+    [...families].map(async (family) => {
+      if (fonts[family] || isCustomFont(family)) return;
+      const url = builtInFontUrl(family);
+      if (url) fonts[family] = await loadFont(url, family);
+    }),
+  );
+}
 
 function pathDrawing(path: Path): Drawing {
   const pen = draw(path.start);
@@ -594,10 +592,10 @@ function zigzagStruts(width: number, t: number, pitch: number, height: number, d
  * then the whole block centred on the origin and extruded up by `height`.
  */
 function buildText(p: TextParams, lean: Lean = null, taper = 0): Shape3D {
-  const font = fonts[`${p.font}-${p.bold ? 700 : 400}`];
-  if (!font) throw new Error("The font isn't loaded yet.");
+  const family = fontFamily(p.font, p.bold);
+  const font = fonts[family];
+  if (!font) throw new Error(isCustomFont(p.font) ? "This text's imported font isn't in the model any more: pick another font." : "The font isn't loaded yet.");
   if (p.size <= 0 || p.height <= 0) throw new Error("Text needs a size and height above 0.");
-  const family = `${p.font}-${p.bold ? 700 : 400}`;
   // `size` is the capital height; the font is drawn by its em size.
   const os2 = (font.tables as { os2?: { sCapHeight?: number } }).os2;
   const capRatio = (os2?.sCapHeight || 0.7 * font.unitsPerEm) / font.unitsPerEm;
@@ -1198,6 +1196,20 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
   try {
     await ready;
     adjusted = {};
+    if ("features" in req) await ensureFonts(req.features);
+    if (req.type === "font") {
+      // An imported font: check it can be read, and keep it for texts that use it.
+      let font: Font;
+      try {
+        font = await loadFont(req.data, `${CUSTOM_FONT}${req.id}`, true);
+      } catch {
+        throw new Error("This font file can't be read (use a .ttf, .otf or .woff file; .woff2 isn't supported).");
+      }
+      fonts[`${CUSTOM_FONT}${req.id}`] = font;
+      const names = font.names as unknown as Record<string, Record<string, string> | undefined>;
+      const name = names.fullName?.en ?? names.fontFamily?.en ?? "Imported font";
+      return post({ type: "fontLoaded", requestId: req.requestId, name });
+    }
     if (req.type === "build") {
       const meshes: MeshData[] = [];
       let errors: Record<string, string> = {};

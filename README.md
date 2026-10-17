@@ -5,7 +5,9 @@
 - Drag shapes in (box, cylinder, sphere, cone, tube, ring, wedge, pyramid, polygon prism, hedron (4, 6, 8, 12 or 20 faces), thread, gear, spring, star, text, screw hole),
   then type exact sizes. A thread set to Hole makes a threaded hole (nut); gears have real involute teeth.
   Springs come as coils (round or square wire, open or flat ends) or flat zigzag springs (rounded or sharp bends) that print lying down.
-  **Text** comes in sans, serif or mono (bold or not, any alignment, several lines); make it a Hole to engrave it.
+  **Text** comes in 13 built-in fonts (plain, serif, typewriter, rounded, narrow, poster, stencil, sci-fi, cartoon, comic,
+  script, handwriting, old English; bold where the font has it), or **import your own** .ttf, .otf or .woff font (it's saved
+  inside the model). Any alignment, several lines; make it a Hole to engrave it.
   **Screw holes** (M2–M10) go down into the face you put them on, with a tap, close, normal or loose fit and an optional
   counterbore or countersink.
   Fields accept units and maths (`1in`, `2.5cm`, `40/3`).

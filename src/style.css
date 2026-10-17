@@ -518,3 +518,6 @@ body.menu-open .panel.left { overflow-y: hidden; }
 .mcp-port { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
 .mcp-port input { width: 80px; border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; background: var(--bg); color: var(--text); }
 .mcp-badge { border: 1px solid var(--accent); background: var(--accent-soft); color: var(--accent-strong); font-size: 12px; font-weight: 700; padding: 3px 8px; border-radius: 999px; }
+
+/* A text's first line in its chosen font. */
+.font-preview { font-size: 22px; line-height: 1.3; padding: 6px 8px; margin: 2px 0 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

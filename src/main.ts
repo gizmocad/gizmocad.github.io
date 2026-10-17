@@ -20,6 +20,7 @@ import {
   clampJoint,
   subtreeIds,
   type CadDocument,
+  type ImportedFont,
   type Feature,
   type Point2,
   type ShapeKind,
@@ -49,6 +50,7 @@ import { parseDxf, parseFcstd, parseGltf, parseObj, parseOff, parsePly, stem, ty
 import { SketchEditor, type MenuItem, type SketchTool } from "./sketcher";
 import { bounds as sketchBounds, gearOuterRadius, removePoint } from "./sketchGeometry";
 import { HEDRON_FACES, HEDRON_NAMES, type HedronFaces } from "./hedron";
+import { BUILT_IN_FONTS, CUSTOM_FONT, builtInFont, builtInFontUrl, fontFamily, isCustomFont } from "./fonts";
 import { addDetail, appendToStl, baseMesh, decodeFloats, encodeFloats, importedMesh, meshToSculpt, scaleSculpt, sculptTriangles, vertexCount, type BrushKind, type BrushSettings, type SculptBase } from "./sculpt";
 import { openImportFiles, openTextFile, saveFile } from "./storage";
 import { formatLength, parseLength } from "./units";
@@ -111,7 +113,7 @@ const UNDO_LIMIT = { steps: 200, bytes: 120_000_000 };
 let undoBytes = 0;
 
 function commit(mutate: (features: Feature[]) => void) {
-  const snapshot = JSON.stringify(doc);
+  const snapshot = undoSnapshot();
   undoStack.push(snapshot);
   undoBytes += snapshot.length;
   while (undoStack.length > UNDO_LIMIT.steps || (undoBytes > UNDO_LIMIT.bytes && undoStack.length > 1)) undoBytes -= undoStack.shift()!.length;
@@ -154,11 +156,22 @@ function activeFeatures(features: Feature[]): Feature[] {
 
 const isActive = (id: string) => activeFeatures(doc.features).some((f) => f.id === id);
 
+/** The model for the undo history: everything but the imported fonts' files (they'd fill it up fast). */
+const undoSnapshot = () => JSON.stringify({ ...doc, fonts: undefined });
+
+function mergeFonts(a: ImportedFont[] | undefined, b: ImportedFont[] | undefined): ImportedFont[] | undefined {
+  const all = [...(a ?? []), ...(b ?? [])].filter((f, i, list) => list.findIndex((g) => g.id === f.id) === i);
+  return all.length ? all : undefined;
+}
+
 function restore(from: string[], to: string[]) {
   const snapshot = from.pop();
   if (!snapshot) return;
-  to.push(JSON.stringify(doc));
+  to.push(undoSnapshot());
+  // Undo steps don't carry the imported fonts (they're only ever added): keep the ones there are.
+  const fonts = doc.fonts;
   doc = JSON.parse(snapshot);
+  doc.fonts = mergeFonts(doc.fonts, fonts);
   selectedIds = selectedIds.filter((id) => findFeature(id));
   if (selectedId && !findFeature(selectedId)) selectedId = selectedIds[0] ?? null;
   if (historyMarker !== null && historyMarker > doc.features.length) historyMarker = doc.features.length;
@@ -275,6 +288,7 @@ async function buildNow() {
   const features = structuredClone(activeFeatures(doc.features));
   try {
     await kernel.ready;
+    await syncFonts();
     const combined = showCombined && !editingSketchId && !edgePick && !sculptingId;
     // Holes are shown cut, except while picking edges (the picked edges are the object's own).
     const { meshes, errors, adjusted } = await kernel.build(edgePick ? featuresForPicking(features) : features, combined, !edgePick);
@@ -1108,6 +1122,79 @@ function startConnect(id: string, type: "hinge" | "orbit" | "slider") {
 
 // ---- Text and screw holes -----------------------------------------------------
 
+// ---- Fonts ------------------------------------------------------------------------------
+
+/** Imported fonts the kernel has been given (it keeps them until the page reloads). */
+const sentFonts = new Set<string>();
+const base64ToBuffer = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)).buffer;
+function bufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let text = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(text);
+}
+
+/** Give the kernel the model's imported fonts it doesn't have yet. */
+async function syncFonts() {
+  for (const font of doc.fonts ?? []) {
+    if (sentFonts.has(font.id)) continue;
+    sentFonts.add(font.id);
+    await kernel.loadFont(font.id, base64ToBuffer(font.data)).catch(() => sentFonts.delete(font.id));
+  }
+}
+
+/** The model as saved: imported fonts that no text uses are left out. */
+function savedDocument(): CadDocument {
+  const used = new Set(doc.features.flatMap((f) => (f.kind === "text" ? [f.params.font] : [])));
+  const fonts = (doc.fonts ?? []).filter((x) => used.has(CUSTOM_FONT + x.id));
+  return { ...doc, fonts: fonts.length ? fonts : undefined };
+}
+
+/** Pick a font file and use it for this text. It's kept in the model, so the model opens anywhere. */
+async function importFont(textId: string) {
+  const [file] = await openImportFiles($("#import-input"), ["ttf", "otf", "woff"], "Font files");
+  if (!file) return;
+  if (file.data.byteLength > 8e6) return setStatus("That font file is over 8 MB; pick a smaller one.", true);
+  const data = bufferToBase64(file.data);
+  let font = doc.fonts?.find((x) => x.data === data);
+  try {
+    if (!font) {
+      const id = newId();
+      const name = await kernel.loadFont(id, file.data);
+      sentFonts.add(id);
+      font = { id, name, data };
+    }
+  } catch (err) {
+    return setStatus(`Couldn't use ${file.name}: ${(err as Error).message}`, true);
+  }
+  const chosen = font;
+  commit((features) => {
+    doc.fonts = mergeFonts(doc.fonts, [chosen]);
+    const t = features.find((x) => x.id === textId);
+    if (t?.kind === "text") t.params.font = CUSTOM_FONT + chosen.id;
+  });
+  setNotice(`Using ${chosen.name}. It's saved inside the model, so the model opens with it anywhere.`);
+}
+
+/** CSS families for previews, loaded once each. */
+const previewFaces = new Map<string, string>();
+function previewFamily(font: string, bold: boolean): string {
+  const family = fontFamily(font, bold);
+  let css = previewFaces.get(family);
+  if (!css) {
+    css = `gz-${family.replace(/[^a-z0-9-]/gi, "_")}`;
+    const custom = isCustomFont(font) ? doc.fonts?.find((x) => CUSTOM_FONT + x.id === font) : undefined;
+    const source = custom ? base64ToBuffer(custom.data) : `url(${builtInFontUrl(family)})`;
+    if (custom || builtInFontUrl(family)) {
+      const face = new FontFace(css, source);
+      document.fonts.add(face);
+      void face.load().catch(() => {});
+    }
+    previewFaces.set(family, css);
+  }
+  return `"${css}", sans-serif`;
+}
+
 function textFields(f: Extract<Feature, { kind: "text" }>, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
   const p = f.params;
   const set = (mutate: (p: typeof f.params) => void) => update((t) => t.kind === "text" && mutate(t.params));
@@ -1130,21 +1217,41 @@ function textFields(f: Extract<Feature, { kind: "text" }>, update: (mutate: (f: 
   const check = bold.querySelector("input")!;
   check.checked = p.bold;
   check.onchange = () => set((t) => (t.bold = check.checked));
+  // Imported fonts, and some built-in ones, come in one weight only.
+  if (isCustomFont(p.font) || !builtInFont(p.font)?.bold) {
+    check.disabled = true;
+    bold.title = "This font has no bold version";
+  }
+
+  const fontSelect = document.createElement("select");
+  for (const font of BUILT_IN_FONTS) fontSelect.add(new Option(`${font.name} (${font.style})`, font.key));
+  const imported = doc.fonts ?? [];
+  if (imported.length) {
+    const group = document.createElement("optgroup");
+    group.label = "Imported";
+    for (const font of imported) group.append(new Option(font.name, CUSTOM_FONT + font.id));
+    fontSelect.add(group);
+  }
+  if (![...fontSelect.options].some((o) => o.value === p.font)) fontSelect.add(new Option("(missing font)", p.font));
+  fontSelect.add(new Option("Import a font file…", "import"));
+  fontSelect.value = p.font;
+  fontSelect.onchange = () => {
+    if (fontSelect.value === "import") {
+      fontSelect.value = p.font;
+      void importFont(f.id);
+    } else set((t) => (t.font = fontSelect.value));
+  };
+  // The text in its font (the first line).
+  const preview = document.createElement("div");
+  preview.className = "font-preview";
+  preview.textContent = p.text.split("\n")[0].slice(0, 40) || "Aa Bb Cc 123";
+  preview.style.fontFamily = previewFamily(p.font, p.bold);
+  preview.style.fontWeight = p.bold && !check.disabled ? "700" : "400";
   return [
     box,
     hint("Shift+Enter starts a new line."),
-    labeled(
-      "Font",
-      segmented(
-        [
-          { value: "sans", label: "Sans" },
-          { value: "serif", label: "Serif" },
-          { value: "mono", label: "Mono" },
-        ],
-        p.font,
-        (v) => set((t) => (t.font = v)),
-      ),
-    ),
+    labeled("Font", fontSelect),
+    preview,
     bold,
     labeled(
       "Align",
@@ -2913,7 +3020,7 @@ async function exportModel(format: "stl" | "step") {
 }
 
 async function saveDocument() {
-  const blob = new Blob([JSON.stringify(doc, null, 2)], { type: "application/json" });
+  const blob = new Blob([JSON.stringify(savedDocument(), null, 2)], { type: "application/json" });
   await saveFile(blob, "model.gizmocad", "GizmoCAD model", "gizmocad");
 }
 
@@ -3075,7 +3182,7 @@ const mcp = new McpBridge(
       historyMarker = null;
       refresh();
     },
-    document: () => doc,
+    document: () => savedDocument(),
     importFiles,
     export: (format) => (format === "3mf" ? file3mf() : modelFile(format)),
     async screenshot(opts) {
@@ -3316,7 +3423,7 @@ function scheduleAutosave() {
   if (!autosaveReady) return; // Not before the last session has been checked, or it'd be overwritten.
   clearTimeout(autosaveTimer);
   // Saved a little after editing stops, when the browser is idle, so it never gets in the way.
-  const save = () => autosave(JSON.stringify(doc)).catch(() => {});
+  const save = () => autosave(JSON.stringify(savedDocument())).catch(() => {});
   autosaveTimer = window.setTimeout(() => ("requestIdleCallback" in window ? requestIdleCallback(save, { timeout: 5000 }) : save()), 2000);
 }
 
@@ -3357,6 +3464,8 @@ interface ImportBatch {
   note: string;
   /** What can be done with it (said once per kind). */
   tail: string;
+  /** Fonts its texts use (from another GizmoCAD model). */
+  fonts?: ImportedFont[];
 }
 
 async function importFile() {
@@ -3391,7 +3500,10 @@ async function importFiles(files: PickedFile[]): Promise<{ ids: string[]; note: 
     }
     const made = batches.flatMap((b) => b.features);
     stopSketchEdit();
-    commit((features) => insertFeatures(features, made));
+    commit((features) => {
+      insertFeatures(features, made);
+      doc.fonts = mergeFonts(doc.fonts, batches.flatMap((b) => b.fonts ?? []));
+    });
     selectedIds = topLevel(made).map((f) => f.id);
     selectedId = selectedIds[0];
     renderPanels();
@@ -3570,6 +3682,7 @@ async function modelBatch(title: string, file: PickedFile): Promise<ImportBatch>
   }
   if (!isCadDocument(parsed)) throw new Error("it isn't a GizmoCAD model.");
   const incoming = normalizeDocument(parsed).features;
+  const fonts = parsed.fonts;
   if (!incoming.length) throw new Error("it's empty.");
   // New ids, so the same model can come in more than once.
   const ids = new Map(incoming.map((f) => [f.id, newId()]));
@@ -3598,7 +3711,7 @@ async function modelBatch(title: string, file: PickedFile): Promise<ImportBatch>
   t.position = { x: round4(t.position.x - (box.min.x + box.max.x) / 2), y: round4(t.position.y - (box.min.y + box.max.y) / 2), z: round4(t.position.z - box.min.z) };
   const [hx, hy] = [(box.max.x - box.min.x) / 2, (box.max.y - box.min.y) / 2];
   const n = incoming.length;
-  return { features, box: [-hx, hx, -hy, hy], note: `${file.name}: ${n} object${n === 1 ? "" : "s"}${top[0].kind === "group" && n > 1 ? " (grouped)" : ""}`, tail: "" };
+  return { features, fonts, box: [-hx, hx, -hy, hy], note: `${file.name}: ${n} object${n === 1 ? "" : "s"}${top[0].kind === "group" && n > 1 ? " (grouped)" : ""}`, tail: "" };
 }
 
 /** The model as a 3MF file: each part its own object, with its colour. */

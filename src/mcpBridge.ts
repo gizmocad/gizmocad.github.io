@@ -3,6 +3,7 @@
 // passes on the assistant's tool calls; they're carried out here as normal,
 // undoable edits and answered with what happened.
 
+import { BUILT_IN_FONTS } from "./fonts";
 import {
   FINISHABLE,
   createFeature,
@@ -268,7 +269,7 @@ const VIEWS = ["iso", "front", "back", "left", "right", "top", "bottom", "curren
 /** Allowed values for parameters that are a choice. */
 const CHOICES: Record<string, (string | number)[]> = {
   "hedron.faces": [4, 6, 8, 12, 20],
-  "text.font": ["sans", "serif", "mono"],
+  "text.font": BUILT_IN_FONTS.map((f) => f.key),
   "text.align": ["left", "center", "right"],
   "screw.size": ["M2", "M2.5", "M3", "M4", "M5", "M6", "M8", "M10"],
   "screw.fit": ["tap", "close", "normal", "loose"],

@@ -127,7 +127,8 @@ export interface StarParams {
 /** Raised (or, as a hole, engraved) lettering. `size` is the height of capital letters. */
 export interface TextParams {
   text: string;
-  font: "sans" | "serif" | "mono";
+  /** A built-in font's key (see fonts.ts), or "custom:<id>" for one imported into the model. */
+  font: string;
   bold: boolean;
   size: number;
   /** How far the letters stand up (Z). */
@@ -438,10 +439,19 @@ export type SculptFeature = Extract<Feature, { kind: "sculpt" }>;
 
 export type SketchFeature = Extract<Feature, { kind: "sketch" }>;
 
+/** A font file imported into the model, so its texts build anywhere the model is opened. */
+export interface ImportedFont {
+  id: string;
+  name: string;
+  /** The font file, base64. */
+  data: string;
+}
+
 export interface CadDocument {
   format: "gizmocad";
   version: 1;
   features: Feature[];
+  fonts?: ImportedFont[];
 }
 
 export function emptyDocument(): CadDocument {

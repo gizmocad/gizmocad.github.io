@@ -348,7 +348,7 @@ gear      teeth, module (tooth size; outside Ø = module × (teeth + 2)), thickn
 spring    style "coil"|"flat", diameter (coil: outside Ø; flat: width X), wire (thickness), pitch, height (coil: Z; flat: length Y),
           section "round"|"square", ends (bool: flat ground ends / end plates), depth (flat: thickness Z), bends "round"|"sharp".
 star      points, radius (outer), inner (inner radius), height.               default 5, 15, 7, 5
-text      text (string, \\n for new lines), font "sans"|"serif"|"mono", bold (bool), size (capital height), height (Z),
+text      text (string, \\n for new lines), font "sans"|"serif"|"mono"|"rounded"|"condensed"|"poster"|"stencil"|"techno"|"cartoon"|"comic"|"script"|"handwriting"|"blackletter" (fonts the user imported show as "custom:<id>"), bold (bool), size (capital height), height (Z),
           spacing (extra mm between letters), align "left"|"center"|"right". As a hole it engraves.   default "Text", sans, bold, 10, 2, 0, center
 screw     (a hole for a metric screw, going DOWN from its position into what it sits on) size "M2"|"M2.5"|"M3"|"M4"|"M5"|"M6"|"M8"|"M10",
           fit "tap"|"close"|"normal"|"loose", head "none"|"counterbore"|"countersink", depth. Put it on a top face, e.g. z = the part's top.

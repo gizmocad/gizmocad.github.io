@@ -36,7 +36,9 @@ export type KernelRequest =
   | { type: "parts"; requestId: number; features: Feature[] }
   /** `preview`: the normal display mesh (cached, so building the same shape next is instant). */
   | { type: "meshOf"; requestId: number; features: Feature[]; id: string; preview?: boolean }
-  | { type: "importSolids"; requestId: number; files: ImportSource[] };
+  | { type: "importSolids"; requestId: number; files: ImportSource[] }
+  /** A font imported into the model, for texts whose font is "custom:<id>". */
+  | { type: "font"; requestId: number; id: string; data: ArrayBuffer };
 
 export type KernelResponse =
   | { type: "ready" }
@@ -45,6 +47,7 @@ export type KernelResponse =
   | { type: "mesh"; requestId: number; mesh: MeshData | null }
   | { type: "parts"; requestId: number; parts: MeshData[] }
   | { type: "importedSolids"; requestId: number; parts: ImportedSolid[] }
+  | { type: "fontLoaded"; requestId: number; name: string }
   | { type: "error"; requestId: number; message: string };
 
 export interface BuildResult {
@@ -77,6 +80,7 @@ export class Kernel {
         else if (msg.type === "built") p.resolve({ meshes: msg.meshes, errors: msg.errors, adjusted: msg.adjusted } as never);
         else if (msg.type === "mesh") p.resolve(msg.mesh as never);
         else if (msg.type === "parts" || msg.type === "importedSolids") p.resolve(msg.parts as never);
+        else if (msg.type === "fontLoaded") p.resolve(msg.name as never);
         else p.resolve(msg.blob as never);
       };
     });
@@ -112,6 +116,11 @@ export class Kernel {
   /** Solids from STEP/BREP files, split into one per solid. */
   importSolids(files: ImportSource[]): Promise<ImportedSolid[]> {
     return this.request({ type: "importSolids", files });
+  }
+
+  /** Give the kernel an imported font; resolves to the font's name (rejects if it can't be read). */
+  loadFont(id: string, data: ArrayBuffer): Promise<string> {
+    return this.request({ type: "font", id, data });
   }
 
   export(features: Feature[], format: "stl" | "step"): Promise<Blob> {
