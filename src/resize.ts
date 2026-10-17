@@ -138,11 +138,18 @@ function scaleOwn(f: Feature, s: Vec3, snap: number) {
       f.params.radius = snapRadius(f.params.radius * dominantFactor(s), snap);
       break;
     case "imported": {
-      // Also only as a whole; the length along the axis that changed most lands on the grid.
-      const k = dominantFactor(s);
-      const axis = ([s.x, s.y, s.z].findIndex((v) => v === k) + 3) % 3;
-      const len = f.params.size[axis] * f.params.scale;
-      f.params.scale = len > 1e-9 ? Math.round((snapLength(len * k, snap) / f.params.size[axis]) * 1e6) / 1e6 : f.params.scale * k;
+      const { size, scale } = f.params;
+      const f6 = (v: number) => Math.round(v * 1e6) / 1e6;
+      const factors = [s.x, s.y, s.z];
+      if (Math.abs(s.x - s.y) < 1e-9 && Math.abs(s.y - s.z) < 1e-9) {
+        // Kept in proportion: one factor for all (snapping each side separately would stretch it unevenly).
+        const axis = [0, 1, 2].reduce((a, b) => (size[b] * scale[b] > size[a] * scale[a] ? b : a));
+        const len = size[axis] * scale[axis];
+        const k = len > 1e-9 ? snapLength(len * s.x, snap) / len : s.x;
+        f.params.scale = scale.map((v) => f6(v * k)) as [number, number, number];
+      } else {
+        f.params.scale = scale.map((v, i) => (factors[i] === 1 || size[i] < 1e-9 ? v : f6(snapLength(size[i] * v * factors[i], snap) / size[i]))) as [number, number, number];
+      }
       break;
     }
     case "thread":
@@ -367,7 +374,7 @@ function baseExtents(f: Feature): [Vec3, Vec3] | null {
       return [{ x: Math.min(...xs), y: Math.min(...ys), z: 0 }, { x: Math.max(...xs), y: Math.max(...ys), z: f.params.height }];
     }
     case "imported": {
-      const [x, y, z] = f.params.size.map((v) => (v * f.params.scale) / 2);
+      const [x, y, z] = f.params.size.map((v, i) => (v * f.params.scale[i]) / 2);
       return [{ x: -x, y: -y, z: 0 }, { x, y, z: 2 * z }];
     }
     case "hedron": {

@@ -49,7 +49,7 @@ import { parseDxf, parseFcstd, parseGltf, parseObj, parseOff, parsePly, stem, ty
 import { SketchEditor, type MenuItem, type SketchTool } from "./sketcher";
 import { bounds as sketchBounds, gearOuterRadius, removePoint } from "./sketchGeometry";
 import { HEDRON_FACES, HEDRON_NAMES, type HedronFaces } from "./hedron";
-import { addDetail, appendToStl, baseMesh, importedMesh, meshToSculpt, scaleSculpt, sculptTriangles, vertexCount, type BrushKind, type BrushSettings, type SculptBase } from "./sculpt";
+import { addDetail, appendToStl, baseMesh, decodeFloats, encodeFloats, importedMesh, meshToSculpt, scaleSculpt, sculptTriangles, vertexCount, type BrushKind, type BrushSettings, type SculptBase } from "./sculpt";
 import { openImportFiles, openTextFile, saveFile } from "./storage";
 import { formatLength, parseLength } from "./units";
 import { onThemeChange, setThemeSetting, themeSetting, type ThemeSetting } from "./theme";
@@ -1189,18 +1189,59 @@ function tiltSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
   return items;
 }
 
-/** An imported solid's size: it only resizes evenly, so each field sets the scale. */
+const SIZE_LABELS = ["Width (X)", "Depth (Y)", "Height (Z)"];
+
+/** An imported solid's size along each axis, and its overall scale. */
 function importedFields(f: Extract<Feature, { kind: "imported" }>, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
-  const setScale = (k: number) => update((t) => t.kind === "imported" && (t.params.scale = Math.round(k * 1e6) / 1e6));
+  const f6 = (v: number) => Math.round(v * 1e6) / 1e6;
+  const setScale = (scale: number[]) => update((t) => t.kind === "imported" && (t.params.scale = scale.map(f6) as [number, number, number]));
   const { size, scale } = f.params;
-  const axes = ["Width (X)", "Depth (Y)", "Height (Z)"].map((label, i) =>
-    lengthField(label, Math.round(size[i] * scale * 1e4) / 1e4, (v) => size[i] > 1e-9 && setScale(v / size[i]), { min: 0 }),
+  const even = Math.abs(scale[0] - scale[1]) < 1e-9 && Math.abs(scale[1] - scale[2]) < 1e-9;
+  const items: HTMLElement[] = SIZE_LABELS.map((label, i) =>
+    lengthField(label, Math.round(size[i] * scale[i] * 1e4) / 1e4, (v) => size[i] > 1e-9 && setScale(scale.map((k, j) => (j === i ? v / size[i] : k))), { min: 0 }),
   );
-  return [
-    ...axes,
-    lengthField("Scale", Math.round(scale * 1e6) / 1e4, (v) => setScale(v / 100), { min: 0, unit: "%" }),
-    hint("An exact solid from another CAD program: it can be a hole, take fillets and chamfers, and be split. It resizes evenly (all sides together)."),
-  ];
+  if (even) {
+    items.push(
+      lengthField("Scale", Math.round(scale[0] * 1e6) / 1e4, (v) => setScale([v / 100, v / 100, v / 100]), { min: 0, unit: "%" }),
+      hint("An exact solid from another CAD program: it can be a hole, take fillets and chamfers, and be split. Sizes that change in proportion keep it exact."),
+    );
+  } else {
+    // The most it was resized along any axis, for all of them.
+    const k = scale.reduce((a, b) => (Math.abs(Math.log(b)) > Math.abs(Math.log(a)) ? b : a));
+    items.push(
+      hint("Stretched unevenly: for holes, fillets and exports its curved faces become small flat facets (an exact solid can only be scaled evenly). Even it out to get the exact shape back."),
+      button(`Even out (${fmt(k * 100)}% all round)`, () => setScale([k, k, k]), "wide"),
+    );
+  }
+  return items;
+}
+
+/** A mesh's size along each axis: each one stretches it along that axis. */
+function meshSizeFields(f: SculptFeature, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
+  const pos = decodeFloats(f.params.positions);
+  const lo = [Infinity, Infinity, Infinity];
+  const hi = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < pos.length; i += 3)
+    for (let k = 0; k < 3; k++) {
+      lo[k] = Math.min(lo[k], pos[i + k]);
+      hi[k] = Math.max(hi[k], pos[i + k]);
+    }
+  return SIZE_LABELS.map((label, i) => {
+    const now = hi[i] - lo[i];
+    return lengthField(label, Math.round(now * 1e4) / 1e4, (v) => {
+      if (!(now > 1e-9)) return;
+      // Scaled about its own origin (the middle of its base), like the resize handles.
+      const factor = v / now;
+      update((t) => {
+        if (t.kind !== "sculpt") return;
+        const p = decodeFloats(t.params.positions);
+        for (let k = i; k < p.length; k += 3) p[k] *= factor;
+        t.params.positions = encodeFloats(p);
+        const extent = [0, 1, 2].map((a) => (a === i ? now * factor : hi[a] - lo[a]));
+        t.params.size = Math.round(Math.max(...extent) * 100) / 100;
+      });
+    }, { min: 0 });
+  });
 }
 
 function hedronFields(f: Extract<Feature, { kind: "hedron" }>, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
@@ -2060,7 +2101,7 @@ function renderPropertiesPanel() {
   }
 
   if (f.kind === "sculpt") {
-    items.push(button("✋ Sculpt", () => startSculpt(f.id), "primary wide"), section("Clay"), ...sculptSettings(f, update));
+    items.push(button("✋ Sculpt", () => startSculpt(f.id), "primary wide"), section("Size"), ...meshSizeFields(f, update), section("Clay"), ...sculptSettings(f, update));
   } else if (f.kind === "sketch") {
     items.push(section("Sketch"), ...sketchSettings(f, update), button("✎ Edit sketch", () => startSketchEdit(f.id), "primary wide"));
   } else if (f.kind === "spring") {
@@ -3487,7 +3528,7 @@ function solidBatch(title: string, fileName: string, parts: ImportedSolid[]): Im
     if (p.kind === "mesh") return meshPiece(p, p.name);
     const f = createFeature("imported", doc.features) as Extract<Feature, { kind: "imported" }>;
     f.name = p.name;
-    f.params = { ref: newId(), brep: p.brep, size: p.size, scale: 1 };
+    f.params = { ref: newId(), brep: p.brep, size: p.size, scale: [1, 1, 1] };
     f.position = { x: p.anchor[0], y: p.anchor[1], z: p.anchor[2] };
     if (p.color) f.color = p.color;
     const [w, d, h] = p.size;

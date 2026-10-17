@@ -795,7 +795,8 @@ function buildBase(f: Feature, taper = 0): Shape3D | null {
 /** Imported geometry, read once per `ref` (reading a big BREP takes a while). */
 const importedCache = new Map<string, Shape3D>();
 
-function importedShape(p: ImportedParams): Shape3D {
+/** The imported geometry as it came in (cached; callers get a copy, since transforms use up their shape). */
+function importedBase(p: ImportedParams): Shape3D {
   let shape = importedCache.get(p.ref);
   if (!shape) {
     if (!p.brep) throw new Error("This imported solid has no geometry.");
@@ -803,9 +804,98 @@ function importedShape(p: ImportedParams): Shape3D {
     importedCache.set(p.ref, shape);
     if (importedCache.size > 64) importedCache.delete(importedCache.keys().next().value!);
   }
-  if (!(p.scale > 0)) throw new Error("The scale needs to be above 0.");
-  // Transforms use up the shape they start from, so work on a copy of the cached one.
-  return p.scale === 1 ? shape.clone() : shape.clone().scale(p.scale, [0, 0, 0]);
+  return shape.clone();
+}
+
+const isEven = ([x, y, z]: number[]) => Math.abs(x - y) < 1e-9 && Math.abs(y - z) < 1e-9;
+
+/** Stretched solids take a while to make, so they're kept too. */
+const stretchedCache = new Map<string, Shape3D>();
+
+function importedShape(p: ImportedParams): Shape3D {
+  if (!p.scale.every((v) => v > 0)) throw new Error("The sizes need to be above 0.");
+  if (isEven(p.scale)) return p.scale[0] === 1 ? importedBase(p) : importedBase(p).scale(p.scale[0], [0, 0, 0]);
+  const key = `${p.ref}|${p.scale.join(",")}`;
+  let shape = stretchedCache.get(key);
+  if (!shape) {
+    shape = stretchSolid(importedBase(p), p.scale as [number, number, number]);
+    stretchedCache.set(key, shape);
+    if (stretchedCache.size > 16) stretchedCache.delete(stretchedCache.keys().next().value!);
+  }
+  return shape.clone();
+}
+
+/**
+ * An exact solid stretched differently along X, Y and Z. OpenCascade here can
+ * only scale evenly, so it's rebuilt from a fine triangulation: flat faces stay
+ * flat (triangles on one plane are merged back into one face), curves become
+ * small facets.
+ */
+function stretchSolid(shape: Shape3D, [sx, sy, sz]: [number, number, number]): Shape3D {
+  const [lo, hi] = shape.boundingBox.bounds;
+  const diag = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+  const m = shape.mesh({ tolerance: Math.max(0.005, diag * 2e-4), angularTolerance: 0.1 });
+  shape.delete();
+  // A binary STL of the stretched triangles, read back by OpenCascade (which joins their corners into a shell).
+  const n = m.triangles.length / 3;
+  const stl = new DataView(new ArrayBuffer(84 + n * 50));
+  stl.setUint32(80, n, true);
+  for (let t = 0; t < n; t++)
+    for (let c = 0; c < 3; c++) {
+      const v = m.triangles[t * 3 + c] * 3;
+      const at = 84 + t * 50 + 12 + c * 12;
+      stl.setFloat32(at, m.vertices[v] * sx, true);
+      stl.setFloat32(at + 4, m.vertices[v + 1] * sy, true);
+      stl.setFloat32(at + 8, m.vertices[v + 2] * sz, true);
+    }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const oc = getOC() as any;
+  const file = `/stretch-${Date.now()}-${Math.random().toString(36).slice(2)}.stl`;
+  oc.FS.writeFile(file, new Uint8Array(stl.buffer));
+  const reader = new oc.StlAPI_Reader();
+  const shell = new oc.TopoDS_Shell();
+  try {
+    if (!reader.Read(shell, file)) throw new Error("couldn't stretch this solid.");
+    // The reader gives loose triangles: sew them into a closed shell, merge each flat area back into one face.
+    const sew = new oc.BRepBuilderAPI_Sewing(Math.max(1e-5, diag * 1e-6), true, true, true, false);
+    sew.Add(shell);
+    const progress = new oc.Message_ProgressRange();
+    sew.Perform(progress);
+    const sewed = sew.SewedShape();
+    const unify = new oc.ShapeUpgrade_UnifySameDomain(sewed, true, true, false);
+    unify.Build();
+    const unified = unify.Shape();
+    const make = new oc.BRepBuilderAPI_MakeSolid();
+    const shells = new oc.TopExp_Explorer(unified, oc.TopAbs_ShapeEnum.TopAbs_SHELL, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
+    for (; shells.More(); shells.Next()) make.Add(oc.TopoDS.Shell(shells.Current()));
+    const solid = cast(make.Solid()) as Shape3D;
+    for (const o of [sew, progress, sewed, unify, unified, shells, make]) o.delete();
+    return solid;
+  } finally {
+    oc.FS.unlink(file);
+    reader.delete();
+    shell.delete();
+  }
+}
+
+/** Stretched with nothing else done to it: shown as its exact shape's mesh, stretched (smooth, with its real edges). */
+function plainStretch(f: Feature): f is Extract<Feature, { kind: "imported" }> {
+  return f.kind === "imported" && !isEven(f.params.scale) && !f.edgeOps.length && !f.clips?.length && !f.shell;
+}
+
+function stretchMesh(m: MeshData, [sx, sy, sz]: number[]): MeshData {
+  const s = [sx, sy, sz];
+  const vertices = m.vertices.map((v, i) => v * s[i % 3]);
+  const edges = m.edges.map((v, i) => v * s[i % 3]);
+  // Normals stretch the other way (inverse transpose), then back to unit length.
+  const normals = m.normals.map((v, i) => v / s[i % 3]);
+  for (let i = 0; i < normals.length; i += 3) {
+    const l = Math.hypot(normals[i], normals[i + 1], normals[i + 2]) || 1;
+    normals[i] /= l;
+    normals[i + 1] /= l;
+    normals[i + 2] /= l;
+  }
+  return { ...m, vertices, normals, edges };
 }
 
 /**
@@ -956,8 +1046,11 @@ function ownMesh(f: Feature): MeshData | null {
     const outer = adjusted;
     adjusted = {};
     try {
-      const shape = buildOwn(f);
-      meshCache.set(key, { mesh: shape ? toMesh("", shape, f.kind) : null, adjusted });
+      if (plainStretch(f)) meshCache.set(key, { mesh: stretchMesh(toMesh("", importedBase(f.params)), f.params.scale), adjusted });
+      else {
+        const shape = buildOwn(f);
+        meshCache.set(key, { mesh: shape ? toMesh("", shape, f.kind) : null, adjusted });
+      }
     } finally {
       adjusted = Object.assign(outer, adjusted);
     }

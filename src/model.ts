@@ -235,8 +235,12 @@ export interface ImportedParams {
   brep: string;
   /** Its size at scale 1 (X, Y, Z). */
   size: [number, number, number];
-  /** Resized evenly (exact solids can't be stretched along one axis). */
-  scale: number;
+  /**
+   * Resized along X, Y and Z. Even: exact. Uneven: rebuilt from a fine
+   * triangulation (exact solids can't be stretched along one axis), with the
+   * exact shape kept so evening it out again brings it back.
+   */
+  scale: [number, number, number];
 }
 
 export interface SphereParams {
@@ -492,7 +496,7 @@ function defaultParams(kind: ShapeKind): Feature["params"] {
     case "sculpt":
       return defaultSculpt();
     case "imported":
-      return { ref: "", brep: "", size: [0, 0, 0], scale: 1 };
+      return { ref: "", brep: "", size: [0, 0, 0], scale: [1, 1, 1] };
   }
 }
 
@@ -867,6 +871,10 @@ export function normalizeDocument(doc: CadDocument): CadDocument {
     f.rotation ??= { x: 0, y: 0, z: legacy.rotationZ ?? 0 };
     f.edgeOps ??= [];
     if (f.kind === "cylinder") f.params.radiusY ??= f.params.radius;
+    if (f.kind === "imported" && typeof f.params.scale === "number") {
+      const k = f.params.scale as number; // Saved before sizes could differ per axis.
+      f.params.scale = [k, k, k];
+    }
     if (f.kind === "spring") {
       // Springs from before the style options: round-wire coils with open ends.
       f.params.style ??= "coil";

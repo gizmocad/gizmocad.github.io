@@ -311,8 +311,8 @@ export class Viewport {
           obj.scale.setScalar(k);
         }
         const shape = this.features.get(obj.userData.id);
-        if (shape?.kind === "hedron" || shape?.kind === "imported") {
-          // A hedron or an imported solid only grows or shrinks as a whole.
+        if (shape?.kind === "hedron") {
+          // A hedron only grows or shrinks as a whole.
           obj.scale.setScalar([obj.scale.x, obj.scale.y, obj.scale.z].reduce((a, b) => (Math.abs(Math.log(b)) > Math.abs(Math.log(a)) ? b : a), 1));
         } else if (shape && staysRound(shape)) {
           // Cones, tubes, rings and prisms stay round: X and Y follow whichever is being dragged.

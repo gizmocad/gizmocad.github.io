@@ -354,7 +354,7 @@ screw     (a hole for a metric screw, going DOWN from its position into what it 
           fit "tap"|"close"|"normal"|"loose", head "none"|"counterbore"|"countersink", depth. Put it on a top face, e.g. z = the part's top.
 group     no params: a container. Its solids merge into one part; holes inside a group cut only that group.
 plane     size: a reference plane (display only); sketches inside it are drawn on it.
-imported  (made by import_files from STEP/FreeCAD/BREP) an exact solid; its only param is scale (1 = as imported; resizes evenly). Can be a hole and take fillets.
+imported  (made by import_files from STEP/FreeCAD/BREP) an exact solid; its only param is scale: a number (1 = as imported) or [x, y, z]. Uneven scales make curves faceted. Can be a hole and take fillets.
 sketch    a 2D drawing made 3D:
           plane "XY"|"XZ"|"YZ" (U,V axes: XY→U=X,V=Y; XZ→U=X,V=Z; YZ→U=Y,V=Z), offset (shift along the plane's normal),
           operation "extrude"|"revolve"|"flat" (flat = drawing only), depth (extrude distance), direction "normal"|"reversed"|"both",

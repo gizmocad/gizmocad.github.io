@@ -377,8 +377,11 @@ function applyParams(f: Feature, given: unknown) {
   if (f.kind === "imported") {
     const keys = Object.keys(given as Args);
     const scale = (given as Args).scale;
-    if (keys.some((k) => k !== "scale") || typeof scale !== "number" || !(scale > 0)) throw new Error("An imported solid only has a scale (a number above 0; 1 = as imported). It resizes evenly.");
-    f.params.scale = scale;
+    const list = typeof scale === "number" ? [scale, scale, scale] : scale;
+    if (keys.some((k) => k !== "scale") || !Array.isArray(list) || list.length !== 3 || !list.every((v) => typeof v === "number" && v > 0)) {
+      throw new Error("An imported solid only has a scale: a number above 0 for all sides (1 = as imported), or [x, y, z]. Uneven scales turn its curves into small flat facets.");
+    }
+    f.params.scale = list as [number, number, number];
     return;
   }
   const params = f.params as unknown as Args;
@@ -493,7 +496,7 @@ function describeModel(host: BridgeHost, sketchGeometry: boolean) {
   const objects = host.features().map((f) => {
     const o: Args = { id: f.id, name: f.name, kind: f.kind, mode: f.mode, parent: f.parentId, position: f.position, rotation: f.rotation };
     if (f.kind === "sculpt") o.params = "(a sculpted mesh)";
-    else if (f.kind === "imported") o.params = { scale: f.params.scale, size: f.params.size.map((v) => r3(v * f.params.scale)), note: "an exact imported solid; only scale can change" };
+    else if (f.kind === "imported") o.params = { scale: f.params.scale, size: f.params.size.map((v, i) => r3(v * f.params.scale[i])), note: "an imported solid; only scale can change (a number, or [x, y, z])" };
     else if (f.kind === "sketch" && !sketchGeometry) {
       const { entities, constraints, ...rest } = f.params;
       o.params = { ...rest, entities: `${entities.length} shape(s): ${[...new Set(entities.map((e) => e.type))].join(", ") || "none"} (include_sketch_geometry for details)` };
