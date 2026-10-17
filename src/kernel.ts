@@ -28,12 +28,12 @@ export interface ImportSource {
 
 /** One solid from an imported file (its own origin moved to the middle of its base), or its loose surfaces as a mesh. */
 export type ImportedSolid =
-  | { kind: "solid"; name: string; color?: string; brep: string; size: [number, number, number]; anchor: [number, number, number]; faceted?: boolean }
+  | { kind: "solid"; name: string; color?: string; brep: string; size: [number, number, number]; anchor: [number, number, number]; faceted?: boolean; mesh?: { vertices: Float32Array; triangles: Uint32Array } }
   | { kind: "mesh"; name: string; color?: string; vertices: Float32Array; triangles: Uint32Array };
 
 export type KernelRequest =
   /** `cuts`: show each object with the holes that reach it cut away. */
-  | { type: "build"; requestId: number; features: Feature[]; combined: boolean; cuts?: boolean }
+  | { type: "build"; requestId: number; features: Feature[]; combined: boolean; cuts?: boolean; debug?: boolean }
   | { type: "export"; requestId: number; features: Feature[]; format: "stl" | "step" }
   /** One finished mesh per top-level object, in world coordinates (for 3MF). */
   | { type: "parts"; requestId: number; features: Feature[] }
@@ -47,7 +47,8 @@ export type KernelRequest =
 
 export type KernelResponse =
   | { type: "ready" }
-  | { type: "built"; requestId: number; meshes: MeshData[]; errors: Record<string, string>; adjusted: Record<string, number> }
+  /** `facets`: triangles of faceted solids from older files (saved without them), by ref, for the app to keep. */
+  | { type: "built"; requestId: number; meshes: MeshData[]; errors: Record<string, string>; adjusted: Record<string, number>; facets?: Record<string, { vertices: Float32Array; triangles: Uint32Array }>; log?: BuildStep[] }
   | { type: "exported"; requestId: number; blob: Blob }
   | { type: "mesh"; requestId: number; mesh: MeshData | null }
   | { type: "parts"; requestId: number; parts: MeshData[] }
@@ -56,11 +57,22 @@ export type KernelResponse =
   | { type: "cutMeshes"; requestId: number; meshes: Record<string, Float32Array> }
   | { type: "error"; requestId: number; message: string };
 
+/** One step of a build, for Debug info: what was done (for which object), how long it took, and any error. */
+export interface BuildStep {
+  step: string;
+  ms: number;
+  error?: string;
+  /** How deep inside other steps it ran (0: a step of its own). */
+  depth: number;
+}
+
 export interface BuildResult {
   meshes: MeshData[];
   errors: Record<string, string>;
   /** Fillet/chamfer op id → the safe size actually used (0 = couldn't apply). */
   adjusted: Record<string, number>;
+  facets?: Record<string, { vertices: Float32Array; triangles: Uint32Array }>;
+  log?: BuildStep[];
 }
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
@@ -83,7 +95,7 @@ export class Kernel {
         if (!p) return;
         this.pending.delete(msg.requestId);
         if (msg.type === "error") p.reject(new Error(msg.message));
-        else if (msg.type === "built") p.resolve({ meshes: msg.meshes, errors: msg.errors, adjusted: msg.adjusted } as never);
+        else if (msg.type === "built") p.resolve({ meshes: msg.meshes, errors: msg.errors, adjusted: msg.adjusted, facets: msg.facets, log: msg.log } as never);
         else if (msg.type === "mesh") p.resolve(msg.mesh as never);
         else if (msg.type === "parts" || msg.type === "importedSolids") p.resolve(msg.parts as never);
         else if (msg.type === "fontLoaded") p.resolve(msg.name as never);
@@ -93,7 +105,7 @@ export class Kernel {
     });
   }
 
-  /** Imported solids whose BREP text the worker already has (it keeps them by ref). */
+  /** Imported solids whose geometry (BREP text or triangles) the worker already has (it keeps them by ref). */
   private sentBreps = new Set<string>();
 
   /**
@@ -102,7 +114,9 @@ export class Kernel {
    */
   snapshot(features: Feature[]): Feature[] {
     return features.map((f) =>
-      f.kind === "imported" && f.params.brep && this.sentBreps.has(f.params.ref) ? structuredClone({ ...f, params: { ...f.params, brep: "" } }) : structuredClone(f),
+      f.kind === "imported" && (f.params.brep || f.params.mesh) && this.sentBreps.has(f.params.ref)
+        ? structuredClone({ ...f, params: { ...f.params, brep: "", mesh: undefined } })
+        : structuredClone(f),
     );
   }
 
@@ -110,7 +124,7 @@ export class Kernel {
     const requestId = this.nextId++;
     if ("features" in req) {
       req = { ...req, features: this.snapshot(req.features) };
-      for (const f of req.features) if (f.kind === "imported" && f.params.brep) this.sentBreps.add(f.params.ref);
+      for (const f of req.features) if (f.kind === "imported" && (f.params.brep || f.params.mesh)) this.sentBreps.add(f.params.ref);
     }
     return new Promise<T>((resolve, reject) => {
       this.pending.set(requestId, { resolve: resolve as (v: never) => void, reject });
@@ -119,8 +133,8 @@ export class Kernel {
   }
 
   /** Builds meshes; per-feature failures come back in `errors` instead of failing the whole build. */
-  build(features: Feature[], combined: boolean, cuts = false): Promise<BuildResult> {
-    return this.request({ type: "build", features, combined, cuts });
+  build(features: Feature[], combined: boolean, cuts = false, debug = false): Promise<BuildResult> {
+    return this.request({ type: "build", features, combined, cuts, debug });
   }
 
   /**

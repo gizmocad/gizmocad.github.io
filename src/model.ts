@@ -244,6 +244,12 @@ export interface ImportedParams {
   scale: [number, number, number];
   /** Made from a mesh: its curves are small flat facets (shaded smooth, and only real corners count as edges). */
   faceted?: boolean;
+  /**
+   * A faceted solid's triangles (local frame, scale 1; base64 like a sculpt's).
+   * It's drawn and has holes cut straight from these; the exact solid is only
+   * made from them (and `brep` is then empty) when fillets or exports need it.
+   */
+  mesh?: { positions: string; indices: string };
 }
 
 export type TexturePattern = "knurl" | "ribs" | "rings" | "bumps" | "honeycomb" | "grid" | "bricks" | "waves" | "wood" | "rough";

@@ -19,6 +19,7 @@ import {
   type SpringParams,
   type TextParams,
   jointMatrix,
+  localMatrix,
   type EdgeOp,
   type Feature,
   type ImportedParams,
@@ -26,10 +27,10 @@ import {
   type SketchParams,
 } from "./model";
 import { entityPath, gearPath, isProfile, outline, prismPoints, starPoints, strokePieces, type Path } from "./sketchGeometry";
-import type { ImportedSolid, ImportSource, KernelRequest, KernelResponse, MeshData } from "./kernel";
+import type { BuildStep, ImportedSolid, ImportSource, KernelRequest, KernelResponse, MeshData } from "./kernel";
 import { hedron } from "./hedron";
 import { CUSTOM_FONT, builtInFontUrl, fontFamily, isCustomFont } from "./fonts";
-import { Matrix3, Vector3 } from "three";
+import { Matrix3, Matrix4, Vector3 } from "three";
 import { applyTexture } from "./texture";
 import { BufferAttribute, BufferGeometry, EdgesGeometry } from "three";
 import { toCreasedNormals } from "three/addons/utils/BufferGeometryUtils.js";
@@ -480,7 +481,7 @@ function applyEdgeOps(shape: Shape3D, ops: EdgeOp[]): Shape3D {
     if (facetedBuild && op.target !== "picked" && !facetedTargets(shape, op).length)
       throw new Error(`${label}: there are no corners there to ${op.type === "fillet" ? "round" : "cut"} (its curves are smooth).`);
     try {
-      shape = safeEdgeOp(shape, op);
+      shape = logged(`${label} (${op.size} mm, ${op.target} edges)`, () => safeEdgeOp(shape, op));
     } catch {
       throw new Error(`${label}: its edges no longer exist; pick them again.`);
     }
@@ -919,9 +920,139 @@ const importedCache = new Map<string, Shape3D>();
  * time (it can be megabytes), and leaves it out of later requests.
  */
 const brepStore = new Map<string, string>();
+/** The same for faceted solids' triangles (`ImportedParams.mesh`). */
+const meshStore = new Map<string, NonNullable<ImportedParams["mesh"]>>();
 
 function rememberBreps(features: Feature[]) {
-  for (const f of features) if (f.kind === "imported" && f.params.brep) brepStore.set(f.params.ref, f.params.brep);
+  for (const f of features) {
+    if (f.kind !== "imported") continue;
+    if (f.params.brep) brepStore.set(f.params.ref, f.params.brep);
+    if (f.params.mesh) meshStore.set(f.params.ref, f.params.mesh);
+  }
+}
+
+/** An imported solid's parameters for cache keys: its geometry is named by its ref (the data can be megabytes). */
+const keyParams = (f: Feature) => (f.kind === "imported" ? { ...f.params, brep: undefined, mesh: undefined } : f.params);
+
+// ---- Faceted solids as triangles ---------------------------------------------------------
+//
+// A solid made from a mesh is thousands of flat facets. OpenCascade takes
+// seconds to triangulate or cut one, so it's drawn and has holes cut from its
+// triangles (with Manifold); its exact solid is made only when fillets,
+// Show result or an export need it. Shapes made from triangles keep them here
+// (in the shape's current frame), and placing a shape carries them along.
+
+const knownTriangles = new WeakMap<Shape3D, WorldMesh>();
+
+/** Each faceted solid's triangles at scale 1, by ref. */
+const facetCache = new Map<string, WorldMesh>();
+
+/** Triangles worked out from an older file's BREP (saved before they were kept), for the app to store. */
+let facetMigrations: Record<string, WorldMesh> = {};
+
+/** A faceted solid's triangles in its own frame, at its scale. */
+function facetTriangles(p: ImportedParams): WorldMesh {
+  let m = facetCache.get(p.ref);
+  if (!m) {
+    const stored = p.mesh ?? meshStore.get(p.ref);
+    if (stored) m = { vertices: decodeFloats(stored.positions), triangles: decodeIndices(stored.indices) };
+    else {
+      // An older file: triangulate the exact solid once (slow), and hand the triangles back to keep.
+      const t = logged("triangulate an older file's faceted solid (once)", () => importedBase(p).mesh({ tolerance: 0.02, angularTolerance: 0.15 }));
+      m = { vertices: new Float32Array(t.vertices), triangles: new Uint32Array(t.triangles) };
+      facetMigrations[p.ref] = m;
+    }
+    facetCache.set(p.ref, m);
+  }
+  if (p.scale.every((v) => v === 1)) return m;
+  return { vertices: m.vertices.map((v, i) => v * p.scale[i % 3]), triangles: m.triangles };
+}
+
+/** Whether the model has solids made from meshes (then results and STL/3MF exports are worked out as triangles). */
+const hasFaceted = (features: Feature[]) => features.some((f) => f.kind === "imported" && !!f.params.faceted);
+
+/** A faceted solid with nothing done to it that needs the exact solid (fillets, hollowing, tilt, splits). */
+function plainFaceted(f: Feature): boolean {
+  return f.kind === "imported" && !!f.params.faceted && !f.edgeOps.length && !f.clips?.length && !f.shell && !f.tilt;
+}
+
+/** Triangles moved by a matrix (a mirroring one turns them back the right way out). */
+function transformMesh(w: WorldMesh, m: Matrix4): WorldMesh {
+  const v = new Vector3();
+  const vertices = new Float32Array(w.vertices.length);
+  for (let i = 0; i < vertices.length; i += 3) vertices.set(v.fromArray(w.vertices, i).applyMatrix4(m).toArray(), i);
+  let triangles = w.triangles;
+  if (m.determinant() < 0) {
+    triangles = w.triangles.slice();
+    for (let i = 0; i < triangles.length; i += 3) [triangles[i + 1], triangles[i + 2]] = [triangles[i + 2], triangles[i + 1]];
+  }
+  return { vertices, triangles };
+}
+
+function meshBounds(w: WorldMesh): [number[], number[]] {
+  const lo = [Infinity, Infinity, Infinity];
+  const hi = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < w.vertices.length; i++) {
+    lo[i % 3] = Math.min(lo[i % 3], w.vertices[i]);
+    hi[i % 3] = Math.max(hi[i % 3], w.vertices[i]);
+  }
+  return [lo, hi];
+}
+
+/** A faceted solid for the view, straight from its triangles: smooth across facets, outlined (and pickable) at corners. */
+function facetView(w: WorldMesh): MeshData {
+  const g = new BufferGeometry();
+  g.setAttribute("position", new BufferAttribute(w.vertices, 3));
+  g.setIndex(new BufferAttribute(w.triangles, 1));
+  const creased = toCreasedNormals(g, (FACET_ANGLE * Math.PI) / 180);
+  const corners = new EdgesGeometry(g, FACET_ANGLE);
+  const edges = corners.getAttribute("position").array as Float32Array;
+  // Each corner segment is its own pickable edge (a point on it finds the exact solid's edge).
+  const groups = new Int32Array((edges.length / 6) * 3);
+  for (let i = 0; i < edges.length / 6; i++) groups.set([i * 2, 2, i], i * 3);
+  const mesh: MeshData = {
+    id: "",
+    vertices: creased.getAttribute("position").array as Float32Array,
+    normals: creased.getAttribute("normal").array as Float32Array,
+    triangles: Uint32Array.from({ length: creased.getAttribute("position").count }, (_, i) => i),
+    edges,
+    edgeGroups: groups,
+  };
+  for (const x of [g, creased, corners]) x.dispose();
+  return mesh;
+}
+
+/**
+ * A branch (an object with its solid children joined and its holes cut) as
+ * triangles in its own frame, done with mesh booleans. Faceted solids go in
+ * as their triangles; anything else is made exactly and then triangulated.
+ */
+function branchTriangles(features: Feature[], f: Feature | null): WorldMesh | null {
+  // Fillets on a merged group, or a split, need the exact result.
+  if (f && ((f.kind === "group" && isMergedGroup(f)) || f.clips?.length)) {
+    const s = branch(features, f);
+    return s && shapeTriangles(s);
+  }
+  let w: WorldMesh | null = null;
+  // As in branch(): with textures added as their own meshes, a textured object's own shape is left out.
+  if (!f || (excludeTextured && isTextured(f) && f.kind !== "group")) w = null;
+  else if (f.kind === "imported" && plainFaceted(f)) w = facetTriangles(f.params);
+  else if (f.kind !== "group") {
+    const own = buildOwnSafe(f);
+    if (own) w = shapeTriangles(own);
+  }
+  const kids = childrenOf(features, f?.id ?? null);
+  for (const c of kids.filter((c) => c.mode === "solid")) {
+    if (excludeTextured && isTextured(c) && c.kind === "group") continue;
+    const k = branchTriangles(features, c);
+    if (k) w = w ? meshBoolean(w, transformMesh(k, localMatrix(c)), "fuse") : transformMesh(k, localMatrix(c));
+  }
+  if (!w) return null;
+  for (const c of kids.filter((c) => c.mode === "hole")) {
+    const k = branchTriangles(features, c);
+    if (k) w = meshBoolean(w, transformMesh(k, localMatrix(c)), "cut");
+  }
+  return w;
 }
 
 /** The imported geometry as it came in (cached; callers get a copy, since transforms use up their shape). */
@@ -929,8 +1060,10 @@ function importedBase(p: ImportedParams): Shape3D {
   let shape = importedCache.get(p.ref);
   if (!shape) {
     const brep = p.brep || brepStore.get(p.ref);
-    if (!brep) throw new Error("This imported solid has no geometry.");
-    shape = deserializeShape(brep) as Shape3D;
+    const mesh = p.mesh ?? meshStore.get(p.ref);
+    if (brep) shape = logged("read an imported solid", () => deserializeShape(brep) as Shape3D);
+    else if (mesh) shape = logged("make an exact solid from a mesh's triangles", () => solidFromTriangles(decodeFloats(mesh.positions), decodeIndices(mesh.indices), [1, 1, 1], "bodies"));
+    else throw new Error("This imported solid has no geometry.");
     importedCache.set(p.ref, shape);
     if (importedCache.size > 64) importedCache.delete(importedCache.keys().next().value!);
   }
@@ -944,6 +1077,24 @@ const stretchedCache = new Map<string, Shape3D>();
 
 function importedShape(p: ImportedParams): Shape3D {
   if (!p.scale.every((v) => v > 0)) throw new Error("The sizes need to be above 0.");
+  if (p.faceted) {
+    // Made from its triangles (scaled, evenly or not), and remembered with them.
+    const w = facetTriangles(p);
+    let shape: Shape3D;
+    if (p.scale.every((v) => v === 1)) shape = importedBase(p);
+    else {
+      const key = `${p.ref}|${p.scale.join(",")}`;
+      let made = stretchedCache.get(key);
+      if (!made) {
+        made = solidFromTriangles(w.vertices, w.triangles, [1, 1, 1], "bodies");
+        stretchedCache.set(key, made);
+        if (stretchedCache.size > 16) stretchedCache.delete(stretchedCache.keys().next().value!);
+      }
+      shape = made.clone();
+    }
+    knownTriangles.set(shape, w);
+    return shape;
+  }
   if (isEven(p.scale)) return p.scale[0] === 1 ? importedBase(p) : importedBase(p).scale(p.scale[0], [0, 0, 0]);
   const key = `${p.ref}|${p.scale.join(",")}`;
   let shape = stretchedCache.get(key);
@@ -966,7 +1117,7 @@ function stretchSolid(shape: Shape3D, scale: [number, number, number]): Shape3D 
   const diag = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
   const m = shape.mesh({ tolerance: Math.max(0.005, diag * 2e-4), angularTolerance: 0.1 });
   shape.delete();
-  return solidFromTriangles(m.vertices, m.triangles, scale, false);
+  return solidFromTriangles(m.vertices, m.triangles, scale, "voids");
 }
 
 /**
@@ -976,7 +1127,8 @@ function stretchSolid(shape: Shape3D, scale: [number, number, number]): Shape3D 
  * with several bodies), and a mesh with gaps is refused; otherwise the shells
  * are one solid's outside and voids.
  */
-function solidFromTriangles(vertices: ArrayLike<number>, triangles: ArrayLike<number>, [sx, sy, sz]: number[], separate: boolean): Shape3D {
+function solidFromTriangles(vertices: ArrayLike<number>, triangles: ArrayLike<number>, [sx, sy, sz]: number[], mode: "voids" | "bodies" | "checked"): Shape3D {
+  const separate = mode !== "voids";
   const lo = [Infinity, Infinity, Infinity];
   const hi = [-Infinity, -Infinity, -Infinity];
   for (let i = 0; i < vertices.length; i++) {
@@ -1012,7 +1164,7 @@ function solidFromTriangles(vertices: ArrayLike<number>, triangles: ArrayLike<nu
     const progress = new oc.Message_ProgressRange();
     sew.Perform(progress);
     temps.push(sew, progress);
-    if (separate && sew.NbFreeEdges() > 0) throw new Error("the mesh has gaps (it isn't closed), so it can't be a solid.");
+    if (mode === "checked" && sew.NbFreeEdges() > 0) throw new Error("the mesh has gaps (it isn't closed), so it can't be a solid.");
     const sewed = sew.SewedShape();
     const unify = new oc.ShapeUpgrade_UnifySameDomain(sewed, true, true, false);
     unify.Build();
@@ -1037,7 +1189,7 @@ function solidFromTriangles(vertices: ArrayLike<number>, triangles: ArrayLike<nu
     }
     if (!solids.length) throw new Error("the mesh has no closed shape in it.");
     const shape = (solids.length === 1 ? solids[0] : makeCompound(solids)) as Shape3D;
-    if (!isValidShape(shape)) throw new Error("the mesh crosses through itself, so it can't be a solid.");
+    if (mode === "checked" && !isValidShape(shape)) throw new Error("the mesh crosses through itself, so it can't be a solid.");
     return shape;
   } finally {
     for (const o of temps) o.delete();
@@ -1092,7 +1244,7 @@ function softenFacets(m: MeshData): MeshData {
 
 /** Stretched with nothing else done to it: shown as its exact shape's mesh, stretched (smooth, with its real edges). */
 function plainStretch(f: Feature): f is Extract<Feature, { kind: "imported" }> {
-  return f.kind === "imported" && !isEven(f.params.scale) && !f.edgeOps.length && !f.clips?.length && !f.shell;
+  return f.kind === "imported" && !f.params.faceted && !isEven(f.params.scale) && !f.edgeOps.length && !f.clips?.length && !f.shell;
 }
 
 function stretchMesh(m: MeshData, [sx, sy, sz]: number[]): MeshData {
@@ -1111,6 +1263,40 @@ function stretchMesh(m: MeshData, [sx, sy, sz]: number[]): MeshData {
 }
 
 /**
+ * A closed mesh as solids, one per separate body, each with its own origin at
+ * the middle of its base. Checked with Manifold (quick); the exact solid is
+ * only made from the triangles later, if it's needed. Throws if the mesh has gaps.
+ */
+function meshSolids(file: ImportSource, M: ManifoldLib): ImportedSolid[] {
+  const whole = toManifold(M, { vertices: file.vertices!, triangles: file.triangles! }, `${file.name}: the mesh has gaps (it isn't closed), so it can't be a solid.`);
+  const bodies = whole.decompose();
+  const out: ImportedSolid[] = [];
+  bodies.forEach((body, i) => {
+    const w = fromManifold(body);
+    const lo = [Infinity, Infinity, Infinity];
+    const hi = [-Infinity, -Infinity, -Infinity];
+    for (let k = 0; k < w.vertices.length; k++) {
+      lo[k % 3] = Math.min(lo[k % 3], w.vertices[k]);
+      hi[k % 3] = Math.max(hi[k % 3], w.vertices[k]);
+    }
+    const anchor: [number, number, number] = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]];
+    for (let k = 0; k < w.vertices.length; k++) w.vertices[k] -= anchor[k % 3];
+    out.push({
+      kind: "solid",
+      name: bodies.length > 1 ? `${file.name} ${i + 1}` : file.name,
+      color: file.color,
+      brep: "",
+      size: [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]],
+      anchor,
+      faceted: true,
+      mesh: w,
+    });
+  });
+  for (const b of [whole, ...bodies]) b.delete();
+  return out;
+}
+
+/**
  * Read STEP and BREP files and split them into their solids, each moved so its
  * own origin is the middle of its base (`anchor` says where that was). Faces
  * that aren't part of any solid come back as a mesh.
@@ -1120,8 +1306,11 @@ async function importSolids(files: ImportSource[]): Promise<ImportedSolid[]> {
   for (const file of files) {
     let shape: Shape3D;
     try {
-      if (file.format === "mesh") shape = solidFromTriangles(file.vertices!, file.triangles!, [1, 1, 1], true);
-      else shape = (file.format === "step" ? await importSTEP(new Blob([file.data!])) : deserializeShape(typeof file.data === "string" ? file.data : new TextDecoder().decode(file.data))) as Shape3D;
+      if (file.format === "mesh") {
+        out.push(...meshSolids(file, await manifold()));
+        continue;
+      }
+      shape = (file.format === "step" ? await importSTEP(new Blob([file.data!])) : deserializeShape(typeof file.data === "string" ? file.data : new TextDecoder().decode(file.data))) as Shape3D;
     } catch (err) {
       if (file.format === "mesh") throw new Error(`${file.name}: ${message(err)}`);
       throw new Error(`${file.name}: ${file.format === "step" ? "this isn't a STEP file OpenCascade can read" : "this isn't a BREP shape OpenCascade can read"} (${message(err)}).`);
@@ -1144,7 +1333,6 @@ async function importSolids(files: ImportSource[]): Promise<ImportedSolid[]> {
         brep: local.serialize(),
         size: [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]],
         anchor,
-        ...(file.format === "mesh" ? { faceted: true } : {}),
       });
     });
     if (!solids.length && shape.faces.length) {
@@ -1157,6 +1345,13 @@ async function importSolids(files: ImportSource[]): Promise<ImportedSolid[]> {
 }
 
 function place(f: Feature, shape: Shape3D): Shape3D {
+  const placed = placeShape(f, shape);
+  const w = knownTriangles.get(shape);
+  if (w) knownTriangles.set(placed, transformMesh(w, localMatrix(f)));
+  return placed;
+}
+
+function placeShape(f: Feature, shape: Shape3D): Shape3D {
   // A mirrored object flips across its own YZ plane first (see Feature.mirrored).
   if (f.mirrored) shape = shape.mirror("YZ", [0, 0, 0]);
   const r = f.rotation;
@@ -1181,12 +1376,36 @@ function place(f: Feature, shape: Shape3D): Shape3D {
   return shape;
 }
 
+/** Debug info: each step of the current build (null when it's off). */
+let buildLog: BuildStep[] | null = null;
+
+/** Run one step, timed and noted in the build log when Debug info is on. */
+let logDepth = 0;
+
+function logged<T>(step: string, fn: () => T): T {
+  if (!buildLog) return fn();
+  // Noted before it runs, so steps inside it come after it in the log.
+  const entry: BuildStep = { step, ms: 0, depth: logDepth };
+  buildLog.push(entry);
+  const t = performance.now();
+  logDepth++;
+  try {
+    return fn();
+  } catch (err) {
+    entry.error = message(err);
+    throw err;
+  } finally {
+    logDepth--;
+    entry.ms = Math.round(performance.now() - t);
+  }
+}
+
 /** Features whose own geometry failed in the current build, with the reason. */
 let failures: Record<string, string> = {};
 
 function buildOwnSafe(f: Feature): Shape3D | null {
   try {
-    return buildOwn(f);
+    return logged(`${f.name}: its shape`, () => buildOwn(f));
   } catch (err) {
     failures[f.id] = message(err);
     return null;
@@ -1257,13 +1476,13 @@ const meshCache = new Map<string, { mesh: MeshData | null; adjusted: Record<stri
 
 function ownMesh(f: Feature): MeshData | null {
   // An imported solid's geometry is named by its ref (its BREP text can be megabytes).
-  const params = f.kind === "imported" ? { ...f.params, brep: undefined } : f.params;
-  const key = JSON.stringify([f.kind, params, f.edgeOps, f.clips ?? [], f.shell ?? null, f.tilt ?? null, isTextured(f) ? f.texture : null]);
+  const key = JSON.stringify([f.kind, keyParams(f), f.edgeOps, f.clips ?? [], f.shell ?? null, f.tilt ?? null, isTextured(f) ? f.texture : null]);
   if (!meshCache.has(key)) {
     const outer = adjusted;
     adjusted = {};
     try {
-      if (plainStretch(f)) meshCache.set(key, { mesh: textured(f, stretchMesh(toMesh("", importedBase(f.params)), f.params.scale)), adjusted });
+      if (f.kind === "imported" && plainFaceted(f)) meshCache.set(key, { mesh: textured(f, facetView(facetTriangles(f.params))), adjusted });
+      else if (plainStretch(f)) meshCache.set(key, { mesh: textured(f, stretchMesh(toMesh("", importedBase(f.params)), f.params.scale)), adjusted });
       else {
         const shape = buildOwn(f);
         const mesh = shape && toMesh("", shape, f.kind);
@@ -1324,7 +1543,7 @@ const r6 = (v: number) => Math.round(v * 1e6) / 1e6 + 0;
 const geometryKey = (features: Feature[], id: string) =>
   features
     .filter((x) => subtreeIds(features, id).has(x.id))
-    .map((x) => [x.id, x.parentId, x.kind, x.mode, x.kind === "imported" ? { ...x.params, brep: undefined } : x.params, x.position, x.rotation, x.edgeOps, x.clips, x.shell, x.tilt, x.mirrored, x.joint]);
+    .map((x) => [x.id, x.parentId, x.kind, x.mode, keyParams(x), x.position, x.rotation, x.edgeOps, x.clips, x.shell, x.tilt, x.mirrored, x.joint]);
 
 const cutCache = new Map<string, { mesh: MeshData | null; error?: string }>();
 
@@ -1342,7 +1561,7 @@ function cutMesh(features: Feature[], f: Feature): MeshData | null {
   if (!holes.length) return null;
   const world = worldMatrix(features, f.id);
   const key = JSON.stringify([
-    f.kind === "group" ? geometryKey(features, f.id) : [f.kind, f.kind === "imported" ? { ...f.params, brep: undefined } : f.params, f.edgeOps, f.clips ?? [], f.shell ?? null, f.tilt ?? null, f.mirrored ?? false],
+    f.kind === "group" ? geometryKey(features, f.id) : [f.kind, keyParams(f), f.edgeOps, f.clips ?? [], f.shell ?? null, f.tilt ?? null, f.mirrored ?? false],
     world.elements.map(r6),
     holes.map((h) => [geometryKey(features, h.id), worldMatrix(features, h.id).elements.map(r6)]),
     isTextured(f) ? f.texture : null,
@@ -1353,33 +1572,40 @@ function cutMesh(features: Feature[], f: Feature): MeshData | null {
     let mesh: MeshData | null = null;
     let error: string | undefined;
     try {
-      const own = f.kind === "group" ? branch(features, f) : buildOwn(f);
-      if (own) {
-        let shape = placeInWorld(features, f, own);
-        const [lo, hi] = shape.boundingBox.bounds;
-        // Only holes that reach it.
-        const cutters: Shape3D[] = [];
+      // A solid made from a mesh is cut as triangles: far quicker than OpenCascade (it's only for the view).
+      const quick = isFaceted(f) && !isTextured(f);
+      if (quick) {
+        const own = f.kind === "imported" && plainFaceted(f) ? facetTriangles(f.params) : shapeTriangles(buildOwn(f)!);
+        let w = transformMesh(own, world);
+        const [lo, hi] = meshBounds(w);
+        let cut = false;
         for (const h of holes) {
-          const hs = branch(features, h);
-          if (!hs) continue;
-          const placed = placeInWorld(features, h, hs);
-          const [a, b] = placed.boundingBox.bounds;
-          if (![0, 1, 2].some((k) => a[k] > hi[k] || b[k] < lo[k])) cutters.push(placed);
+          const ht = branchTriangles(features, h);
+          if (!ht) continue;
+          const placed = transformMesh(ht, worldMatrix(features, h.id));
+          const [a, b] = meshBounds(placed);
+          if ([0, 1, 2].some((k) => a[k] > hi[k] || b[k] < lo[k])) continue;
+          w = meshBoolean(w, placed, "cut");
+          cut = true;
         }
-        // A solid made from a mesh has thousands of facets: cutting it as a mesh is far quicker (it's only for the view).
-        let quick = isFaceted(f) && !isTextured(f);
-        if (cutters.length && !quick) {
-          try {
-            for (const c of cutters) shape = shape.cut(c);
-            mesh = textured(f, toLocal(toMesh(f.id, shape, f.kind), world));
-          } catch {
-            quick = !isTextured(f); // OpenCascade couldn't (or crashed): cut the meshes instead.
+        if (cut) mesh = f.kind === "imported" && plainFaceted(f) ? facetView(transformMesh(w, world.clone().invert())) : meshForView(f.id, w, world);
+      } else {
+        const own = f.kind === "group" ? branch(features, f) : buildOwn(f);
+        if (own) {
+          let shape = placeInWorld(features, f, own);
+          const [lo, hi] = shape.boundingBox.bounds;
+          let cut = false;
+          for (const h of holes) {
+            const hs = branch(features, h);
+            if (!hs) continue;
+            const placed = placeInWorld(features, h, hs);
+            const [a, b] = placed.boundingBox.bounds;
+            // Only holes that reach it.
+            if ([0, 1, 2].some((k) => a[k] > hi[k] || b[k] < lo[k])) continue;
+            shape = booleanSafe(shape, placed, "cut");
+            cut = true;
           }
-        }
-        if (cutters.length && quick) {
-          let w = shapeTriangles(shape);
-          for (const c of cutters) w = meshBoolean(w, shapeTriangles(c), "cut");
-          mesh = meshForView(f.id, w, world);
+          if (cut) mesh = textured(f, toLocal(toMesh(f.id, shape, f.kind), world));
         }
       }
     } catch (err) {
@@ -1542,12 +1768,18 @@ function fromManifold(m: { getMesh(): { numProp: number; vertProperties: Float32
 
 /** A solid's surface as triangles, fine enough for booleans (flat facets come out exact). */
 function shapeTriangles(shape: Shape3D): WorldMesh {
+  const known = knownTriangles.get(shape);
+  if (known) return known;
   const m = shape.mesh({ tolerance: 0.02, angularTolerance: 0.15 });
   return { vertices: new Float32Array(m.vertices), triangles: new Uint32Array(m.triangles) };
 }
 
 /** Joined or cut as meshes, with Manifold. */
 function meshBoolean(a: WorldMesh, b: WorldMesh, op: "fuse" | "cut"): WorldMesh {
+  return logged(`mesh ${op} (${(a.triangles.length / 3).toLocaleString()} + ${(b.triangles.length / 3).toLocaleString()} triangles)`, () => meshBooleanNow(a, b, op));
+}
+
+function meshBooleanNow(a: WorldMesh, b: WorldMesh, op: "fuse" | "cut"): WorldMesh {
   const M = manifoldReady;
   if (!M) throw new Error("The mesh library isn't loaded.");
   const gaps = "a shape has gaps or crossing faces";
@@ -1567,17 +1799,23 @@ function meshBoolean(a: WorldMesh, b: WorldMesh, op: "fuse" | "cut"): WorldMesh 
  * as a mesh boolean instead and made back into a solid.
  */
 function booleanSafe(a: Shape3D, b: Shape3D, op: "fuse" | "cut"): Shape3D {
+  const viaMeshes = () => {
+    const mesh = meshBoolean(shapeTriangles(a), shapeTriangles(b), op);
+    if (!mesh.triangles.length) throw new Error(op === "cut" ? "the hole cuts away the whole object." : "nothing is left.");
+    const solid = solidFromTriangles(mesh.vertices, mesh.triangles, [1, 1, 1], "bodies");
+    knownTriangles.set(solid, mesh);
+    return solid;
+  };
+  // A faceted solid: OpenCascade would take many seconds (or fail), so straight to meshes.
+  if (knownTriangles.has(a) || knownTriangles.has(b)) return logged(`${op} (as meshes: a solid made from a mesh)`, viaMeshes);
   try {
-    return op === "cut" ? a.cut(b) : a.fuse(b);
+    return logged(`${op} (exact)`, () => (op === "cut" ? a.cut(b) : a.fuse(b)));
   } catch (err) {
-    let mesh: WorldMesh;
     try {
-      mesh = meshBoolean(shapeTriangles(a), shapeTriangles(b), op);
+      return logged(`${op} (as meshes, after the exact one failed)`, viaMeshes);
     } catch {
       throw err;
     }
-    if (!mesh.triangles.length) throw err;
-    return solidFromTriangles(mesh.vertices, mesh.triangles, [1, 1, 1], false);
   }
 }
 
@@ -1627,13 +1865,12 @@ async function cutMeshObject(features: Feature[], f: Extract<Feature, { kind: "s
   failures = {};
   try {
     for (const h of holes) {
-      const hs = branch(features, h);
-      if (!hs) continue;
-      const placed = placeInWorld(features, h, hs);
-      const [a, b] = placed.boundingBox.bounds;
+      const ht = branchTriangles(features, h);
+      if (!ht) continue;
+      const placed = transformMesh(ht, worldMatrix(features, h.id));
+      const [a, b] = meshBounds(placed);
       if ([0, 1, 2].some((k) => a[k] > hi[k] || b[k] < lo[k])) continue;
-      const m = placed.mesh({ tolerance: 0.02, angularTolerance: 0.15 });
-      cutters.push({ vertices: new Float32Array(m.vertices), triangles: new Uint32Array(m.triangles) });
+      cutters.push(placed);
     }
   } finally {
     failures = outerFailures;
@@ -1703,6 +1940,7 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
   try {
     await ready;
     adjusted = {};
+    facetMigrations = {};
     excludeTextured = false; // In case an earlier request stopped half way.
     if ("features" in req) {
       rememberBreps(req.features);
@@ -1723,6 +1961,8 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
       const name = names.fullName?.en ?? names.fontFamily?.en ?? "Imported font";
       return post({ type: "fontLoaded", requestId: req.requestId, name });
     }
+    buildLog = req.type === "build" && req.debug ? [] : null;
+    logDepth = 0;
     if (req.type === "build") {
       const meshes: MeshData[] = [];
       let errors: Record<string, string> = {};
@@ -1732,8 +1972,13 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
         const roots = texturedRoots(req.features);
         excludeTextured = roots.length > 0;
         try {
-          const shape = branch(req.features, null);
-          if (shape) meshes.push(toMesh("combined", shape));
+          if (hasFaceted(req.features)) {
+            const w = branchTriangles(req.features, null);
+            if (w) meshes.push(meshForView("combined", w, null));
+          } else {
+            const shape = branch(req.features, null);
+            if (shape) meshes.push(toMesh("combined", shape));
+          }
           for (const f of roots) {
             const t = texturedWorld(req.features, f as Feature & { texture: NonNullable<Feature["texture"]> });
             if (t) meshes.push({ id: "combined", ...t.display, edges: new Float32Array(), edgeGroups: new Int32Array() });
@@ -1764,7 +2009,7 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
               if (w) meshes.push(meshForView(f.id, w, worldMatrix(req.features, f.id)));
               continue;
             }
-            const cut = req.cuts ? cutMesh(req.features, f) : null;
+            const cut = req.cuts ? logged(`${f.name}: holes cut for the view`, () => cutMesh(req.features, f)) : null;
             if (cut) meshes.push(cut);
             else if (isMergedGroup(f)) {
               failures = {};
@@ -1772,7 +2017,7 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
               Object.assign(errors, failures);
               if (shape) meshes.push(textured(f, toMesh(f.id, shape)));
             } else {
-              const m = ownMesh(f);
+              const m = logged(`${f.name}: its mesh for the view`, () => ownMesh(f));
               if (m) meshes.push(m);
             }
           } catch (err) {
@@ -1782,7 +2027,11 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
       }
       if (!req.combined) errors = { ...cutFailures, ...errors };
       const transfer = meshes.flatMap((m) => [m.vertices.buffer, m.normals.buffer, m.triangles.buffer, m.edges.buffer, m.edgeGroups.buffer]);
-      post({ type: "built", requestId: req.requestId, meshes, errors, adjusted }, transfer);
+      // Copies: the originals stay cached here.
+      const facets = Object.fromEntries(Object.entries(facetMigrations).map(([ref, w]) => [ref, { vertices: w.vertices.slice(), triangles: w.triangles.slice() }]));
+      const log = buildLog ?? undefined;
+      buildLog = null;
+      post({ type: "built", requestId: req.requestId, meshes, errors, adjusted, ...(Object.keys(facets).length ? { facets } : {}), ...(log ? { log } : {}) }, transfer);
     } else if (req.type === "meshOf" && req.preview) {
       // A placement preview: the same mesh (and cache entry) the build will use.
       const f = req.features.find((x) => x.id === req.id);
@@ -1819,7 +2068,21 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
         return s ? place(f, s) : null;
       });
       const parts: MeshData[] = [];
-      for (const f of top) {
+      if (hasFaceted(req.features)) {
+        const cutters = top.filter((f) => f.mode === "hole").flatMap((h) => {
+          const w = branchTriangles(req.features, h);
+          return w ? [transformMesh(w, localMatrix(h))] : [];
+        });
+        for (const f of top) {
+          if (f.mode === "hole") continue;
+          const own = branchTriangles(req.features, f);
+          if (!own) continue;
+          let w = transformMesh(own, localMatrix(f));
+          for (const c of cutters) w = meshBoolean(w, c, "cut");
+          parts.push({ id: f.id, vertices: w.vertices, normals: new Float32Array(), triangles: w.triangles, edges: new Float32Array(), edgeGroups: new Int32Array() });
+        }
+      }
+      for (const f of hasFaceted(req.features) ? [] : top) {
         if (f.mode === "hole") continue;
         let shape = branch(req.features, f);
         if (!shape) continue;
@@ -1840,10 +2103,21 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
       // Textures go into STL (each textured object as its own closed mesh, overlapping the rest as slicers expect); STEP holds exact shapes only.
       const roots = req.format === "stl" ? texturedRoots(req.features) : [];
       excludeTextured = roots.length > 0;
-      const shape = branch(req.features, null);
+      // With solids made from meshes, an STL is worked out as triangles (the exact way takes minutes).
+      const asTriangles = req.format === "stl" && hasFaceted(req.features);
+      const triangles = asTriangles ? branchTriangles(req.features, null) : null;
+      const shape = asTriangles ? null : branch(req.features, null);
       excludeTextured = false;
       let blob: Blob;
-      if (roots.length) {
+      if (asTriangles) {
+        const meshes: { vertices: ArrayLike<number>; triangles: ArrayLike<number> }[] = triangles ? [triangles] : [];
+        for (const f of roots) {
+          const t = texturedWorld(req.features, f as Feature & { texture: NonNullable<Feature["texture"]> });
+          if (t) meshes.push(t);
+        }
+        if (!meshes.length) throw new Error("Nothing to export: add at least one solid shape.");
+        blob = stlBlob(meshes);
+      } else if (roots.length) {
         const meshes: { vertices: ArrayLike<number>; triangles: ArrayLike<number> }[] = [];
         if (shape) meshes.push(shape.mesh({ tolerance: 0.01, angularTolerance: 0.1 }));
         for (const f of roots) {

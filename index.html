@@ -34,6 +34,7 @@
           <hr />
           <label class="menu-field" title="Shows your printer's bed in the view and warns when the model doesn't fit">Print bed <select id="bed"></select></label>
           <button id="theme" role="menuitem" title="Theme: follow system, light or dark"></button>
+          <button id="debug-toggle" role="menuitem" title="Show what each update does and how long it takes, with any errors in full (to copy into a bug report)">Debug info <span class="note" id="debug-state">off</span></button>
         </div>
       </div>
       <button id="mcp-badge" class="mcp-badge" hidden title="An AI assistant is connected and can change this model (click for settings)">● AI</button>
@@ -139,6 +140,7 @@
 
     <main id="viewport">
       <div id="status">Loading geometry kernel…</div>
+      <section id="debug-panel" class="debug-panel" hidden aria-label="Debug info"></section>
       <div class="view-tools">
         <button id="fit-all" title="Fit the whole model in view (Home)">⌂</button>
         <button id="fit-selected" title="Zoom to the selection (.)">⊙</button>

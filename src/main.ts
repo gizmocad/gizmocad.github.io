@@ -1,4 +1,4 @@
-import { Kernel, type ImportedSolid } from "./kernel";
+import { Kernel, type BuildStep, type ImportedSolid } from "./kernel";
 import { featureExtents, resizeFeature, sizeReadout } from "./resize";
 import {
   childrenOf,
@@ -23,6 +23,7 @@ import {
   subtreeIds,
   type CadDocument,
   type ImportedFont,
+  type ImportedParams,
   type Texture,
   type TexturePattern,
   type Feature,
@@ -55,7 +56,7 @@ import { SketchEditor, type MenuItem, type SketchTool } from "./sketcher";
 import { bounds as sketchBounds, gearOuterRadius, removePoint } from "./sketchGeometry";
 import { HEDRON_FACES, HEDRON_NAMES, type HedronFaces } from "./hedron";
 import { BUILT_IN_FONTS, CUSTOM_FONT, builtInFont, builtInFontUrl, fontFamily, isCustomFont } from "./fonts";
-import { addDetail, appendToStl, baseMesh, decodeFloats, decodeIndices, encodeFloats, importedMesh, meshToSculpt, scaleSculpt, sculptTriangles, vertexCount, type BrushKind, type BrushSettings, type SculptBase } from "./sculpt";
+import { addDetail, appendToStl, baseMesh, decodeFloats, decodeIndices, encodeFloats, encodeIndices, importedMesh, meshToSculpt, scaleSculpt, sculptTriangles, vertexCount, type BrushKind, type BrushSettings, type SculptBase } from "./sculpt";
 import { openImportFiles, openTextFile, saveFile } from "./storage";
 import { formatLength, parseLength } from "./units";
 import { onThemeChange, setThemeSetting, themeSetting, type ThemeSetting } from "./theme";
@@ -160,13 +161,28 @@ function activeFeatures(features: Feature[]): Feature[] {
 
 const isActive = (id: string) => activeFeatures(doc.features).some((f) => f.id === id);
 
-/** Imported solids' BREP text by ref: undo steps leave it out (it never changes, and can be megabytes). */
-const brepStore = new Map<string, string>();
+/** Imported solids' geometry (BREP text, triangles) by ref: undo steps leave it out (it never changes, and can be megabytes). */
+const geometryStore = new Map<string, Pick<ImportedParams, "brep" | "mesh">>();
 
 /** The model for the undo history: everything but the imported fonts' files and solids' geometry (they'd fill it up fast). */
 function undoSnapshot() {
-  for (const f of doc.features) if (f.kind === "imported" && f.params.brep) brepStore.set(f.params.ref, f.params.brep);
-  return JSON.stringify({ ...doc, fonts: undefined }, (key, value) => (key === "brep" ? undefined : value));
+  for (const f of doc.features) if (f.kind === "imported") geometryStore.set(f.params.ref, { brep: f.params.brep, mesh: f.params.mesh });
+  return JSON.stringify({ ...doc, fonts: undefined }, function (this: Record<string, unknown>, key, value) {
+    return (key === "brep" || key === "mesh") && typeof this.ref === "string" ? undefined : value;
+  });
+}
+
+/**
+ * Faceted solids from older files were saved as just their (huge) BREP; the
+ * kernel hands back their triangles, which are kept instead from now on.
+ */
+function keepFacets(facets: Record<string, { vertices: Float32Array; triangles: Uint32Array }>) {
+  for (const [ref, w] of Object.entries(facets)) {
+    const mesh = { positions: encodeFloats(w.vertices), indices: encodeIndices(w.triangles) };
+    geometryStore.set(ref, { brep: "", mesh });
+    for (const f of doc.features) if (f.kind === "imported" && f.params.ref === ref) Object.assign(f.params, { brep: "", mesh });
+  }
+  scheduleAutosave();
 }
 
 function mergeFonts(a: ImportedFont[] | undefined, b: ImportedFont[] | undefined): ImportedFont[] | undefined {
@@ -182,7 +198,7 @@ function restore(from: string[], to: string[]) {
   const fonts = doc.fonts;
   doc = JSON.parse(snapshot);
   doc.fonts = mergeFonts(doc.fonts, fonts);
-  for (const f of doc.features) if (f.kind === "imported") f.params.brep = brepStore.get(f.params.ref) ?? "";
+  for (const f of doc.features) if (f.kind === "imported") Object.assign(f.params, { brep: "", ...geometryStore.get(f.params.ref) });
   selectedIds = selectedIds.filter((id) => findFeature(id));
   if (selectedId && !findFeature(selectedId)) selectedId = selectedIds[0] ?? null;
   if (historyMarker !== null && historyMarker > doc.features.length) historyMarker = doc.features.length;
@@ -296,14 +312,17 @@ async function settle() {
 
 async function buildNow() {
   const token = ++buildToken;
+  const started = performance.now();
   const features = kernel.snapshot(activeFeatures(doc.features));
   try {
     await kernel.ready;
     await syncFonts();
     const combined = showCombined && !editingSketchId && !edgePick && !sculptingId;
     // Holes are shown cut, except while picking edges (the picked edges are the object's own).
-    const { meshes, errors, adjusted } = await kernel.build(edgePick ? featuresForPicking(features) : features, combined, !edgePick);
+    const { meshes, errors, adjusted, facets, log } = await kernel.build(edgePick ? featuresForPicking(features) : features, combined, !edgePick, debugOn);
+    if (facets) keepFacets(facets);
     if (token !== buildToken) return; // A newer edit superseded this build.
+    if (debugOn) showDebug(log ?? [], errors, features, performance.now() - started, combined);
     buildErrors = errors;
     const adjustmentsChanged = JSON.stringify(adjusted) !== JSON.stringify(edgeAdjustments);
     if (!edgePick) edgeAdjustments = adjusted;
@@ -507,7 +526,7 @@ async function convertToSolid(id: string) {
   const f = findFeature(id);
   if (!f || f.kind !== "sculpt") return;
   const tris = decodeIndices(f.params.indices);
-  setStatus(tris.length / 3 > SOLID_MESH_LIMIT ? "Making it a solid (a mesh this detailed takes a while)…" : "Making it a solid…");
+  setStatus("Making it a solid…");
   let solids: ImportedSolid[];
   try {
     solids = await kernel.importSolids([{ name: f.name, format: "mesh", vertices: decodeFloats(f.params.positions), triangles: tris }]);
@@ -527,7 +546,7 @@ async function convertToSolid(id: string) {
     const t = features.find((x) => x.id === id);
     if (!t) return;
     parts.forEach((p, i) => {
-      const params = { ref: newId(), brep: p.brep, size: p.size, scale: [1, 1, 1] as [number, number, number], faceted: true };
+      const params = { ref: newId(), brep: p.brep, size: p.size, scale: [1, 1, 1] as [number, number, number], faceted: true, ...(p.mesh ? { mesh: encodeMesh(p.mesh) } : {}) };
       if (i === 0) {
         Object.assign(t, { kind: "imported", mode: "solid", edgeOps: [], params, position: at(p.anchor) });
         return;
@@ -3304,9 +3323,93 @@ function setAppMenu(open: boolean) {
 }
 appMenuButton.onclick = () => setAppMenu(appMenu.hidden !== false);
 // Picking an item closes it (the theme item stays open, to see the change).
-appMenu.addEventListener("click", (e) => (e.target as HTMLElement).closest("button") && (e.target as HTMLElement).closest("#theme") === null && setAppMenu(false));
+appMenu.addEventListener("click", (e) => (e.target as HTMLElement).closest("button") && (e.target as HTMLElement).closest("#theme, #debug-toggle") === null && setAppMenu(false));
 window.addEventListener("pointerdown", (e) => !appMenu.hidden && !(e.target as HTMLElement).closest(".app-menu-wrap") && setAppMenu(false), true);
 window.addEventListener("keydown", (e) => e.key === "Escape" && !appMenu.hidden && (setAppMenu(false), e.stopImmediatePropagation()), true);
+
+// ---- Debug info ---------------------------------------------------------------------
+//
+// Each update's steps (every object's shape, fillet and hole cut), how long
+// they took, and errors in full: to see what's slow or failing, and to copy
+// into a bug report.
+
+let debugOn = (() => {
+  try {
+    return localStorage.getItem("gizmocad.debug") === "on";
+  } catch {
+    return false;
+  }
+})();
+const debugPanel = $("#debug-panel");
+
+function setDebug(on: boolean) {
+  debugOn = on;
+  try {
+    localStorage.setItem("gizmocad.debug", on ? "on" : "off");
+  } catch {
+    // Not remembered; it still works for now.
+  }
+  $("#debug-state").textContent = on ? "on" : "off";
+  debugPanel.hidden = !on;
+  if (on) {
+    debugPanel.textContent = "Debug info: make a change (or it shows after the next update).";
+    void rebuild();
+  }
+}
+$("#debug-toggle").onclick = () => setDebug(!debugOn);
+setDebug(debugOn);
+
+function showDebug(log: BuildStep[], errors: Record<string, string>, features: Feature[], totalMs: number, combined: boolean) {
+  const kernelMs = log.reduce((sum, s) => sum + (s.depth ? 0 : s.ms), 0);
+  const name = (id: string) => features.find((f) => f.id === id)?.name ?? id;
+  const ms = (v: number) => (v >= 1000 ? `${(v / 1000).toFixed(1)} s` : `${Math.round(v)} ms`);
+  const lines = [
+    `GizmoCAD debug info, ${new Date().toLocaleString()}`,
+    `Update: ${ms(totalMs)} in all${combined ? " (Show result)" : ""}; ${features.length} objects`,
+    ...Object.entries(errors).map(([id, e]) => `ERROR ${name(id)}: ${e}`),
+    "Steps, in order:",
+    ...log.map((s) => `  ${ms(s.ms).padStart(8)}  ${"  ".repeat(s.depth)}${s.step}${s.error ? `  ✗ ${s.error}` : ""}`),
+    "Objects:",
+    ...features.map((f) => {
+      const extra = f.kind === "imported" ? (f.params.faceted ? " (made from a mesh)" : " (exact)") : "";
+      const finishes = [f.edgeOps.length && `${f.edgeOps.length} edge finish(es)`, f.shell && "hollow", f.tilt && "tilt", f.clips?.length && "split", f.texture && "texture"].filter(Boolean).join(", ");
+      return `  ${f.name}: ${f.kind}${extra}, ${f.mode}${f.parentId ? `, inside ${name(f.parentId)}` : ""}${finishes ? `, ${finishes}` : ""}`;
+    }),
+  ];
+  const slow = [...log].sort((a, b) => b.ms - a.ms).filter((s) => s.ms >= 50 || s.error).slice(0, 12);
+  const head = document.createElement("div");
+  head.className = "debug-head";
+  const title = document.createElement("b");
+  title.textContent = `Last update: ${ms(totalMs)}`;
+  const copy = button("Copy details", () => {
+    void navigator.clipboard.writeText(lines.join("\n")).then(
+      () => setNotice("Debug details copied: paste them into your message."),
+      () => setStatus("Couldn't copy (the browser blocked it).", true),
+    );
+  }, "link");
+  const close = button("✕", () => setDebug(false), "link");
+  close.title = "Turn Debug info off";
+  head.append(title, copy, close);
+  const errorRows = Object.entries(errors).map(([id, e]) => {
+    const row = document.createElement("div");
+    row.className = "debug-error";
+    row.textContent = `${name(id)}: ${e}`;
+    return row;
+  });
+  const steps = document.createElement("ol");
+  for (const s of slow) {
+    const li = document.createElement("li");
+    li.className = s.error ? "debug-error" : "";
+    li.textContent = `${ms(s.ms)}  ${s.step}${s.error ? ` ✗ ${s.error}` : ""}`;
+    steps.append(li);
+  }
+  const note = document.createElement("div");
+  note.className = "debug-note";
+  note.textContent = slow.length
+    ? `Slowest steps (geometry work ${ms(kernelMs)}; the rest is drawing and the app).`
+    : `Nothing took long (geometry work ${ms(kernelMs)}; the rest is drawing and the app).`;
+  debugPanel.replaceChildren(head, ...errorRows, note, steps);
+}
 
 $("#save").onclick = () => void saveDocument();
 $("#open").onclick = () => void openDocument();
@@ -3794,9 +3897,10 @@ function meshPiece(part: ImportedPart, name: string): Placed {
 
 const MESH_TAIL = "Big meshes and ones with gaps stay meshes: they can be moved, sculpted and exported, and holes cut them. Select one and click Make it a solid to try for fillets, chamfers and the rest.";
 const SOLID_TAIL = "Imported solids are exact: they can be holes, take fillets and chamfers, and be split; they resize evenly.";
+const FACETED_TAIL = "Closed meshes became solids: they can be holes, take fillets and chamfers (on their corners) and be split.";
 
-/** Meshes up to this many triangles come in as solids (sewing bigger ones together takes too long). */
-const SOLID_MESH_LIMIT = 20000;
+/** Closed meshes up to this many triangles come in as solids (fillets on bigger ones would take minutes). */
+const SOLID_MESH_LIMIT = 200000;
 
 /** A mesh as solids, one per closed body; null if it can't be one (gaps, or crossing itself). */
 async function meshSolids(part: ImportedPart, name: string): Promise<Extract<ImportedSolid, { kind: "solid" }>[] | null> {
@@ -3821,7 +3925,7 @@ async function meshBatch(title: string, fileName: string, parts: ImportedPart[])
   const tris = parts.reduce((s, p) => s + p.triangles.length / 3, 0);
   const solids = pieces.length - meshes;
   const what = [solids && `${solids} solid${solids === 1 ? "" : "s"}`, meshes && `${meshes} mesh${meshes === 1 ? "" : "es"}`].filter(Boolean).join(" and ");
-  return placeBatch(title, pieces, `${fileName}: ${what}${pieces.length > 1 ? " (grouped)" : ""}, ${tris.toLocaleString()} triangles`, meshes ? MESH_TAIL : SOLID_TAIL);
+  return placeBatch(title, pieces, `${fileName}: ${what}${pieces.length > 1 ? " (grouped)" : ""}, ${tris.toLocaleString()} triangles`, meshes ? MESH_TAIL : FACETED_TAIL);
 }
 
 /** One part per colour. */
@@ -3852,11 +3956,13 @@ function solidBatch(title: string, fileName: string, parts: ImportedSolid[]): Im
   return placeBatch(title, pieces, `${fileName}: ${what}${parts.length > 1 ? " (grouped)" : ""}`, SOLID_TAIL);
 }
 
+const encodeMesh = (w: { vertices: Float32Array; triangles: Uint32Array }) => ({ positions: encodeFloats(w.vertices), indices: encodeIndices(w.triangles) });
+
 /** An imported solid as an object whose own origin is the middle of its base. */
 function solidPiece(p: Extract<ImportedSolid, { kind: "solid" }>): Placed {
   const f = createFeature("imported", doc.features) as Extract<Feature, { kind: "imported" }>;
   f.name = p.name;
-  f.params = { ref: newId(), brep: p.brep, size: p.size, scale: [1, 1, 1], ...(p.faceted ? { faceted: true } : {}) };
+  f.params = { ref: newId(), brep: p.brep, size: p.size, scale: [1, 1, 1], ...(p.faceted ? { faceted: true } : {}), ...(p.mesh ? { mesh: encodeMesh(p.mesh) } : {}) };
   f.position = { x: p.anchor[0], y: p.anchor[1], z: p.anchor[2] };
   if (p.color) f.color = p.color;
   const [w, d, h] = p.size;
