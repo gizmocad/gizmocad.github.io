@@ -160,8 +160,14 @@ function activeFeatures(features: Feature[]): Feature[] {
 
 const isActive = (id: string) => activeFeatures(doc.features).some((f) => f.id === id);
 
-/** The model for the undo history: everything but the imported fonts' files (they'd fill it up fast). */
-const undoSnapshot = () => JSON.stringify({ ...doc, fonts: undefined });
+/** Imported solids' BREP text by ref: undo steps leave it out (it never changes, and can be megabytes). */
+const brepStore = new Map<string, string>();
+
+/** The model for the undo history: everything but the imported fonts' files and solids' geometry (they'd fill it up fast). */
+function undoSnapshot() {
+  for (const f of doc.features) if (f.kind === "imported" && f.params.brep) brepStore.set(f.params.ref, f.params.brep);
+  return JSON.stringify({ ...doc, fonts: undefined }, (key, value) => (key === "brep" ? undefined : value));
+}
 
 function mergeFonts(a: ImportedFont[] | undefined, b: ImportedFont[] | undefined): ImportedFont[] | undefined {
   const all = [...(a ?? []), ...(b ?? [])].filter((f, i, list) => list.findIndex((g) => g.id === f.id) === i);
@@ -176,6 +182,7 @@ function restore(from: string[], to: string[]) {
   const fonts = doc.fonts;
   doc = JSON.parse(snapshot);
   doc.fonts = mergeFonts(doc.fonts, fonts);
+  for (const f of doc.features) if (f.kind === "imported") f.params.brep = brepStore.get(f.params.ref) ?? "";
   selectedIds = selectedIds.filter((id) => findFeature(id));
   if (selectedId && !findFeature(selectedId)) selectedId = selectedIds[0] ?? null;
   if (historyMarker !== null && historyMarker > doc.features.length) historyMarker = doc.features.length;
@@ -289,7 +296,7 @@ async function settle() {
 
 async function buildNow() {
   const token = ++buildToken;
-  const features = structuredClone(activeFeatures(doc.features));
+  const features = kernel.snapshot(activeFeatures(doc.features));
   try {
     await kernel.ready;
     await syncFonts();
@@ -469,7 +476,7 @@ async function convertToSculpt(id: string) {
   if (!f) return;
   setStatus("Turning it into clay…");
   try {
-    const mesh = await kernel.meshOf(structuredClone(doc.features), id);
+    const mesh = await kernel.meshOf(doc.features, id);
     if (!mesh || !mesh.triangles.length) {
       setStatus("This object has no shape to sculpt yet.", true);
       return;
@@ -849,7 +856,7 @@ function objectRow(f: Feature, depth: number) {
 }
 
 function moveTo(id: string, parentId: string | null) {
-  const probe = structuredClone(doc.features);
+  const probe = kernel.snapshot(doc.features);
   if (!reparent(probe, id, parentId)) return;
   commit((features) => reparent(features, id, parentId));
 }
@@ -3045,7 +3052,7 @@ function addShape(kind: ShapeKind) {
       const into = kind === "screw" && targetId ? (findFeature(targetId)?.parentId ?? null) : parentId;
       // Placed in world terms; moving it into the group keeps it where it was put.
       if (into) {
-        const probe = [...structuredClone(doc.features), structuredClone(f)];
+        const probe = [...kernel.snapshot(doc.features), structuredClone(f)];
         reparent(probe, f.id, into);
         Object.assign(f, probe.at(-1));
       }
@@ -3171,14 +3178,14 @@ async function modelFile(format: "stl" | "step"): Promise<Blob> {
   const sculpts = doc.features.filter((f): f is SculptFeature => f.kind === "sculpt");
   let blob: Blob | null = null;
   try {
-    blob = await kernel.export(structuredClone(doc.features), format);
+    blob = await kernel.export(doc.features, format);
   } catch (err) {
     // A model made only of sculpts has nothing for the kernel to export.
     if (!(format === "stl" && sculpts.length && /Nothing to export/.test((err as Error).message))) throw err;
   }
   // Sculpts are meshes: they go into STL (with any holes cut through them), but STEP only holds exact solids.
   if (format === "stl" && sculpts.length) {
-    const cut = await kernel.cutMeshes(structuredClone(activeFeatures(doc.features)));
+    const cut = await kernel.cutMeshes(activeFeatures(doc.features));
     blob = await appendToStl(blob, sculpts.map((f) => cut[f.id] ?? sculptTriangles(f.params, worldMatrix(doc.features, f.id))));
   }
   return blob!;
@@ -3906,7 +3913,7 @@ async function modelBatch(title: string, file: PickedFile): Promise<ImportBatch>
   const box = new Box3();
   const v = new Vector3();
   const live = features.filter((f) => !f.suppressed);
-  for (const m of await kernel.parts(structuredClone(live))) for (let i = 0; i < m.vertices.length; i += 3) box.expandByPoint(v.fromArray(m.vertices, i));
+  for (const m of await kernel.parts(live)) for (let i = 0; i < m.vertices.length; i += 3) box.expandByPoint(v.fromArray(m.vertices, i));
   for (const f of live) if (f.kind === "sculpt") box.union(new Box3().setFromArray(sculptTriangles(f.params, worldMatrix(live, f.id))));
   if (box.isEmpty()) box.set(new Vector3(), new Vector3());
   const t = top[0];
@@ -3918,14 +3925,14 @@ async function modelBatch(title: string, file: PickedFile): Promise<ImportBatch>
 
 /** The model as a 3MF file: each part its own object, with its colour. */
 async function file3mf(): Promise<Blob> {
-  const features = structuredClone(activeFeatures(doc.features));
+  const features = kernel.snapshot(activeFeatures(doc.features));
   const meshes = await kernel.parts(features);
   const parts: MeshPart[] = meshes.map((m) => {
     const f = features.find((x) => x.id === m.id)!;
     return { name: f.name, color: f.color ?? "#3ddc97", vertices: m.vertices, triangles: m.triangles };
   });
   // Sculpts (meshes) go in as their own objects, with any holes cut through them.
-  const cut = await kernel.cutMeshes(structuredClone(features));
+  const cut = await kernel.cutMeshes(features);
   for (const f of features) {
     if (f.kind !== "sculpt") continue;
     const tris = cut[f.id] ?? sculptTriangles(f.params, worldMatrix(features, f.id));

@@ -93,11 +93,27 @@ export class Kernel {
     });
   }
 
+  /** Imported solids whose BREP text the worker already has (it keeps them by ref). */
+  private sentBreps = new Set<string>();
+
+  /**
+   * A copy of the features for the worker. Imported geometry it already has
+   * (it can be megabytes) is left out rather than copied for every rebuild.
+   */
+  snapshot(features: Feature[]): Feature[] {
+    return features.map((f) =>
+      f.kind === "imported" && f.params.brep && this.sentBreps.has(f.params.ref) ? structuredClone({ ...f, params: { ...f.params, brep: "" } }) : structuredClone(f),
+    );
+  }
+
   private request<T>(req: DistributiveOmit<KernelRequest, "requestId">): Promise<T> {
     const requestId = this.nextId++;
+    if ("features" in req) {
+      req = { ...req, features: this.snapshot(req.features) };
+      for (const f of req.features) if (f.kind === "imported" && f.params.brep) this.sentBreps.add(f.params.ref);
+    }
     return new Promise<T>((resolve, reject) => {
       this.pending.set(requestId, { resolve: resolve as (v: never) => void, reject });
-      // Features are plain JSON, so cloning them is safe and cheap.
       this.worker.postMessage({ ...req, requestId } as KernelRequest);
     });
   }

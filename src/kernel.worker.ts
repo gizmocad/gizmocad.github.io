@@ -914,12 +914,23 @@ function buildBase(f: Feature, taper = 0): Shape3D | null {
 /** Imported geometry, read once per `ref` (reading a big BREP takes a while). */
 const importedCache = new Map<string, Shape3D>();
 
+/**
+ * Each imported solid's BREP text by ref. The app sends it only the first
+ * time (it can be megabytes), and leaves it out of later requests.
+ */
+const brepStore = new Map<string, string>();
+
+function rememberBreps(features: Feature[]) {
+  for (const f of features) if (f.kind === "imported" && f.params.brep) brepStore.set(f.params.ref, f.params.brep);
+}
+
 /** The imported geometry as it came in (cached; callers get a copy, since transforms use up their shape). */
 function importedBase(p: ImportedParams): Shape3D {
   let shape = importedCache.get(p.ref);
   if (!shape) {
-    if (!p.brep) throw new Error("This imported solid has no geometry.");
-    shape = deserializeShape(p.brep) as Shape3D;
+    const brep = p.brep || brepStore.get(p.ref);
+    if (!brep) throw new Error("This imported solid has no geometry.");
+    shape = deserializeShape(brep) as Shape3D;
     importedCache.set(p.ref, shape);
     if (importedCache.size > 64) importedCache.delete(importedCache.keys().next().value!);
   }
@@ -1195,13 +1206,13 @@ function branch(features: Feature[], self: Feature | null): Shape3D | null {
     const s = branch(features, c);
     if (s) {
       const placed = place(c, s);
-      result = result ? result.fuse(placed) : placed;
+      result = result ? booleanSafe(result, placed, "fuse") : placed;
     }
   }
   if (!result) return null;
   for (const c of kids.filter((c) => c.mode === "hole")) {
     const s = branch(features, c);
-    if (s) result = result.cut(place(c, s));
+    if (s) result = booleanSafe(result, place(c, s), "cut");
   }
   if (self && isMergedGroup(self)) {
     try {
@@ -1315,7 +1326,10 @@ const geometryKey = (features: Feature[], id: string) =>
     .filter((x) => subtreeIds(features, id).has(x.id))
     .map((x) => [x.id, x.parentId, x.kind, x.mode, x.kind === "imported" ? { ...x.params, brep: undefined } : x.params, x.position, x.rotation, x.edgeOps, x.clips, x.shell, x.tilt, x.mirrored, x.joint]);
 
-const cutCache = new Map<string, MeshData | null>();
+const cutCache = new Map<string, { mesh: MeshData | null; error?: string }>();
+
+/** Objects whose holes couldn't be cut in the last build, with why (shown as their build error). */
+let cutFailures: Record<string, string> = {};
 
 /**
  * The object as it ends up with the holes that reach it cut away, in its own
@@ -1337,33 +1351,48 @@ function cutMesh(features: Feature[], f: Feature): MeshData | null {
     const outerFailures = failures;
     failures = {};
     let mesh: MeshData | null = null;
+    let error: string | undefined;
     try {
       const own = f.kind === "group" ? branch(features, f) : buildOwn(f);
       if (own) {
         let shape = placeInWorld(features, f, own);
         const [lo, hi] = shape.boundingBox.bounds;
-        let cut = false;
+        // Only holes that reach it.
+        const cutters: Shape3D[] = [];
         for (const h of holes) {
           const hs = branch(features, h);
           if (!hs) continue;
           const placed = placeInWorld(features, h, hs);
           const [a, b] = placed.boundingBox.bounds;
-          // Only holes that reach it.
-          if ([0, 1, 2].some((k) => a[k] > hi[k] || b[k] < lo[k])) continue;
-          shape = shape.cut(placed);
-          cut = true;
+          if (![0, 1, 2].some((k) => a[k] > hi[k] || b[k] < lo[k])) cutters.push(placed);
         }
-        if (cut) mesh = textured(f, toLocal(toMesh(f.id, shape, f.kind), world));
+        // A solid made from a mesh has thousands of facets: cutting it as a mesh is far quicker (it's only for the view).
+        let quick = isFaceted(f) && !isTextured(f);
+        if (cutters.length && !quick) {
+          try {
+            for (const c of cutters) shape = shape.cut(c);
+            mesh = textured(f, toLocal(toMesh(f.id, shape, f.kind), world));
+          } catch {
+            quick = !isTextured(f); // OpenCascade couldn't (or crashed): cut the meshes instead.
+          }
+        }
+        if (cutters.length && quick) {
+          let w = shapeTriangles(shape);
+          for (const c of cutters) w = meshBoolean(w, shapeTriangles(c), "cut");
+          mesh = meshForView(f.id, w, world);
+        }
       }
-    } catch {
+    } catch (err) {
       mesh = null;
+      error = `its holes couldn't be cut: ${message(err)}`;
     } finally {
       failures = outerFailures;
     }
-    cutCache.set(key, mesh);
+    cutCache.set(key, { mesh, error });
     if (cutCache.size > 200) cutCache.delete(cutCache.keys().next().value!);
   }
-  const m = cutCache.get(key)!;
+  const { mesh: m, error: cutError } = cutCache.get(key)!;
+  if (cutError) cutFailures[f.id] = cutError;
   return m && { id: f.id, vertices: m.vertices.slice(), normals: m.normals.slice(), triangles: m.triangles.slice(), edges: m.edges.slice(), edgeGroups: m.edgeGroups.slice() };
 }
 
@@ -1489,6 +1518,69 @@ const manifold = () =>
     return m;
   }));
 
+/** The loaded library, for use inside synchronous builds (loaded at the start of each request). */
+let manifoldReady: ManifoldLib | null = null;
+
+/** Triangles as a Manifold solid; throws `gaps` if they don't close up. */
+function toManifold(M: ManifoldLib, w: WorldMesh, gaps: string) {
+  const mesh = new M.Mesh({ numProp: 3, vertProperties: w.vertices, triVerts: w.triangles });
+  mesh.merge(); // Join corners that sit at the same place (STL files repeat them).
+  try {
+    return new M.Manifold(mesh);
+  } catch {
+    throw new Error(gaps);
+  }
+}
+
+function fromManifold(m: { getMesh(): { numProp: number; vertProperties: Float32Array; triVerts: Uint32Array } }): WorldMesh {
+  const out = m.getMesh();
+  const stride = out.numProp;
+  const vertices = new Float32Array((out.vertProperties.length / stride) * 3);
+  for (let i = 0, j = 0; i < out.vertProperties.length; i += stride, j += 3) vertices.set(out.vertProperties.subarray(i, i + 3), j);
+  return { vertices, triangles: new Uint32Array(out.triVerts) };
+}
+
+/** A solid's surface as triangles, fine enough for booleans (flat facets come out exact). */
+function shapeTriangles(shape: Shape3D): WorldMesh {
+  const m = shape.mesh({ tolerance: 0.02, angularTolerance: 0.15 });
+  return { vertices: new Float32Array(m.vertices), triangles: new Uint32Array(m.triangles) };
+}
+
+/** Joined or cut as meshes, with Manifold. */
+function meshBoolean(a: WorldMesh, b: WorldMesh, op: "fuse" | "cut"): WorldMesh {
+  const M = manifoldReady;
+  if (!M) throw new Error("The mesh library isn't loaded.");
+  const gaps = "a shape has gaps or crossing faces";
+  const ma = toManifold(M, a, gaps);
+  const mb = toManifold(M, b, gaps);
+  const r = op === "cut" ? ma.subtract(mb) : ma.add(mb);
+  try {
+    return fromManifold(r);
+  } finally {
+    for (const m of [ma, mb, r]) m.delete();
+  }
+}
+
+/**
+ * A fuse or cut. OpenCascade's exact booleans can fail (or crash) on solids
+ * made of thousands of facets, such as ones made from meshes; then it's done
+ * as a mesh boolean instead and made back into a solid.
+ */
+function booleanSafe(a: Shape3D, b: Shape3D, op: "fuse" | "cut"): Shape3D {
+  try {
+    return op === "cut" ? a.cut(b) : a.fuse(b);
+  } catch (err) {
+    let mesh: WorldMesh;
+    try {
+      mesh = meshBoolean(shapeTriangles(a), shapeTriangles(b), op);
+    } catch {
+      throw err;
+    }
+    if (!mesh.triangles.length) throw err;
+    return solidFromTriangles(mesh.vertices, mesh.triangles, [1, 1, 1], false);
+  }
+}
+
 /** A quick fingerprint of a long string (a mesh's data), for cache keys. */
 function fingerprint(text: string): string {
   let h = 2166136261;
@@ -1549,28 +1641,16 @@ async function cutMeshObject(features: Feature[], f: Extract<Feature, { kind: "s
   let result: WorldMesh | null = null;
   if (cutters.length) {
     const M = await manifold();
-    const solid = (w: WorldMesh, what: string) => {
-      const mesh = new M.Mesh({ numProp: 3, vertProperties: w.vertices, triVerts: w.triangles });
-      mesh.merge(); // Join corners that sit at the same place (STL files repeat them).
-      try {
-        return new M.Manifold(mesh);
-      } catch {
-        throw new Error(`${what} has gaps or crossing faces, so holes can't cut it (holes need a closed, watertight mesh; repairing it in a slicer or mesh tool can fix this).`);
-      }
-    };
-    const body = solid({ vertices: pos, triangles: tris }, "This mesh");
-    const made = cutters.map((c) => solid(c, "A hole"));
+    const gaps = (what: string) => `${what} has gaps or crossing faces, so holes can't cut it (holes need a closed, watertight mesh; repairing it in a slicer or mesh tool can fix this).`;
+    const body = toManifold(M, { vertices: pos, triangles: tris }, gaps("This mesh"));
+    const made = cutters.map((c) => toManifold(M, c, gaps("A hole")));
     let cut = body;
     for (const c of made) {
       const next = cut.subtract(c);
       if (cut !== body) cut.delete();
       cut = next;
     }
-    const out = cut.getMesh();
-    const stride = out.numProp;
-    const vertices = new Float32Array((out.vertProperties.length / stride) * 3);
-    for (let i = 0, j = 0; i < out.vertProperties.length; i += stride, j += 3) vertices.set(out.vertProperties.subarray(i, i + 3), j);
-    result = { vertices, triangles: new Uint32Array(out.triVerts) };
+    result = fromManifold(cut);
     for (const m of [body, ...made, cut]) m.delete();
   }
   meshCutCache.set(key, result);
@@ -1624,7 +1704,12 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
     await ready;
     adjusted = {};
     excludeTextured = false; // In case an earlier request stopped half way.
-    if ("features" in req) await ensureFonts(req.features);
+    if ("features" in req) {
+      rememberBreps(req.features);
+      await ensureFonts(req.features);
+      // Mesh booleans stand in when OpenCascade's fail (see booleanSafe); have them ready.
+      manifoldReady ??= await manifold();
+    }
     if (req.type === "font") {
       // An imported font: check it can be read, and keep it for texts that use it.
       let font: Font;
@@ -1668,6 +1753,7 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
         }
         errors = failures;
       } else {
+        cutFailures = {};
         for (const f of req.features) {
           // Shapes inside a merged group are shown as part of the group's mesh.
           if (insideMergedGroup(req.features, f.id)) continue;
@@ -1694,6 +1780,7 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
           }
         }
       }
+      if (!req.combined) errors = { ...cutFailures, ...errors };
       const transfer = meshes.flatMap((m) => [m.vertices.buffer, m.normals.buffer, m.triangles.buffer, m.edges.buffer, m.edgeGroups.buffer]);
       post({ type: "built", requestId: req.requestId, meshes, errors, adjusted }, transfer);
     } else if (req.type === "meshOf" && req.preview) {
