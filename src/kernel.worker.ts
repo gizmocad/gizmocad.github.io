@@ -973,7 +973,9 @@ const hasFaceted = (features: Feature[]) => features.some((f) => f.kind === "imp
 
 /** A faceted solid with nothing done to it that needs the exact solid (fillets, hollowing, tilt, splits). */
 function plainFaceted(f: Feature): boolean {
-  return f.kind === "imported" && !!f.params.faceted && !f.edgeOps.length && !f.clips?.length && !f.shell && !f.tilt;
+  // Edge finishes that do nothing yet (no size, or no edges picked: as while picking them) don't count.
+  const ops = f.edgeOps.filter((o) => o.size > 0 && !(o.target === "picked" && !o.points.length));
+  return f.kind === "imported" && !!f.params.faceted && !ops.length && !f.clips?.length && !f.shell && !f.tilt;
 }
 
 /** Triangles moved by a matrix (a mirroring one turns them back the right way out). */
