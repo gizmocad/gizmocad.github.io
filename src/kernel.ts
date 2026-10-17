@@ -45,6 +45,17 @@ export type KernelRequest =
   /** Mesh objects that holes cut, as world triangles. */
   | { type: "cutMeshes"; requestId: number; features: Feature[] };
 
+/** What each kind of request is, for the progress bar. */
+const WORKING: Record<KernelRequest["type"], string> = {
+  build: "Updating the model",
+  export: "Exporting",
+  parts: "Preparing the 3MF file",
+  meshOf: "Updating the model",
+  importSolids: "Importing",
+  font: "Loading the font",
+  cutMeshes: "Exporting",
+};
+
 export type KernelResponse =
   | { type: "ready" }
   /** `facets`: triangles of faceted solids from older files (saved without them), by ref, for the app to keep. */
@@ -94,6 +105,8 @@ export class Kernel {
         const p = this.pending.get(msg.requestId);
         if (!p) return;
         this.pending.delete(msg.requestId);
+        this.working.delete(msg.requestId);
+        this.onWorking?.(this.workingOn());
         if (msg.type === "error") p.reject(new Error(msg.message));
         else if (msg.type === "built") p.resolve({ meshes: msg.meshes, errors: msg.errors, adjusted: msg.adjusted, facets: msg.facets, log: msg.log } as never);
         else if (msg.type === "mesh") p.resolve(msg.mesh as never);
@@ -106,6 +119,16 @@ export class Kernel {
         }
       };
     });
+  }
+
+  /** Called with what the kernel is busy with (a few words), or null when it's idle. */
+  onWorking?: (what: string | null) => void;
+  private working = new Map<number, string>();
+
+  private workingOn(): string | null {
+    const all = [...this.working.values()];
+    // Saying what the person asked for beats "updating" when both are going on.
+    return all.find((w) => w !== WORKING.build) ?? all[0] ?? null;
   }
 
   /** What the last export had to leave out (objects that couldn't be built), or "". */
@@ -134,6 +157,8 @@ export class Kernel {
     }
     return new Promise<T>((resolve, reject) => {
       this.pending.set(requestId, { resolve: resolve as (v: never) => void, reject });
+      this.working.set(requestId, WORKING[req.type]);
+      this.onWorking?.(this.workingOn());
       this.worker.postMessage({ ...req, requestId } as KernelRequest);
     });
   }

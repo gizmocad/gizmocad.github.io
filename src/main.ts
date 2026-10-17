@@ -208,6 +208,54 @@ function restore(from: string[], to: string[]) {
   refresh();
 }
 
+/** Undo or redo from the buttons or keys, and say what it was. */
+function undoRedo(redo: boolean) {
+  const [from, to] = redo ? [redoStack, undoStack] : [undoStack, redoStack];
+  if (!from.length) return setNotice(redo ? "Nothing to redo." : "Nothing to undo.");
+  const before = doc.features;
+  restore(from, to);
+  // Undoing takes a step back, so the step itself went from the state now to the one before.
+  const what = redo ? describeStep(before, doc.features) : describeStep(doc.features, before);
+  const left = from.length;
+  setNotice(`${redo ? "Redid" : "Undid"} ${what}${left ? ` · ${left} more to ${redo ? "redo" : "undo"}` : ""}`);
+  const b = $(redo ? "#redo" : "#undo");
+  b.classList.remove("flash");
+  void b.offsetWidth; // Restart the animation.
+  b.classList.add("flash");
+}
+
+/** A few words for what changed from `a` to `b`, such as "moving Cylinder 1" or "deleting Box 2". */
+function describeStep(a: Feature[], b: Feature[]): string {
+  const plain = (f: Feature) => JSON.stringify(f, (key, value) => (key === "brep" || key === "mesh" ? undefined : value));
+  const added = b.filter((f) => !a.some((x) => x.id === f.id));
+  const removed = a.filter((f) => !b.some((x) => x.id === f.id));
+  const changed = b.filter((f) => {
+    const old = a.find((x) => x.id === f.id);
+    return old && plain(old) !== plain(f);
+  });
+  const names = (list: Feature[]) => (list.length === 1 ? list[0].name : list.length === 2 ? `${list[0].name} and ${list[1].name}` : `${list[0].name} and ${list.length - 1} others`);
+  if (added.length && !removed.length) return `adding ${names(added)}`;
+  if (removed.length && !added.length) return `deleting ${names(removed)}`;
+  if (added.length || removed.length) return "a change to the model";
+  if (!changed.length) return "a step";
+  if (changed.length > 1) return `changing ${names(changed)}`;
+  // One object: which of its settings changed.
+  const f = changed[0];
+  const old = a.find((x) => x.id === f.id)!;
+  const keys = (Object.keys({ ...old, ...f }) as (keyof Feature)[]).filter((k) => JSON.stringify(old[k]) !== JSON.stringify(f[k]));
+  const only = (...ks: string[]) => keys.every((k) => ks.includes(k));
+  if (only("position", "rotation", "joint", "mirrored")) return `moving ${f.name}`;
+  if (only("name")) return `renaming ${old.name}`;
+  if (only("color")) return `the colour of ${f.name}`;
+  if (only("mode")) return `making ${f.name} a ${f.mode}`;
+  if (only("edgeOps")) return `edge finishes on ${f.name}`;
+  if (only("hidden")) return `${f.hidden ? "hiding" : "showing"} ${f.name}`;
+  if (only("ghost")) return `ghosting ${f.name}`;
+  if (only("parentId", "position", "rotation")) return `regrouping ${f.name}`;
+  if (only("params", "position")) return `editing ${f.name}`;
+  return `changing ${f.name}`;
+}
+
 const findFeature = (id: string | null) => doc.features.find((f) => f.id === id) ?? null;
 const selected = () => findFeature(selectedId);
 const editingSketch = () => findFeature(editingSketchId) as SketchFeature | null;
@@ -236,6 +284,33 @@ function setStatus(text: string, error = false) {
 }
 
 const kernel = new Kernel();
+
+// A progress bar while the kernel works on something that takes a moment (not for quick updates, so it doesn't flicker).
+const busyEl = $("#busy");
+let busySince = 0;
+let busyWhat: string | null = null;
+let busyTimer = 0;
+let idleTimer = 0;
+function showBusy() {
+  clearTimeout(busyTimer);
+  if (!busyWhat) return void (busyEl.hidden = true);
+  const ms = performance.now() - busySince;
+  busyEl.hidden = ms < 250;
+  const secs = Math.floor(ms / 1000);
+  busyEl.querySelector(".busy-label")!.textContent = `${busyWhat}…${secs >= 2 ? ` ${secs} s` : ""}`;
+  busyTimer = window.setTimeout(showBusy, ms < 250 ? 260 - ms : 1005 - (ms % 1000));
+}
+kernel.onWorking = (what) => {
+  clearTimeout(idleTimer);
+  if (!what) {
+    // A moment's grace: one build often follows straight on from another.
+    idleTimer = window.setTimeout(() => ((busyWhat = null), showBusy()), 150);
+    return;
+  }
+  if (!busyWhat) busySince = performance.now();
+  busyWhat = what;
+  showBusy();
+};
 const viewport = new Viewport($("#viewport"), {
   onSelect(id, additive) {
     selectObject(id, additive);
@@ -378,6 +453,8 @@ function refresh() {
   scheduleAutosave();
   ($("#undo") as HTMLButtonElement).disabled = undoStack.length === 0;
   ($("#redo") as HTMLButtonElement).disabled = redoStack.length === 0;
+  $("#undo").title = `Undo (Ctrl+Z)${undoStack.length ? `: ${undoStack.length} step${undoStack.length === 1 ? "" : "s"} back` : ""}`;
+  $("#redo").title = `Redo (Ctrl+Shift+Z)${redoStack.length ? `: ${redoStack.length} step${redoStack.length === 1 ? "" : "s"} forward` : ""}`;
 }
 
 /** Select an object; `additive` (Shift/Ctrl-click) adds it to the selection, or takes it out again. */
@@ -3552,8 +3629,8 @@ window.addEventListener("drop", (e) => {
   const files = [...e.dataTransfer!.files];
   void Promise.all(files.map(async (f) => ({ name: f.name, data: await f.arrayBuffer() }))).then(importFiles);
 });
-$("#undo").onclick = () => restore(undoStack, redoStack);
-$("#redo").onclick = () => restore(redoStack, undoStack);
+$("#undo").onclick = () => undoRedo(false);
+$("#redo").onclick = () => undoRedo(true);
 $("#snap").onchange = (e) => {
   viewport.setSnap(parseFloat((e.target as HTMLSelectElement).value));
 };
@@ -4412,13 +4489,12 @@ window.addEventListener("keydown", (e) => {
   }
   if (mod && key === "z") {
     e.preventDefault();
-    if (e.shiftKey) restore(redoStack, undoStack);
-    else restore(undoStack, redoStack);
+    undoRedo(e.shiftKey);
     return;
   }
   if (mod && key === "y") {
     e.preventDefault();
-    restore(redoStack, undoStack);
+    undoRedo(true);
     return;
   }
 
