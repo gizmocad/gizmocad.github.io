@@ -2202,6 +2202,16 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
       if (used > 0) {
         note.append(`Too big for these edges, so ${formatLength(used)} mm (the largest safe size) is used.`);
         note.append(button(`Set to ${formatLength(used)}`, () => setOp(op.id, (o) => (o.size = used)), "link"));
+        // Ways to keep it bigger: a chamfer can become a flatter bevel; a fillet can round fewer edges.
+        if (op.type === "chamfer") {
+          const toBevel = button(`Make it a bevel (keeps ${formatLength(op.size)} mm)`, () => setOp(op.id, (o) => ((o.type = "bevel"), (o.angle = 45))), "link");
+          toBevel.title = "A bevel can be flatter than 45°, so it fits at the full distance";
+          note.append(" ", toBevel);
+        } else if (op.type === "fillet" && op.target === "all") {
+          const topOnly = button("Round the top edges only", () => setOp(op.id, (o) => (o.target = "top")), "link");
+          topOnly.title = "On a thin part the top and bottom roundings meet in the middle; rounding only the top allows a radius up to about the thickness";
+          note.append(" ", topOnly);
+        }
       } else {
         note.append("These edges can't be rounded at any size, so this step is skipped.");
       }
