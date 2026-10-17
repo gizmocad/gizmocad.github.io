@@ -12,7 +12,7 @@ import { PLANE_ROTATIONS, baseMatrix, clampJoint, jointMatrix, localMatrix, worl
 import { featureExtents, isTilted, rulerLength, staysRound, type ResizeAnchor } from "./resize";
 import { isClosed, outline, prismPoints } from "./sketchGeometry";
 import { hedron } from "./hedron";
-import { SculptMesh, sculptGeometry, type BrushSettings } from "./sculpt";
+import { SculptMesh, creasedGeometry, isCadMesh, sculptGeometry, type BrushSettings } from "./sculpt";
 import { ViewCube } from "./viewCube";
 
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
@@ -403,7 +403,7 @@ export class Viewport {
     this.grids.add(fine, major, floorLayer(new THREE.AxesHelper(30), -1));
     this.sketchGrid.add(makeGrid(400, 40, pal.gridMajor, pal.gridMinor, -0.02, true), makeGrid(400, 400, pal.gridFine, pal.gridFine, -0.03, true));
     this.root.traverse((o) => {
-      if (o instanceof THREE.LineSegments && o.userData.groups) (o.material as THREE.LineBasicMaterial).color.setHex(pal.edge);
+      if (o instanceof THREE.LineSegments && (o.userData.groups || o.userData.meshEdges)) (o.material as THREE.LineBasicMaterial).color.setHex(pal.edge);
     });
     this.viewCube.setColors(pal.viewCube);
     this.applyAppearance();
@@ -480,7 +480,7 @@ export class Viewport {
         node.visible = !f.hidden; // Hiding a node hides everything inside it too.
         if (f.kind === "group") node.add(new THREE.AxesHelper(8));
         if (f.kind === "plane") node.add(buildPlane(f.id, f.params.size));
-        if (f.kind === "sculpt") node.add(buildSculptMesh(f));
+        if (f.kind === "sculpt") node.add(buildSculptMesh(f, this.sculpt?.session.id !== f.id));
         if (f.kind === "sketch" && f.params.operation === "flat") {
           const parts = buildFlatSketch(f);
           if (parts.length) node.add(...parts);
@@ -628,6 +628,15 @@ export class Viewport {
     if (!s) return;
     const node = this.nodes.get(s.session.id);
     const mesh = node?.children.find((c) => c instanceof THREE.Mesh && c.userData.sculpt) as THREE.Mesh | undefined;
+    const f = this.features.get(s.session.id);
+    if (mesh?.userData.creased && f?.kind === "sculpt") {
+      // Brushes move shared corners: swap the sharp-edged display mesh for the plain one while sculpting.
+      for (const c of mesh.children) disposeTree(c);
+      mesh.clear();
+      mesh.geometry.dispose();
+      mesh.geometry = sculptGeometry(f.params);
+      mesh.userData.creased = false;
+    }
     if (mesh === s.mesh) return;
     s.mesh = mesh ?? null;
     s.tool = mesh ? new SculptMesh(mesh.geometry) : null;
@@ -2275,13 +2284,25 @@ function makeGrid(size: number, divisions: number, major: number, minor: number,
   return grid;
 }
 
-function buildSculptMesh(f: Extract<Feature, { kind: "sculpt" }>) {
+/**
+ * A sculpt's mesh. One made from CAD geometry (an imported STL/3MF, or a
+ * converted shape) is drawn like the other CAD objects: sharp edges kept and
+ * outlined. While it's being sculpted (`sharp` false) it's plain clay.
+ */
+function buildSculptMesh(f: Extract<Feature, { kind: "sculpt" }>, sharp = true) {
+  const cad = sharp && isCadMesh(f.params);
   const mesh = new THREE.Mesh(
-    sculptGeometry(f.params),
-    new THREE.MeshStandardMaterial({ color: COLORS.solid, roughness: 0.55, metalness: 0.05 }),
+    cad ? creasedGeometry(f.params) : sculptGeometry(f.params),
+    new THREE.MeshStandardMaterial({ color: COLORS.solid, roughness: cad ? 0.6 : 0.55, metalness: 0.05, polygonOffset: cad, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }),
   );
   mesh.userData.id = f.id;
   mesh.userData.sculpt = true;
+  if (cad) {
+    mesh.userData.creased = true;
+    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry, 30), new THREE.LineBasicMaterial({ color: scenePalette().edge }));
+    edges.userData.meshEdges = true;
+    mesh.add(edges);
+  }
   return mesh;
 }
 

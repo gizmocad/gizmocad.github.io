@@ -3,15 +3,15 @@
 // stores them compactly in the document, and implements the brushes.
 
 import * as THREE from "three";
-import { mergeVertices } from "three/addons/utils/BufferGeometryUtils.js";
+import { mergeVertices, toCreasedNormals } from "three/addons/utils/BufferGeometryUtils.js";
 
 export type SculptBase = "sphere" | "cube";
 export type SculptDetail = "normal" | "high";
 export type BrushKind = "draw" | "inflate" | "smooth" | "flatten" | "grab";
 
 export interface SculptParams {
-  /** "converted" = made from a CAD object with "Sculpt this object". */
-  base: SculptBase | "converted";
+  /** "converted" = made from a CAD object with "Sculpt this object"; "imported" = an STL/3MF mesh. */
+  base: SculptBase | "converted" | "imported";
   size: number;
   detail: SculptDetail;
   /** Vertex positions (Float32, base64). The object's local frame: bottom at z = 0. */
@@ -66,6 +66,23 @@ export function sculptGeometry(p: SculptParams): THREE.BufferGeometry {
   geom.setIndex(new THREE.BufferAttribute(decodeIndices(p.indices), 1));
   geom.computeVertexNormals();
   return geom;
+}
+
+/** Made from CAD geometry (imported, or converted from a shape): drawn with its sharp edges kept. */
+export function isCadMesh(p: SculptParams): boolean {
+  return p.base === "imported" || p.base === "converted";
+}
+
+/**
+ * For display: faces meeting at more than `crease` degrees keep a sharp edge
+ * (smooth shading would round off every corner of a CAD part), gentle curves
+ * stay smooth. Not for sculpting, which needs the shared corners.
+ */
+export function creasedGeometry(p: SculptParams, crease = 30): THREE.BufferGeometry {
+  const smooth = sculptGeometry(p);
+  const creased = toCreasedNormals(smooth, THREE.MathUtils.degToRad(crease));
+  smooth.dispose();
+  return creased;
 }
 
 // ---- Remeshing -------------------------------------------------------------
@@ -187,7 +204,7 @@ export function importedMesh(vertices: Float32Array, triangles: Uint32Array): Sc
   const welded = weld(vertices, triangles);
   const box = new THREE.Box3().setFromArray(welded.positions);
   const size = Math.max(...box.getSize(new THREE.Vector3()).toArray());
-  return { base: "converted", size: Math.round(size * 100) / 100, detail: "normal", positions: encodeFloats(welded.positions), indices: encodeIndices(welded.indices) };
+  return { base: "imported", size: Math.round(size * 100) / 100, detail: "normal", positions: encodeFloats(welded.positions), indices: encodeIndices(welded.indices) };
 }
 
 /** Make an existing sculpt's mesh about twice as dense, keeping its shape. */

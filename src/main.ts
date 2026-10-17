@@ -417,6 +417,7 @@ function sculptSettings(f: SculptFeature, update: (mutate: (f: Feature) => void)
 
   const clay = document.createElement("select");
   if (f.params.base === "converted") clay.add(new Option("Converted object", "converted"));
+  if (f.params.base === "imported") clay.add(new Option("Imported mesh", "imported"));
   clay.add(new Option("Sphere", "sphere"));
   clay.add(new Option("Cube", "cube"));
   clay.value = f.params.base;
@@ -606,6 +607,9 @@ function updateToolbar() {
   show("#points-option", (transforming && (mode === "translate" || mode === "pivot")) || viewport.placing);
 }
 
+/** An object's icon: imported meshes get their own, not the sculpting hand. */
+const kindIcon = (f: Feature) => (f.kind === "sculpt" && f.params.base === "imported" ? "◬" : KIND_ICON[f.kind]);
+
 const KIND_ICON: Record<ShapeKind, string> = {
   box: "▣",
   cylinder: "◍",
@@ -722,7 +726,7 @@ function objectRow(f: Feature, depth: number) {
     toggleHidden(f.id);
   };
   eye.ondblclick = (e) => e.stopPropagation();
-  li.querySelector(".kind")!.textContent = KIND_ICON[f.kind];
+  li.querySelector(".kind")!.textContent = kindIcon(f);
   li.querySelector(".name > span:last-child")!.textContent = f.name;
   if (buildErrors[f.id]) li.title = buildErrors[f.id];
   li.onclick = (e) => selectObject(f.id, e.shiftKey || e.ctrlKey || e.metaKey);
@@ -1646,7 +1650,7 @@ function renderHistory() {
     if (i === end && historyMarker !== null) chips.push(markerEl());
     const chip = document.createElement("button");
     chip.className = ["step", i >= end ? "future" : "", f.suppressed ? "off" : "", selectedIds.includes(f.id) ? "selected" : ""].join(" ");
-    chip.textContent = `${KIND_ICON[f.kind]} ${f.name}`;
+    chip.textContent = `${kindIcon(f)} ${f.name}`;
     chip.title = `${i + 1}. ${f.name}${f.suppressed ? " (switched off)" : ""}${i >= end ? " (after the marker: not in the model right now)" : ""}. Right-click for options.`;
     chip.onclick = () => (i < end ? selectObject(f.id) : setNotice(`${f.name} comes after the history marker; roll forward to see it.`));
     chip.oncontextmenu = (e) => {
@@ -2254,7 +2258,7 @@ function parentSelect(f: Feature) {
   sel.className = "wide";
   const blocked = subtreeIds(doc.features, f.id);
   sel.add(new Option("None (top level)", ""));
-  for (const p of doc.features) if (!blocked.has(p.id)) sel.add(new Option(`${KIND_ICON[p.kind]} ${p.name}`, p.id));
+  for (const p of doc.features) if (!blocked.has(p.id)) sel.add(new Option(`${kindIcon(p)} ${p.name}`, p.id));
   sel.value = f.parentId ?? "";
   sel.onchange = () => moveTo(f.id, sel.value || null);
   return sel;
