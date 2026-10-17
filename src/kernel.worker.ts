@@ -477,9 +477,9 @@ function flattestFit(shape: Shape3D, op: EdgeOp): { shape: Shape3D; angle: numbe
 }
 
 /** Apply fillets/chamfers in order, shrinking any that are too big for the shape. */
-function applyEdgeOps(shape: Shape3D, ops: EdgeOp[]): Shape3D {
+function applyEdgeOps(shape: Shape3D, ops: EdgeOp[], which: (op: EdgeOp) => boolean = () => true): Shape3D {
   for (const [i, op] of ops.entries()) {
-    if (op.size <= 0 || (op.target === "picked" && op.points.length === 0)) continue;
+    if (!which(op) || op.size <= 0 || (op.target === "picked" && op.points.length === 0)) continue;
     const label = `${op.type === "fillet" ? "Fillet" : op.type === "bevel" ? "Bevel" : "Chamfer"} ${i + 1}`;
     if (facetedBuild && op.target !== "picked" && !facetedTargets(shape, op).length)
       throw new Error(`${label}: there are no sharp corners there to ${op.type === "fillet" ? "round" : "cut"} (this solid was made from a mesh and its curves are smooth; import the part as a STEP file for real edges).`);
@@ -508,14 +508,62 @@ function buildOwn(f: Feature): Shape3D | null {
   if (shape && finished && f.edgeOps.length) {
     facetedBuild = isFaceted(f);
     try {
-      shape = applyEdgeOps(shape, f.edgeOps);
+      shape = applyEdgeOps(shape, f.edgeOps, (o) => !o.afterHoles);
     } finally {
       facetedBuild = false;
     }
   }
   if (shape && finished && f.shell) shape = applyShell(shape, f.shell);
+  if (shape && finished && hasAfterHoles(f)) {
+    // Cut by the holes that reach it first, so the edges they make can be rounded.
+    shape = cutByReachingHoles(f, shape);
+    facetedBuild = isFaceted(f);
+    try {
+      shape = applyEdgeOps(shape, f.edgeOps, (o) => !!o.afterHoles);
+    } finally {
+      facetedBuild = false;
+    }
+  }
   if (shape && clearanceOf(f)) shape = logged(`grow the hole by ${clearanceOf(f)} mm (clearance)`, () => growSolid(shape!, clearanceOf(f)));
   return shape && f.clips?.length ? applyClips(shape, f.clips) : shape;
+}
+
+/** Edge finishes set to go after the holes (a group's always apply to its merged result instead). */
+const hasAfterHoles = (f: Feature) => f.kind !== "group" && f.mode === "solid" && f.edgeOps.some((o) => o.afterHoles);
+
+/** The model being worked on (for an object's after-holes finishes, which need the holes that reach it). */
+let modelFeatures: Feature[] = [];
+
+/** A shape in an object's frame with the holes that reach it cut away. */
+function cutByReachingHoles(f: Feature, shape: Shape3D): Shape3D {
+  const features = modelFeatures;
+  if (!features.some((x) => x.id === f.id)) return shape;
+  const [lo, hi] = shape.boundingBox.bounds;
+  for (const h of cuttingHoles(features, f)) {
+    const hs = branch(features, h);
+    if (!hs) continue;
+    const local = fromWorld(features, f, placeInWorld(features, h, hs));
+    const [a, b] = local.boundingBox.bounds;
+    if ([0, 1, 2].some((k) => a[k] > hi[k] || b[k] < lo[k])) continue;
+    shape = logged(`${f.name}: cut by ${h.name} before its edge finishes`, () => booleanSafe(shape, local, "cut"));
+  }
+  return shape;
+}
+
+/** A shape in the world, moved into an object's own frame (back through its parents). */
+function fromWorld(features: Feature[], f: Feature, shape: Shape3D): Shape3D {
+  const chain: Feature[] = [];
+  for (let n: Feature | undefined = f; n; n = features.find((x) => x.id === n!.parentId)) chain.push(n);
+  for (let i = chain.length - 1; i >= 0; i--) shape = unplace(chain[i], shape);
+  return shape;
+}
+
+/** What an object's after-holes finishes depend on: the holes that reach it, and where they are from it. */
+function afterHolesKey(f: Feature) {
+  if (!hasAfterHoles(f)) return null;
+  const features = modelFeatures;
+  const back = worldMatrix(features, f.id).invert();
+  return cuttingHoles(features, f).map((h) => [geometryKey(features, h.id), back.clone().multiply(worldMatrix(features, h.id)).elements.map(r6)]);
 }
 
 /**
@@ -1090,7 +1138,7 @@ const hasFaceted = (features: Feature[]) => features.some((f) => f.kind === "imp
 function plainFaceted(f: Feature): boolean {
   // Edge finishes that do nothing yet (no size, or no edges picked: as while picking them) don't count.
   const ops = f.edgeOps.filter((o) => o.size > 0 && !(o.target === "picked" && !o.points.length));
-  return f.kind === "imported" && !!f.params.faceted && !ops.length && !f.clips?.length && !f.shell && !f.tilt;
+  return f.kind === "imported" && !!f.params.faceted && !ops.length && !f.edgeOps.some((o) => o.afterHoles) && !f.clips?.length && !f.shell && !f.tilt;
 }
 
 /** Triangles moved by a matrix (a mirroring one turns them back the right way out). */
@@ -1751,7 +1799,7 @@ const meshCache = new Map<string, { mesh: MeshData | null; adjusted: Record<stri
 
 function ownMesh(f: Feature): MeshData | null {
   // An imported solid's geometry is named by its ref (its BREP text can be megabytes).
-  const key = JSON.stringify([f.kind, keyParams(f), f.edgeOps, f.clips ?? [], f.shell ?? null, f.tilt ?? null, isTextured(f) ? f.texture : null]);
+  const key = JSON.stringify([f.kind, keyParams(f), f.edgeOps, f.clips ?? [], f.shell ?? null, f.tilt ?? null, isTextured(f) ? f.texture : null, afterHolesKey(f)]);
   if (!meshCache.has(key)) {
     const outer = adjusted;
     adjusted = {};
@@ -1833,7 +1881,8 @@ let cutFailures: Record<string, string> = {};
 function cutMesh(features: Feature[], f: Feature): MeshData | null {
   if (f.kind === "plane" || f.kind === "sculpt" || (f.kind === "group" && !isMergedGroup(f))) return null;
   const holes = cuttingHoles(features, f);
-  if (!holes.length) return null;
+  // Its own shape already has its holes in it (cut before its edge finishes).
+  if (!holes.length || hasAfterHoles(f)) return null;
   const world = worldMatrix(features, f.id);
   const key = JSON.stringify([
     f.kind === "group" ? geometryKey(features, f.id) : [f.kind, keyParams(f), f.edgeOps, f.clips ?? [], f.shell ?? null, f.tilt ?? null, f.mirrored ?? false],
@@ -2219,6 +2268,7 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
     facetMigrations = {};
     excludeTextured = false; // In case an earlier request stopped half way.
     if ("features" in req) {
+      modelFeatures = req.features;
       rememberBreps(req.features);
       await ensureFonts(req.features);
       // Mesh booleans stand in when OpenCascade's fail (see booleanSafe); have them ready.

@@ -2775,6 +2775,11 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
       );
     }
     box.append(labeled("Edges", target));
+    if (f.kind !== "group" && (op.afterHoles || holesReaching(activeFeatures(doc.features), f).length)) {
+      const after = checkToggle("After holes", !!op.afterHoles, (on) => setOp(op.id, (o) => (on ? (o.afterHoles = true) : delete o.afterHoles)));
+      after.title = "Cut the holes that reach this object first, so the edges they make can be rounded too";
+      box.append(after);
+    }
 
     // Too big for this shape: say what size was used instead, and offer to adopt it.
     const used = edgeAdjustments[op.id];
@@ -2827,7 +2832,10 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
 
   const add = document.createElement("div");
   add.className = "actions";
-  const newOp = (type: EdgeOp["type"]) => update((t) => t.edgeOps.push({ id: newId(), type, size: 1, target: "all", points: [], ...(type === "bevel" ? { angle: 30 } : {}) }));
+  // With holes reaching it, a new finish goes after them, so the hole edges can be picked and rounded too.
+  const afterHoles = f.kind !== "group" && f.mode === "solid" && holesReaching(activeFeatures(doc.features), f).length > 0;
+  const newOp = (type: EdgeOp["type"]) =>
+    update((t) => t.edgeOps.push({ id: newId(), type, size: 1, target: "all", points: [], ...(type === "bevel" ? { angle: 30 } : {}), ...(afterHoles ? { afterHoles: true } : {}) }));
   add.className = "actions edge-add";
   add.append(button("+ Fillet", () => newOp("fillet")), button("+ Chamfer", () => newOp("chamfer")), button("+ Bevel", () => newOp("bevel")));
   items.push(add);

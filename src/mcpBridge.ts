@@ -366,6 +366,7 @@ function applyFields(f: Feature, a: Args) {
       if (size <= 0) throw new Error(`edges[${i}].size must be above 0.`);
       const op: EdgeOp = { id: newId(), type, size, target: target as EdgeOp["target"], points: [] };
       if (type === "bevel") op.angle = Math.min(89, Math.max(1, e.angle === undefined ? 30 : num(e.angle, `edges[${i}].angle`)));
+      if (e.after_holes) op.afterHoles = true;
       return op;
     });
   }
@@ -539,7 +540,7 @@ function describeModel(host: BridgeHost, sketchGeometry: boolean) {
       o.params = { ...rest, entities: `${entities.length} shape(s): ${[...new Set(entities.map((e) => e.type))].join(", ") || "none"} (include_sketch_geometry for details)` };
       if (constraints?.length) o.constraints = constraints.length;
     } else o.params = f.params;
-    if (f.edgeOps.length) o.edges = f.edgeOps.map((op) => ({ type: op.type, size: op.size, edges: op.target, ...(op.angle !== undefined ? { angle: op.angle } : {}) }));
+    if (f.edgeOps.length) o.edges = f.edgeOps.map((op) => ({ type: op.type, size: op.size, edges: op.target, ...(op.angle !== undefined ? { angle: op.angle } : {}), ...(op.afterHoles ? { after_holes: true } : {}) }));
     if (f.shell) o.hollow = f.shell;
     if (f.tilt) o.tilt = f.tilt;
     if (f.texture) o.texture = f.texture;

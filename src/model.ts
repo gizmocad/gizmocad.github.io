@@ -389,6 +389,8 @@ export interface EdgeOp {
   target: EdgeTarget;
   /** A point on each picked edge, in the feature's local frame. */
   points: [number, number, number][];
+  /** Applied after the holes that reach the object are cut, so the edges they make can be rounded too. */
+  afterHoles?: boolean;
 }
 
 /** Kinds that can have fillets/chamfers. A group's apply to its merged result. */

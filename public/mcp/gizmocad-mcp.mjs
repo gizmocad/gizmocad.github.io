@@ -199,6 +199,7 @@ const edgesSchema = {
       size: { type: "number", description: "Fillet radius or chamfer/bevel distance in mm. Too big for the shape: the largest safe size is used and reported." },
       edges: { type: "string", enum: ["all", "top", "bottom", "vertical"], description: "Which edges (default all)." },
       angle: { type: "number", description: "Bevel only: angle of the cut from the flatter face, 1–89° (default 30)." },
+      after_holes: { type: "boolean", description: "Apply after the holes that reach this object are cut, so the edges holes make (such as a hole's rim) are rounded too." },
     },
     required: ["type", "size"],
   },
