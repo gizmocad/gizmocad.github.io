@@ -454,7 +454,8 @@ async function report(host: BridgeHost, ids: string[], result: Args): Promise<Ar
   const shrunk: string[] = [];
   for (const id of ids)
     for (const op of findIn(host, id)?.edgeOps ?? [])
-      if (adjusted[op.id] !== undefined) shrunk.push(adjusted[op.id] > 0 ? `${op.type} ${op.size} mm was too big for these edges; ${adjusted[op.id]} mm was used` : `${op.type} couldn't be applied to these edges at any size`);
+      if (adjusted[`${op.id}@angle`] !== undefined) shrunk.push(`bevel at ${op.angle}° didn't fit at ${op.size} mm, so it was made flatter: ${adjusted[`${op.id}@angle`]}°`);
+      else if (adjusted[op.id] !== undefined) shrunk.push(adjusted[op.id] > 0 ? `${op.type} ${op.size} mm was too big for these edges; ${adjusted[op.id]} mm was used` : `${op.type} couldn't be applied to these edges at any size`);
   if (shrunk.length) out.notes = shrunk;
   return out;
 }

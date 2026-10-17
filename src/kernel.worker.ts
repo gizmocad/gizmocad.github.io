@@ -294,6 +294,14 @@ function bevel(shape: Shape3D, op: EdgeOp, size: number, filter: EdgeFilter | un
 function safeEdgeOp(shape: Shape3D, op: EdgeOp): Shape3D {
   const exact = tryEdgeOp(shape, op, op.size);
   if (exact) return exact;
+  if (op.type === "bevel") {
+    // Keep the distance and make the cut flatter (it reaches less far down the side), if any angle fits.
+    const flatter = flattestFit(shape, op);
+    if (flatter) {
+      adjusted[`${op.id}@angle`] = flatter.angle;
+      return flatter.shape;
+    }
+  }
   let lo = 0;
   let hi = op.size;
   for (let i = 0; i < 10; i++) {
@@ -305,6 +313,25 @@ function safeEdgeOp(shape: Shape3D, op: EdgeOp): Shape3D {
   const result = safe > 0 ? tryEdgeOp(shape, op, safe) : null;
   adjusted[op.id] = result ? safe : 0;
   return result ?? shape;
+}
+
+/** A bevel at its full distance with the steepest angle (below the one asked for) that still fits, if any. */
+function flattestFit(shape: Shape3D, op: EdgeOp): { shape: Shape3D; angle: number } | null {
+  const at = (angle: number) => tryEdgeOp(shape, { ...op, angle }, op.size);
+  if (!at(1)) return null;
+  let lo = 1;
+  let hi = Math.min(89, Math.max(1, op.angle ?? 45));
+  for (let i = 0; i < 10; i++) {
+    const mid = (lo + hi) / 2;
+    if (at(mid)) lo = mid;
+    else hi = mid;
+  }
+  // A whole tenth of a degree, a little under the limit so the result isn't razor-thin.
+  for (let angle = Math.floor(lo * 0.98 * 10) / 10; angle >= 1; angle = Math.round((angle - 0.5) * 10) / 10) {
+    const result = at(angle);
+    if (result) return { shape: result, angle };
+  }
+  return null;
 }
 
 /** Apply fillets/chamfers in order, shrinking any that are too big for the shape. */

@@ -12,7 +12,7 @@
 - **Placing shapes:** click a shape button (or drag it into the view) and a preview follows the mouse. Click to put it
   on the face under the mouse, standing out from that face and snapped to its grid, centre and corners, or on the ground grid.
   Press F while placing to flip it into the face instead (hanging under it, or an axle pointing down). Right-click or Esc cancels.
-- **Hinges, axles, orbits & sliders:** in an object's Connection section, click Hinge / axle, Orbit (circles an axis
+- **Hinges, axles, orbits & sliders:** in an object's Connection section, click Hinge, Orbit (circles an axis
   while staying upright) or Slider, then click a point on
   the object it attaches to, or on the object itself and then the object it attaches to (the face there sets the axis;
   the empty build plate is ignored). It's then attached to that object: Spin/Slide (J) moves it on the

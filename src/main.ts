@@ -958,11 +958,11 @@ function connectionSection(f: Feature, update: (mutate: (f: Feature) => void) =>
   if (!j) {
     const row = document.createElement("div");
     row.className = "actions";
-    const hinge = button("⟳ Hinge / axle…", () => startConnect(f.id, "hinge"));
+    const hinge = button("⟳ Hinge", () => startConnect(f.id, "hinge"));
     hinge.title = "Attach this object to another so it can only turn around an axis (wheels, lids, doors)";
-    const orbit = button("◎ Orbit…", () => startConnect(f.id, "orbit"));
+    const orbit = button("◎ Orbit", () => startConnect(f.id, "orbit"));
     orbit.title = "Attach this object so it circles around an axis while staying upright (Ferris-wheel cabins, planets)";
-    const slider = button("↔ Slider…", () => startConnect(f.id, "slider"));
+    const slider = button("↔ Slider", () => startConnect(f.id, "slider"));
     slider.title = "Attach this object to another so it can only slide along a line (drawers, sliders)";
     row.append(hinge, orbit, slider);
     items.push(row);
@@ -1343,7 +1343,7 @@ function patternSection(f: Feature): HTMLElement[] {
   const items: HTMLElement[] = [section("Repeat")];
   const d = patternDraft?.id === f.id ? patternDraft : null;
   if (!d) {
-    const open = button("⁂ Repeat…", () => {
+    const open = button("⁂ Repeat", () => {
       const ext = viewport.objectExtents(f.id);
       const width = ext ? ext[1].x - ext[0].x : 10;
       // Around the parent's middle (or the origin) by default: e.g. holes round a plate.
@@ -1804,14 +1804,14 @@ function cutSection(f: Feature): HTMLElement[] {
 
   const row = document.createElement("div");
   row.className = "actions";
-  const split = button("✂ Split in two…", () => {
+  const split = button("✂ Split", () => {
     dividerDraft = null;
     const axis: Axis = max.x - min.x >= max.y - min.y ? "x" : "y";
     splitDraft = { id: f.id, axis, tilt: 0, toward: "z", cuts: [mid(axis)], active: 0 };
     renderProperties();
   });
   split.title = "Cut this object into separate pieces, straight or at an angle";
-  const dividers = button("▥ Dividers…", () => {
+  const dividers = button("▥ Dividers", () => {
     splitDraft = null;
     dividerDraft = { id: f.id, axis: max.x - min.x >= max.y - min.y ? "x" : "y", count: 1, thickness: 2, height: Math.round((max.z - min.z) * 1e4) / 1e4 };
     renderProperties();
@@ -2207,6 +2207,14 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
       }
       box.append(note);
     }
+    const flatter = edgeAdjustments[`${op.id}@angle`];
+    if (flatter !== undefined) {
+      const note = document.createElement("div");
+      note.className = "safe-note";
+      note.append(`Too steep to fit at ${formatLength(op.size)} mm, so the cut is made flatter: ${formatLength(flatter)}°.`);
+      note.append(button(`Set to ${formatLength(flatter)}°`, () => setOp(op.id, (o) => (o.angle = flatter)), "link"));
+      box.append(note);
+    }
 
     if (op.target === "picked") {
       const picking = edgePick?.opId === op.id;
@@ -2271,7 +2279,7 @@ function sketchSettings(s: SketchFeature, update: (mutate: (f: Feature) => void)
     return [hint("This sketch is flat: it's only a drawing for now. Make it 3D:"), row, ...placement];
   }
   return [
-    labeled(
+    stacked(
       "Make 3D by",
       segmented(
         [
