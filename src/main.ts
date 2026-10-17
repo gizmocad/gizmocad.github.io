@@ -2156,16 +2156,16 @@ function fitSection(f: Feature, update: (mutate: (f: Feature) => void) => void):
       hint("Grows this hole by this much on every side, so a part the same shape fits into what it cuts. About 0.2 mm is a snug fit on most printers; 0.3–0.5 mm slides freely."),
     ];
   }
-  const make = button("Make a fitting hole", () => makeFittingHole(f.id), "wide");
+  const make = button("Make a clearance cut", () => makeClearanceCut(f.id), "wide");
   make.title = "Add a copy of this as a hole 0.2 mm bigger all round, which cuts what this overlaps but not this object";
-  return [section("Fit"), make, hint("For a peg, lid or insert: place it where it goes, then this cuts a socket 0.2 mm bigger all round in whatever it overlaps. Change the clearance on the new hole.")];
+  return [section("Clearance cut"), make, hint("For a peg, lid or insert: place it where it goes, then this cuts a socket 0.2 mm bigger all round in whatever it overlaps. Change the clearance on the new hole.")];
 }
 
 /** A copy of an object as a hole with clearance, which the object itself ignores (so only what it sits in is cut). */
-function makeFittingHole(id: string) {
+function makeClearanceCut(id: string) {
   const f = findFeature(id);
   if (!f) return;
-  const hole = { ...structuredClone(f), id: newId(), name: `${f.name} fit`, mode: "hole", clearance: 0.2 } as Feature;
+  const hole = { ...structuredClone(f), id: newId(), name: `${f.name} clearance`, mode: "hole", clearance: 0.2 } as Feature;
   for (const k of ["shell", "texture", "joint", "ignoreHoles", "color"] as const) delete hole[k];
   commit((features) => {
     const t = features.find((x) => x.id === id);
