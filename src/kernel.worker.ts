@@ -1734,23 +1734,24 @@ function cutMesh(features: Feature[], f: Feature): MeshData | null {
     let mesh: MeshData | null = null;
     let error: string | undefined;
     try {
-      // A solid made from a mesh is cut as triangles: far quicker than OpenCascade (it's only for the view).
-      const quick = isFaceted(f) && !isTextured(f);
+      // A solid made from a mesh (the object or a hole) is cut as triangles: far quicker than OpenCascade (it's only for the view).
+      const facetedHole = holes.some((h) => hasFaceted(features.filter((x) => subtreeIds(features, h.id).has(x.id))));
+      const quick = (isFaceted(f) || facetedHole) && !isTextured(f);
       if (quick) {
-        const own = f.kind === "imported" && plainFaceted(f) ? facetTriangles(f.params) : shapeTriangles(buildOwn(f)!);
-        let w = transformMesh(own, world);
-        const [lo, hi] = meshBounds(w);
+        const own = f.kind === "group" ? branchTriangles(features, f) : f.kind === "imported" && plainFaceted(f) ? facetTriangles(f.params) : shapeTriangles(buildOwn(f)!);
+        let w = own ? transformMesh(own, world) : null;
+        const [lo, hi] = w ? meshBounds(w) : [[0, 0, 0], [-1, -1, -1]];
         let cut = false;
-        for (const h of holes) {
+        for (const h of w ? holes : []) {
           const ht = branchTriangles(features, h);
           if (!ht) continue;
           const placed = transformMesh(ht, worldMatrix(features, h.id));
           const [a, b] = meshBounds(placed);
           if ([0, 1, 2].some((k) => a[k] > hi[k] || b[k] < lo[k])) continue;
-          w = meshBoolean(w, placed, "cut");
+          w = meshBoolean(w!, placed, "cut");
           cut = true;
         }
-        if (cut) mesh = f.kind === "imported" && plainFaceted(f) ? facetView(transformMesh(w, world.clone().invert())) : meshForView(f.id, w, world);
+        if (cut && w) mesh = f.kind === "imported" && plainFaceted(f) ? facetView(transformMesh(w, world.clone().invert())) : meshForView(f.id, w, world);
       } else {
         const own = f.kind === "group" ? branch(features, f) : buildOwn(f);
         if (own) {
