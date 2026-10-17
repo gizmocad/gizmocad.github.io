@@ -163,7 +163,12 @@ interface SketchSession {
   saved: { position: THREE.Vector3; up: THREE.Vector3; target: THREE.Vector3 };
 }
 
+/** Methods the drawing loop itself calls every frame (they mustn't count as changes). */
+const RENDER_LOOP = new Set(["stepViewTurn", "stepViewFly", "updateMeasureLabel", "updateRulerLabels", "viewMoved", "rememberView", "invalidate"]);
+
 export class Viewport {
+  private needsRender = true;
+  private lastView: { camera: THREE.Camera; matrix: number[]; projection: number[]; width: number; height: number } | null = null;
   private renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
   private camera: THREE.PerspectiveCamera | THREE.OrthographicCamera;
@@ -380,17 +385,66 @@ export class Viewport {
     this.setupBoxSelect();
     new ResizeObserver(() => this.resize()).observe(container);
     this.resize();
+    // Drawn only when something may have changed: the view sits idle otherwise
+    // (redrawing a big model 60 times a second keeps the computer busy for nothing).
+    for (const type of ["pointerdown", "pointermove", "pointerup", "wheel", "keydown", "keyup", "dragover", "drop"]) {
+      window.addEventListener(type, () => (this.needsRender = true), { capture: true, passive: true });
+    }
+    // Every call from the app (new meshes, selection, theme, tools…) may change what's shown.
+    for (const name of Object.getOwnPropertyNames(Viewport.prototype)) {
+      const method = Object.getOwnPropertyDescriptor(Viewport.prototype, name)?.value;
+      if (name === "constructor" || typeof method !== "function" || RENDER_LOOP.has(name)) continue;
+      (this as unknown as Record<string, unknown>)[name] = (...args: unknown[]) => {
+        this.needsRender = true;
+        return (method as (...a: unknown[]) => unknown).apply(this, args);
+      };
+    }
     this.renderer.setAnimationLoop(() => {
       if (!this.sketch) {
         this.stepViewTurn();
         this.stepViewFly();
         this.orbit.update();
       }
+      if (!this.needsRender && !this.viewTurn && !this.viewFly && !this.viewMoved()) return;
+      this.needsRender = false;
+      this.rememberView();
       this.updateMeasureLabel();
       this.updateRulerLabels();
       this.renderer.render(this.scene, this.camera);
       this.viewCube.render(this.camera, this.orbit.target);
     });
+  }
+
+  /** Redraw on the next frame (for changes made from outside, such as the sketch editor's drawing). */
+  invalidate() {
+    this.needsRender = true;
+  }
+
+  /**
+   * Whether the camera moved visibly since the last drawing. The orbit's easing
+   * keeps nudging it by invisible amounts (thousandths of a pixel) for seconds,
+   * so tiny changes don't count.
+   */
+  private viewMoved(): boolean {
+    const c = this.camera;
+    c.updateMatrixWorld();
+    const last = this.lastView;
+    const el = this.renderer.domElement;
+    if (!last || last.camera !== c || last.width !== el.clientWidth || last.height !== el.clientHeight) return true;
+    const a = c.matrixWorld.elements;
+    const scale = Math.max(1e-6, c.position.distanceTo(this.orbit.target));
+    for (let i = 0; i < 16; i++) {
+      const tolerance = i >= 12 ? 2e-5 * scale : 2e-5; // Its position (relative to how far away it looks), then its turn.
+      if (Math.abs(a[i] - last.matrix[i]) > tolerance) return true;
+    }
+    const p = c.projectionMatrix.elements;
+    for (let i = 0; i < 16; i++) if (Math.abs(p[i] - last.projection[i]) > 1e-5 * Math.max(1, Math.abs(p[i]))) return true;
+    return false;
+  }
+
+  private rememberView() {
+    const el = this.renderer.domElement;
+    this.lastView = { camera: this.camera, matrix: [...this.camera.matrixWorld.elements], projection: [...this.camera.projectionMatrix.elements], width: el.clientWidth, height: el.clientHeight };
   }
 
   /** Re-colour the scene for the current light/dark theme. */

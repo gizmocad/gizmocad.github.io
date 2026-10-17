@@ -1047,14 +1047,41 @@ function branchTriangles(features: Feature[], f: Feature | null): WorldMesh | nu
   for (const c of kids.filter((c) => c.mode === "solid")) {
     if (excludeTextured && isTextured(c) && c.kind === "group") continue;
     const k = branchTriangles(features, c);
-    if (k) w = w ? meshBoolean(w, transformMesh(k, localMatrix(c)), "fuse") : transformMesh(k, localMatrix(c));
+    if (!k) continue;
+    const placed = transformMesh(k, localMatrix(c));
+    if (!w) w = placed;
+    else {
+      try {
+        w = meshBoolean(w, placed, "fuse");
+      } catch {
+        // Not watertight enough to merge: kept as separate, overlapping shells (slicers join them).
+        w = joinMeshes(w, placed);
+      }
+    }
   }
   if (!w) return null;
   for (const c of kids.filter((c) => c.mode === "hole")) {
     const k = branchTriangles(features, c);
-    if (k) w = meshBoolean(w, transformMesh(k, localMatrix(c)), "cut");
+    if (!k) continue;
+    try {
+      w = meshBoolean(w, transformMesh(k, localMatrix(c)), "cut");
+    } catch (err) {
+      throw new Error(`the hole ${c.name} couldn't be cut${f ? ` from ${f.name}` : ""}: ${message(err)}`);
+    }
   }
   return w;
+}
+
+/** Two sets of triangles as one (no boolean: overlapping shells stay as they are). */
+function joinMeshes(a: WorldMesh, b: WorldMesh): WorldMesh {
+  const vertices = new Float32Array(a.vertices.length + b.vertices.length);
+  vertices.set(a.vertices);
+  vertices.set(b.vertices, a.vertices.length);
+  const triangles = new Uint32Array(a.triangles.length + b.triangles.length);
+  triangles.set(a.triangles);
+  const shift = a.vertices.length / 3;
+  for (let i = 0; i < b.triangles.length; i++) triangles[a.triangles.length + i] = b.triangles[i] + shift;
+  return { vertices, triangles };
 }
 
 /** The imported geometry as it came in (cached; callers get a copy, since transforms use up their shape). */

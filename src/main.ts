@@ -159,8 +159,6 @@ function activeFeatures(features: Feature[]): Feature[] {
   return kept.map((f) => (f.parentId && !ids.has(f.parentId) ? { ...f, parentId: null, joint: undefined } : f));
 }
 
-const isActive = (id: string) => activeFeatures(doc.features).some((f) => f.id === id);
-
 /** Imported solids' geometry (BREP text, triangles) by ref: undo steps leave it out (it never changes, and can be megabytes). */
 const geometryStore = new Map<string, Pick<ImportedParams, "brep" | "mesh">>();
 
@@ -297,8 +295,29 @@ const viewport = new Viewport($("#viewport"), {
 let buildToken = 0;
 /** The latest rebuild, so others (the AI bridge) can wait for the model to catch up. */
 let latestBuild: Promise<void> = Promise.resolve();
+let buildRunning = false;
+let buildAgain = false;
+/**
+ * Rebuild the model. While a build is running, further edits are gathered
+ * into one more build when it's done, instead of the kernel working through
+ * every one of them in turn (with slow models, that piled up into long lags).
+ */
 function rebuild(): Promise<void> {
-  latestBuild = buildNow();
+  if (buildRunning) {
+    buildAgain = true;
+    return latestBuild;
+  }
+  buildRunning = true;
+  latestBuild = (async () => {
+    try {
+      do {
+        buildAgain = false;
+        await buildNow();
+      } while (buildAgain);
+    } finally {
+      buildRunning = false;
+    }
+  })();
   return latestBuild;
 }
 
@@ -1436,15 +1455,22 @@ function importedFields(f: Extract<Feature, { kind: "imported" }>, update: (muta
 }
 
 /** A mesh's size along each axis: each one stretches it along that axis. */
-function meshSizeFields(f: SculptFeature, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
-  const pos = decodeFloats(f.params.positions);
-  const lo = [Infinity, Infinity, Infinity];
-  const hi = [-Infinity, -Infinity, -Infinity];
-  for (let i = 0; i < pos.length; i += 3)
-    for (let k = 0; k < 3; k++) {
-      lo[k] = Math.min(lo[k], pos[i + k]);
-      hi[k] = Math.max(hi[k], pos[i + k]);
-    }
+/** The last mesh measured, so the panel doesn't decode a big mesh again on every edit. */
+let meshExtents: { positions: string; lo: number[]; hi: number[] } | null = null;
+
+function meshSizeFields(f: SculptFeature): HTMLElement[] {
+  if (meshExtents?.positions !== f.params.positions) {
+    const pos = decodeFloats(f.params.positions);
+    const lo = [Infinity, Infinity, Infinity];
+    const hi = [-Infinity, -Infinity, -Infinity];
+    for (let i = 0; i < pos.length; i += 3)
+      for (let k = 0; k < 3; k++) {
+        lo[k] = Math.min(lo[k], pos[i + k]);
+        hi[k] = Math.max(hi[k], pos[i + k]);
+      }
+    meshExtents = { positions: f.params.positions, lo, hi };
+  }
+  const { lo, hi } = meshExtents;
   return SIZE_LABELS.map((label, i) => {
     const now = hi[i] - lo[i];
     return lengthField(label, Math.round(now * 1e4) / 1e4, (v) => now > 1e-9 && resizeAlong(f.id, i, v / now, (lo[2] + hi[2]) / 2), { min: 0 });
@@ -2403,7 +2429,7 @@ function renderPropertiesPanel() {
     items.push(
       button("✋ Sculpt", () => startSculpt(f.id), "primary wide"),
       section("Size"),
-      ...meshSizeFields(f, update),
+      ...meshSizeFields(f),
       section("Solid"),
       solid,
       hint("A mesh can't be a hole or take fillets, chamfers, shells or textures. As a solid it can; flat areas become single faces, curves keep their small facets."),

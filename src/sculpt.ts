@@ -224,7 +224,10 @@ export function scaleSculpt(p: SculptParams, factor: number): Pick<SculptParams,
 }
 
 export function vertexCount(p: SculptParams): number {
-  return decodeFloats(p.positions).length / 3;
+  // From the base64 text's length (decoding a big mesh just to count it is slow): 12 bytes a point.
+  const s = p.positions;
+  const padding = s.endsWith("==") ? 2 : s.endsWith("=") ? 1 : 0;
+  return ((s.length / 4) * 3 - padding) / 12;
 }
 
 // ---- Brushes -------------------------------------------------------------
