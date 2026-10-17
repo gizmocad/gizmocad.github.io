@@ -510,6 +510,18 @@ function defaultParams(kind: ShapeKind): Feature["params"] {
   }
 }
 
+/**
+ * Colours new objects take in turn (the first one is the default colour). Not
+ * the selection blue or the hole red, so selected objects and holes still stand out.
+ */
+export const AUTO_COLOURS = ["#3ddc97", "#ffb020", "#a77bff", "#f2d33c", "#ff7ac6"];
+
+/** A colour for a new object: whichever of AUTO_COLOURS the model uses least (the earliest on a tie). */
+export function nextColour(features: Feature[]): string {
+  const counts = AUTO_COLOURS.map((c) => features.filter((f) => f.kind !== "group" && f.kind !== "plane" && f.mode === "solid" && (f.color ?? AUTO_COLOURS[0]).toLowerCase() === c).length);
+  return AUTO_COLOURS[counts.indexOf(Math.min(...counts))];
+}
+
 export function createFeature(kind: ShapeKind, existing: Feature[], parentId: string | null = null): Feature {
   const n = existing.filter((f) => f.kind === kind).length + 1;
   const label = kind === "torus" ? "Ring" : kind === "screw" ? "Screw hole" : kind[0].toUpperCase() + kind.slice(1);

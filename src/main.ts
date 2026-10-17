@@ -6,6 +6,7 @@ import {
   FINISHABLE,
   emptyDocument,
   isCadDocument,
+  nextColour,
   newId,
   normalizeDocument,
   PARAM_FIELDS,
@@ -1410,7 +1411,7 @@ function screwFields(f: Extract<Feature, { kind: "screw" }>, update: (mutate: (f
 
 // ---- Colour, hollow, mirror, repeat ---------------------------------------------
 
-const SWATCHES = ["#3ddc97", "#4aa3ff", "#ff6b6b", "#ffb020", "#a77bff", "#ff7ac6", "#f2f2f2", "#555b66"];
+const SWATCHES = ["#3ddc97", "#4aa3ff", "#ff6b6b", "#ffb020", "#a77bff", "#f2d33c", "#ff7ac6", "#f2f2f2", "#555b66"];
 
 /** Colour swatches (plus a picker) for one or more objects. */
 function colourRow(ids: string[], current: string | undefined): HTMLElement {
@@ -2853,6 +2854,8 @@ function addShape(kind: ShapeKind) {
   stopSketchEdit();
   stopSculpt();
   const f = createFeature(kind, doc.features, null);
+  // Each new object stands out from the last ones (holes are shown red anyway).
+  if (kind !== "group" && kind !== "plane" && kind !== "screw") f.color = nextColour(doc.features);
   if (kind === "group") {
     f.parentId = parentId;
     finishAdd(f);

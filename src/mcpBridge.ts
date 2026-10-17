@@ -7,6 +7,7 @@ import { BUILT_IN_FONTS } from "./fonts";
 import {
   FINISHABLE,
   createFeature,
+  nextColour,
   isCadDocument,
   newId,
   normalizeDocument,
@@ -146,6 +147,7 @@ async function run(host: BridgeHost, method: string, a: Args): Promise<unknown> 
       if (!ADDABLE.includes(kind)) throw new Error(`Unknown kind "${String(a.kind)}". Use one of: ${ADDABLE.join(", ")}.`);
       const parent = a.parent ? need(host, String(a.parent)) : null;
       const f = createFeature(kind, host.features(), parent?.id ?? null);
+      if (kind !== "group" && kind !== "plane" && kind !== "screw") f.color = nextColour(host.features());
       applyFields(f, a);
       host.commit((features) => host.insert(features, [f]));
       host.notify(`AI assistant added ${f.name}.`);

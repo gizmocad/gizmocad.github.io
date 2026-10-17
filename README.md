@@ -30,7 +30,7 @@
 - **Repeat:** copies in a row, a grid, or around a circle (e.g. holes round a flange), previewed before they're added.
 - **Hollow:** turn a solid into walls of a set thickness, open at the top or bottom, or closed.
 - **Tilt:** taper an object's sides in or out by an angle (the base keeps its size), or lean the whole shape over along X or Y.
-- **Colours** per object, shown in the view and saved into 3MF exports.
+- **Colours** per object (new objects take turns through green, orange, purple, yellow and pink), shown in the view and saved into 3MF exports.
 - **Measure** (M): click two points (corners and edges snap) for the distance and its X/Y/Z parts; two faces also give their angle.
 - Mark any shape as a **hole**: what it cuts is shown cut as you work, with the hole itself see-through so you can still move it.
   **Show result** shows only the finished boolean result (parts merged), computed by the OpenCascade kernel.
