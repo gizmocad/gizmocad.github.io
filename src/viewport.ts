@@ -845,6 +845,26 @@ export class Viewport {
     this.applyAppearance();
   }
 
+  /**
+   * Start sketching straight away, without waiting for the next build to draw
+   * the scene (a model with big imported parts can take a while, and a failed
+   * build would otherwise leave no grid to draw on). The sketch is placed from
+   * the model; the build fills in the rest when it's done.
+   */
+  enterSketchNow(sketch: Feature, features: Feature[], handler: SketchPointerHandler) {
+    this.features.set(sketch.id, sketch);
+    if (!this.nodes.has(sketch.id)) {
+      const node = new THREE.Group();
+      node.userData.id = sketch.id;
+      node.matrixAutoUpdate = false;
+      node.matrix.copy(worldMatrix(features, sketch.id));
+      this.root.add(node);
+      this.nodes.set(sketch.id, node);
+      node.updateMatrixWorld(true);
+    }
+    this.enterSketch(sketch.id, handler);
+  }
+
   exitSketch() {
     if (!this.sketch) return;
     const { saved } = this.sketch;

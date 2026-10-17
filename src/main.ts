@@ -638,6 +638,9 @@ function startSketchEdit(id: string) {
   }
   document.body.classList.add("sketching");
   refresh();
+  // The grid comes up now, not after the rebuild (which can be slow, or fail, with big imported parts).
+  const sketch = findFeature(id);
+  if (sketch) viewport.enterSketchNow(sketch, doc.features, (e) => sketchEditor?.handle(e));
 }
 
 function stopSketchEdit() {
