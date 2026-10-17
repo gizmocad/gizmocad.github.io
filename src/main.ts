@@ -48,7 +48,7 @@ import {
   type SketchRef,
   type ConstraintType,
 } from "./model";
-import { Box3, Matrix4, Vector3 } from "three";
+import { Box3, BufferAttribute, BufferGeometry, EdgesGeometry, Matrix4, Vector3 } from "three";
 import { CONSTRAINT_LABEL, constraintFits, measure as measureConstraint, refPoints as refPointsOf, solveSketch } from "./constraints";
 import { autosave, build3mf, loadAutosave, outlinesToEntities, parse3mf, parseStl, svgToEntities, type ImportedPart, type MeshPart } from "./fileFormats";
 import { parseDxf, parseFcstd, parseGltf, parseObj, parseOff, parsePly, stem, type PickedFile } from "./importFormats";
@@ -2540,8 +2540,74 @@ function checkToggle(label: string, on: boolean, onChange: (on: boolean) => void
   return row;
 }
 
+/** Corner edges found on each mesh-made solid (by ref): working them out takes a moment on a big mesh. */
+const cornerCounts = new Map<string, number>();
+
+/**
+ * How many corner edges a mesh-made solid has: places where its facets meet
+ * at more than 30° (as the kernel counts them), with each run of joined
+ * pieces counted once (a cylinder's rim is one edge, not dozens). Null if its
+ * triangles aren't to hand yet (an older file, until it's been converted).
+ */
+function cornerEdgeCount(f: Extract<Feature, { kind: "imported" }>): number | null {
+  const known = cornerCounts.get(f.params.ref);
+  if (known !== undefined) return known;
+  const mesh = f.params.mesh ?? geometryStore.get(f.params.ref)?.mesh;
+  if (!mesh) return null;
+  const g = new BufferGeometry();
+  g.setAttribute("position", new BufferAttribute(decodeFloats(mesh.positions), 3));
+  g.setIndex(new BufferAttribute(decodeIndices(mesh.indices), 1));
+  const edges = new EdgesGeometry(g, 30);
+  const p = edges.getAttribute("position").array;
+  const key = (i: number) => `${Math.round(p[i] * 1e4)},${Math.round(p[i + 1] * 1e4)},${Math.round(p[i + 2] * 1e4)}`;
+  const ends: [string, string][] = [];
+  const at = new Map<string, number[]>();
+  for (let i = 0; i < p.length; i += 6) {
+    const pair: [string, string] = [key(i), key(i + 3)];
+    for (const k of pair) at.set(k, [...(at.get(k) ?? []), ends.length]);
+    ends.push(pair);
+  }
+  // Follow each run through points where exactly two pieces meet.
+  const seen = new Uint8Array(ends.length);
+  let count = 0;
+  for (let s = 0; s < ends.length; s++) {
+    if (seen[s]) continue;
+    count++;
+    seen[s] = 1;
+    for (const start of ends[s]) {
+      let point = start;
+      let from = s;
+      for (;;) {
+        const here = at.get(point)!;
+        if (here.length !== 2) break;
+        const next = here[0] === from ? here[1] : here[0];
+        if (seen[next]) break;
+        seen[next] = 1;
+        point = ends[next][0] === point ? ends[next][1] : ends[next][0];
+        from = next;
+      }
+    }
+  }
+  g.dispose();
+  edges.dispose();
+  cornerCounts.set(f.params.ref, count);
+  return count;
+}
+
 function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
   const items: HTMLElement[] = [section("Edges: fillet, chamfer & bevel")];
+  const fromMesh = f.kind === "imported" && !!f.params.faceted;
+  if (f.kind === "imported" && f.params.faceted) {
+    // A mesh has no real edges: say what can be rounded before anyone tries.
+    const corners = cornerEdgeCount(f);
+    const found =
+      corners === null ? "" : corners === 0 ? " <b>No sharp corners:</b> this shape is smooth all over, so there's nothing to round." : ` <b>${corners} corner edge${corners === 1 ? "" : "s"} found.</b>`;
+    items.push(
+      hint(
+        `Made from a mesh: only sharp corners (where its facets meet at more than 30°) can be rounded, and curved edges made of many small facets may fail.${found} For full fillet support, import the part as a STEP file.`,
+      ),
+    );
+  }
   const setOp = (opId: string, mutate: (op: EdgeOp) => void) =>
     update((t) => {
       const op = t.edgeOps.find((o) => o.id === opId);
@@ -2610,6 +2676,10 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
           topOnly.title = "On a thin part the top and bottom roundings meet in the middle; rounding only the top allows a radius up to about the thickness";
           note.append(" ", topOnly);
         }
+      } else if (fromMesh) {
+        note.append(
+          "These edges can't be rounded at any size, so this step is skipped. On a solid made from a mesh, curved edges made of many small facets usually can't be: try a smaller size, fewer edges (Picked edges), or import the part as a STEP file.",
+        );
       } else {
         note.append("These edges can't be rounded at any size, so this step is skipped.");
       }

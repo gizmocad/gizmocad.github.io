@@ -479,7 +479,7 @@ function applyEdgeOps(shape: Shape3D, ops: EdgeOp[]): Shape3D {
     if (op.size <= 0 || (op.target === "picked" && op.points.length === 0)) continue;
     const label = `${op.type === "fillet" ? "Fillet" : op.type === "bevel" ? "Bevel" : "Chamfer"} ${i + 1}`;
     if (facetedBuild && op.target !== "picked" && !facetedTargets(shape, op).length)
-      throw new Error(`${label}: there are no corners there to ${op.type === "fillet" ? "round" : "cut"} (its curves are smooth).`);
+      throw new Error(`${label}: there are no sharp corners there to ${op.type === "fillet" ? "round" : "cut"} (this solid was made from a mesh and its curves are smooth; import the part as a STEP file for real edges).`);
     try {
       shape = logged(`${label} (${op.size} mm, ${op.target} edges)`, () => safeEdgeOp(shape, op));
     } catch {
