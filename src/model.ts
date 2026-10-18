@@ -464,6 +464,8 @@ export interface Sweep {
   frame: number[];
   from: number;
   to: number;
+  /** The moving part it was made from (shown swinging while an end is dragged). */
+  source?: string;
 }
 
 export type Feature =

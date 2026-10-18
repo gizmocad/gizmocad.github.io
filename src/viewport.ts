@@ -1080,6 +1080,8 @@ export class Viewport {
     from: number;
     to: number;
     drag: { end: "from" | "to"; plane: THREE.Plane; value: number } | null;
+    /** The part that swings (made into this cut), shown moving with the handle being dragged. */
+    source: { node: THREE.Object3D; joint: Joint; base: THREE.Matrix4 } | null;
   } | null = null;
 
   private drawSwing(sel: { f: Feature; node: THREE.Object3D } | null) {
@@ -1155,9 +1157,22 @@ export class Viewport {
       group.add(mesh);
       return { end, mesh };
     });
-    this.swing = { id: f.id, group, handles, at, valueAt, axis, centre, slider, from: s.from, to: s.to, drag: keepDrag };
+    // The part it was made from: recorded on newer cuts; otherwise the jointed part that this cut leaves alone.
+    const src = (s.source && this.features.get(s.source)) || [...this.features.values()].find((x) => x.joint && x.ignoreHoles?.includes(f.id));
+    const srcNode = src?.joint ? this.nodes.get(src.id) : undefined;
+    const source = src?.joint && srcNode ? { node: srcNode, joint: src.joint, base: baseMatrix(src) } : null;
+    this.swing = { id: f.id, group, handles, at, valueAt, axis, centre, slider, from: s.from, to: s.to, drag: keepDrag, source };
     if (keepDrag) this.swing[keepDrag.end] = keepDrag.value;
     this.placeSwing();
+  }
+
+  /** Show the swinging part at a joint value (its own value puts it back). */
+  private poseSource(value: number) {
+    const src = this.swing?.source;
+    if (!src) return;
+    const at = new THREE.Vector3().setFromMatrixPosition(src.base);
+    jointMatrix(src.joint, value, at).multiply(src.base.clone()).decompose(src.node.position, src.node.quaternion, new THREE.Vector3());
+    this.needsRender = true;
   }
 
   /** Lay the arc and the handles out for the current range. */
@@ -1205,6 +1220,7 @@ export class Viewport {
           if (normal.lengthSq() < 1e-6) normal = view;
         }
         w.drag = { end: h.end, plane: new THREE.Plane().setFromNormalAndCoplanarPoint(normal, point), value: w[h.end] };
+        this.poseSource(w[h.end]);
       },
       true,
     );
@@ -1226,6 +1242,7 @@ export class Viewport {
         w.drag.value = value;
         w[w.drag.end] = value;
         this.placeSwing();
+        this.poseSource(value);
         this.needsRender = true;
       },
       true,
@@ -1235,6 +1252,7 @@ export class Viewport {
       if (!w?.drag) return;
       const { end, value } = w.drag;
       w.drag = null;
+      if (w.source) this.poseSource(w.source.joint.value);
       this.events.onSweepMoved(w.id, end, value);
     };
     host.addEventListener("pointerup", finish, true);

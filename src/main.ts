@@ -2334,7 +2334,7 @@ function makeClearanceCut(id: string, sweep = false) {
     const h = features.find((x) => x.id === hole.id);
     if (sweep && t.joint && h) {
       const [from, to] = sweepRange(t.joint);
-      h.sweep = { joint: structuredClone(t.joint), position: { ...t.position }, frame: localMatrix(h).toArray(), from, to };
+      h.sweep = { joint: structuredClone(t.joint), position: { ...t.position }, frame: localMatrix(h).toArray(), from, to, source: t.id };
     }
   });
   selectedIds = [hole.id];
