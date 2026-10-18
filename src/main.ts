@@ -3583,32 +3583,65 @@ function deleteIds(targets: string[]) {
 }
 
 /** The model as an STL or STEP file. */
-async function modelFile(format: "stl" | "step"): Promise<Blob> {
-  const sculpts = doc.features.filter((f): f is SculptFeature => f.kind === "sculpt");
+/**
+ * What an export holds: the selected objects, each with the holes that reach
+ * it still cut (lifted out of their groups, keeping where they are), or the
+ * whole model when nothing is selected. `label` names the selection.
+ */
+function exportFeatures(): { features: Feature[]; label: string | null } {
+  const all = activeFeatures(doc.features);
+  const targets = topSelected().filter((id) => all.some((f) => f.id === id));
+  if (!targets.length) return { features: all, label: null };
+  const features = structuredClone(all);
+  const inTargets = (id: string) => targets.some((t) => subtreeIds(features, t).has(id));
+  const holes = new Set<string>();
+  for (const id of targets) {
+    const f = features.find((x) => x.id === id)!;
+    for (const h of holesReaching(features, f)) if (!ignoresHole(features, f, h.id) && !inTargets(h.id)) holes.add(h.id);
+  }
+  const keep = new Set<string>();
+  for (const id of [...targets, ...holes]) {
+    reparent(features, id, null);
+    for (const x of subtreeIds(features, id)) keep.add(x);
+  }
+  const out = features.filter((f) => keep.has(f.id));
+  // A selected hole exports as its shape.
+  for (const f of out) if (targets.includes(f.id) && f.mode === "hole") f.mode = "solid";
+  const names = targets.map((id) => findFeature(id)!.name);
+  return { features: out, label: names.length === 1 ? names[0] : names.length === 2 ? `${names[0]} and ${names[1]}` : `${names.length} selected objects` };
+}
+
+/** A file name from an object's name. */
+const fileStem = (label: string | null) => (label ? label.replace(/[\\/:*?"<>|]+/g, "").trim() || "gizmocad-model" : "gizmocad-model");
+
+async function modelFile(format: "stl" | "step", features: Feature[] = doc.features): Promise<Blob> {
+  const sculpts = features.filter((f): f is SculptFeature => f.kind === "sculpt");
   let blob: Blob | null = null;
   try {
-    blob = await kernel.export(doc.features, format);
+    blob = await kernel.export(features, format);
   } catch (err) {
     // A model made only of sculpts has nothing for the kernel to export.
     if (!(format === "stl" && sculpts.length && /Nothing to export/.test((err as Error).message))) throw err;
   }
   // Sculpts are meshes: they go into STL (with any holes cut through them), but STEP only holds exact solids.
   if (format === "stl" && sculpts.length) {
-    const cut = await kernel.cutMeshes(activeFeatures(doc.features));
-    blob = await appendToStl(blob, sculpts.map((f) => cut[f.id] ?? sculptTriangles(f.params, worldMatrix(doc.features, f.id))));
+    const cut = await kernel.cutMeshes(activeFeatures(features));
+    blob = await appendToStl(blob, sculpts.map((f) => cut[f.id] ?? sculptTriangles(f.params, worldMatrix(features, f.id))));
   }
   return blob!;
 }
 
 async function exportModel(format: "stl" | "step") {
-  setStatus(`Exporting ${format.toUpperCase()}…`);
-  const sculpts = doc.features.filter((f): f is SculptFeature => f.kind === "sculpt");
+  const { features, label } = exportFeatures();
+  setStatus(`Exporting ${label ? `${label} as ` : ""}${format.toUpperCase()}…`);
+  const sculpts = features.filter((f): f is SculptFeature => f.kind === "sculpt");
   try {
-    const blob = await modelFile(format);
+    const blob = await modelFile(format, features);
     const warning = kernel.exportWarning;
-    await saveFile(blob, `gizmocad-model.${format}`, format.toUpperCase(), format);
+    await saveFile(blob, `${fileStem(label)}.${format}`, format.toUpperCase(), format);
     if (warning) setStatus(`Exported, but: ${warning}`, true);
-    else setStatus(format === "step" && sculpts.length ? "Sculpted objects aren't in the STEP file (STEP only holds exact solids); export STL to include them." : "");
+    else if (format === "step" && sculpts.length) setStatus("Sculpted objects aren't in the STEP file (STEP only holds exact solids); export STL to include them.");
+    else setStatus(label ? `Exported ${label} only (nothing selected exports everything).` : "");
   } catch (err) {
     setStatus(`Export failed: ${(err as Error).message}`, true);
   }
@@ -3709,6 +3742,14 @@ onThemeChange(() => {
 const appMenu = $("#app-menu");
 const appMenuButton = $("#app-menu-button");
 function setAppMenu(open: boolean) {
+  if (open) {
+    // The exports say whether they'll hold the selection or the whole model.
+    const { label } = exportFeatures();
+    appMenu.querySelectorAll<HTMLElement>("[id^=export-] .note").forEach((note) => {
+      note.dataset.usual ??= note.textContent ?? "";
+      note.textContent = label ? `only ${label}` : note.dataset.usual;
+    });
+  }
   appMenu.hidden = !open;
   appMenuButton.setAttribute("aria-expanded", String(open));
   document.body.classList.toggle("menu-open", open);
@@ -4435,8 +4476,8 @@ async function modelBatch(title: string, file: PickedFile): Promise<ImportBatch>
 }
 
 /** The model as a 3MF file: each part its own object, with its colour. */
-async function file3mf(): Promise<Blob> {
-  const features = kernel.snapshot(activeFeatures(doc.features));
+async function file3mf(chosen: Feature[] = activeFeatures(doc.features)): Promise<Blob> {
+  const features = kernel.snapshot(chosen);
   const meshes = await kernel.parts(features);
   const parts: MeshPart[] = meshes.map((m) => {
     const f = features.find((x) => x.id === m.id)!;
@@ -4454,10 +4495,11 @@ async function file3mf(): Promise<Blob> {
 }
 
 async function export3mf() {
-  setStatus("Exporting 3MF…");
+  const { features, label } = exportFeatures();
+  setStatus(`Exporting ${label ? `${label} as ` : ""}3MF…`);
   try {
-    await saveFile(await file3mf(), "gizmocad-model.3mf", "3MF", "3mf");
-    setStatus("");
+    await saveFile(await file3mf(features), `${fileStem(label)}.3mf`, "3MF", "3mf");
+    setStatus(label ? `Exported ${label} only (nothing selected exports everything).` : "");
   } catch (err) {
     setStatus(`Export failed: ${(err as Error).message}`, true);
   }

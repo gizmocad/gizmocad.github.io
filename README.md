@@ -88,6 +88,7 @@
     corners count as edges. Bigger or open meshes stay meshes; **Make it a solid** converts one (or a sculpt) later;
   - **DXF** and **SVG** drawings as sketches (lines and arcs that join up become shapes, holes included);
   - another **GizmoCAD** model, brought into this one.
+- **Exports** hold just the selected objects (with the holes that reach them still cut) when something is selected, or the whole model when nothing is.
 - **Combine:** select several objects and click **⧉ Combine** to join them into one shape (it shows, rounds and exports as one solid). A group's **Combine into one shape** switch turns this on or off.
 - **Folders:** groups (Group button, Ctrl+G, or drag objects onto each other in the list) fold shut with the ▾ arrow beside them.
 - **Clearance:** a hole can grow by a set amount on every side, so a part the same shape fits into what it cuts.
