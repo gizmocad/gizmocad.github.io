@@ -782,12 +782,18 @@ function sweepMesh(w: WorldMesh, s: Sweep, clearance = 0): WorldMesh {
   // Fewer triangles in each copy: detail finer than the gaps between copies is lost in the sweep anyway.
   const base = whole.simplify(tol / 2);
   whole.delete();
-  const copies = [];
+  const copies: InstanceType<ManifoldLib["Manifold"]>[] = [];
   try {
+    const poses: Matrix4[] = [];
     for (let i = 0; i <= count; i++) {
       const value = lo + ((hi - lo) * i) / count;
       const m = back.clone().multiply(jointMatrix(s.joint, value, s.position)).multiply(from).multiply(frame);
+      poses.push(m);
       copies.push(base.transform(m.elements as Parameters<typeof base.transform>[0]));
+    }
+    if (s.joint.type === "hinge") {
+      const axis = new Vector3(s.joint.axis.x, s.joint.axis.y, s.joint.axis.z).transformDirection(frame.clone().invert());
+      copies.push(...logged("fill the gaps between the sweep's copies", () => sweepGaps(M, base, poses, axis, tol)));
     }
     const joined = M.Manifold.union(copies);
     // The seams between copies leave many tiny facets: merge those that change the shape by under 0.01 mm.
@@ -801,6 +807,81 @@ function sweepMesh(w: WorldMesh, s: Sweep, clearance = 0): WorldMesh {
   } finally {
     for (const c of [base, ...copies]) c.delete();
   }
+}
+
+/**
+ * What the copies of a sweep miss: behind a sharp corner, two copies side by
+ * side leave a V-shaped notch (deep far out from a hinge) that the moving part
+ * really passes through. Each triangle on the sweep's edge (where the surface
+ * turns from facing the way it moves to facing away) fills the space it moves
+ * through between neighbouring copies.
+ */
+function sweepGaps(M: ManifoldLib, base: InstanceType<ManifoldLib["Manifold"]>, poses: Matrix4[], axis: Vector3, minGap: number) {
+  const mesh = base.getMesh();
+  const stride = mesh.numProp;
+  const tris = mesh.triVerts;
+  const nv = mesh.vertProperties.length / stride;
+  const pts = Array.from({ length: nv }, (_, i) => new Vector3(mesh.vertProperties[i * stride], mesh.vertProperties[i * stride + 1], mesh.vertProperties[i * stride + 2]));
+  const nt = tris.length / 3;
+  // Each triangle's neighbours (across its edges), and its normal and middle.
+  const edgeOwner = new Map<number, number>();
+  const neighbours: number[][] = Array.from({ length: nt }, () => []);
+  const normals: Vector3[] = [];
+  const middles: Vector3[] = [];
+  for (let t = 0; t < nt; t++) {
+    const [a, b, c] = [pts[tris[t * 3]], pts[tris[t * 3 + 1]], pts[tris[t * 3 + 2]]];
+    normals.push(b.clone().sub(a).cross(c.clone().sub(a)).normalize());
+    middles.push(a.clone().add(b).add(c).divideScalar(3));
+    for (let k = 0; k < 3; k++) {
+      const [u, v] = [tris[t * 3 + k], tris[t * 3 + ((k + 1) % 3)]];
+      const key = Math.min(u, v) * nv + Math.max(u, v);
+      const other = edgeOwner.get(key);
+      if (other === undefined) edgeOwner.set(key, t);
+      else {
+        neighbours[t].push(other);
+        neighbours[other].push(t);
+      }
+    }
+  }
+  const fills: InstanceType<ManifoldLib["Manifold"]>[] = [];
+  const side = new Float32Array(nt);
+  const moved = new Float32Array(nt);
+  const v = new Vector3();
+  for (let i = 0; i + 1 < poses.length; i++) {
+    // The step's motion in the shape's own frame: which way each triangle faces it.
+    const step = poses[i].clone().invert().multiply(poses[i + 1]);
+    for (let t = 0; t < nt; t++) {
+      v.copy(middles[t]).applyMatrix4(step).sub(middles[t]);
+      const len = v.length();
+      moved[t] = len;
+      side[t] = len > 1e-9 ? normals[t].dot(v) / len : 0;
+    }
+    const edge = new Uint8Array(nt);
+    for (let t = 0; t < nt; t++) {
+      // Faces square to the hinge's axis turn within their own plane: no notches there.
+      if (Math.abs(normals[t].dot(axis)) > 0.9) continue;
+      // Near the axis it hardly moves between copies: any notch there is tiny.
+      if (moved[t] < minGap) continue;
+      edge[t] = Number(Math.abs(side[t]) < 0.1 || neighbours[t].some((n) => Math.abs(side[n]) >= 0.1 && Math.sign(side[n]) !== Math.sign(side[t])));
+    }
+    // Two edge triangles side by side in one plane (usually a rectangle) fill as one.
+    const done = new Uint8Array(nt);
+    for (let t = 0; t < nt; t++) {
+      if (!edge[t] || done[t]) continue;
+      done[t] = 1;
+      const mate = neighbours[t].find((n) => edge[n] && !done[n] && normals[n].dot(normals[t]) > 0.9999);
+      const ids = new Set([tris[t * 3], tris[t * 3 + 1], tris[t * 3 + 2]]);
+      if (mate !== undefined) {
+        done[mate] = 1;
+        for (let k = 0; k < 3; k++) ids.add(tris[mate * 3 + k]);
+      }
+      const corners = [...ids].flatMap((id) => [pts[id].clone().applyMatrix4(poses[i]), pts[id].clone().applyMatrix4(poses[i + 1])].map((q) => [q.x, q.y, q.z] as [number, number, number]));
+      const hull = M.Manifold.hull(corners);
+      if (hull.isEmpty()) hull.delete();
+      else fills.push(hull);
+    }
+  }
+  return fills;
 }
 
 /** A big box filling one side of a tilted cut plane, around the shape's bounds lo..hi. */
