@@ -810,11 +810,10 @@ function sweepMesh(w: WorldMesh, s: Sweep, clearance = 0): WorldMesh {
 }
 
 /**
- * What the copies of a sweep miss: behind a sharp corner, two copies side by
- * side leave a V-shaped notch (deep far out from a hinge) that the moving part
- * really passes through. Each triangle on the sweep's edge (where the surface
- * turns from facing the way it moves to facing away) fills the space it moves
- * through between neighbouring copies.
+ * What the copies of a sweep miss between them: behind a sharp corner a
+ * V-shaped notch, and past a thin part (a blade's edge, a pin's chamfer) a gap
+ * the part really passes through, left standing as shards. Each face moving
+ * forward fills the space it moves through between neighbouring copies.
  */
 function sweepGaps(M: ManifoldLib, base: InstanceType<ManifoldLib["Manifold"]>, poses: Matrix4[], axis: Vector3, minGap: number) {
   const mesh = base.getMesh();
@@ -858,12 +857,12 @@ function sweepGaps(M: ManifoldLib, base: InstanceType<ManifoldLib["Manifold"]>, 
     }
     const edge = new Uint8Array(nt);
     for (let t = 0; t < nt; t++) {
-      // A notch forms only where a face turned towards the motion meets one turned away (a face along
-      // the motion, or one hardly moving, leaves no more than the arc's own small sag between copies).
-      if (moved[t] < minGap || Math.abs(side[t]) < 0.02) continue;
-      edge[t] = Number(neighbours[t].some((n) => Math.abs(side[n]) >= 0.02 && Math.sign(side[n]) !== Math.sign(side[t])));
+      // Only the faces moving forward sweep new space (one along the motion, or one hardly moving,
+      // leaves no more than the arc's own small sag between copies).
+      if (moved[t] < minGap || side[t] < 0.02) continue;
+      edge[t] = 1;
     }
-    // Neighbouring edge triangles nearly in one plane (within the tolerance) fill as one:
+    // Neighbouring forward faces nearly in one plane (within the tolerance) fill as one:
     // far fewer pieces to join, and the shape strays from the true sweep by no more than the tolerance.
     const done = new Uint8Array(nt);
     for (let t = 0; t < nt; t++) {
