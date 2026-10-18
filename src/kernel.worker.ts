@@ -741,7 +741,7 @@ function sweptTriangles(f: Feature, unswept?: Shape3D): WorldMesh {
   let w = sweptCache.get(key);
   if (!w) {
     const base = f.kind === "imported" && plainFaceted(f) ? facetGrown(f) : shapeTriangles(unswept ?? buildOwn(f, false)!);
-    w = logged(`sweep the hole through ${fmtRange(s)}`, () => sweepMesh(base, s));
+    w = logged(`sweep the hole through ${fmtRange(s)}`, () => sweepMesh(base, s, clearanceOf(f)));
     sweptCache.set(key, w);
     if (sweptCache.size > 16) sweptCache.delete(sweptCache.keys().next().value!);
   }
@@ -751,13 +751,18 @@ const sweptCache = new Map<string, WorldMesh>();
 
 const fmtRange = (s: Sweep) => `${s.from} to ${s.to}${s.joint.type === "slider" ? " mm" : "°"}`;
 
-/** Triangles moved through a joint's range (copies close enough together that the gaps between them are tiny), joined into one shape. */
-function sweepMesh(w: WorldMesh, s: Sweep): WorldMesh {
+/**
+ * Triangles moved through a joint's range (copies close enough together that
+ * the gaps between them are tiny), joined into one shape. With clearance the
+ * gaps can be a quarter of it (up to 0.1 mm): far fewer copies, and quicker.
+ */
+function sweepMesh(w: WorldMesh, s: Sweep, clearance = 0): WorldMesh {
+  const tol = Math.max(0.03, Math.min(0.1, clearance / 4));
   const M = manifoldReady;
   if (!M) throw new Error("The mesh library isn't loaded.");
   const [lo, hi] = [Math.min(s.from, s.to), Math.max(s.from, s.to)];
   const frame = new Matrix4().fromArray(s.frame);
-  // Copies close enough that the shape strays under 0.03 mm between them: for a hinge, by how far it reaches from the axis.
+  // Copies close enough that the shape strays under `tol` between them: for a hinge, by how far it reaches from the axis.
   let step = 0.1;
   if (s.joint.type !== "slider") {
     const o = new Vector3(s.joint.origin.x, s.joint.origin.y, s.joint.origin.z);
@@ -768,12 +773,15 @@ function sweepMesh(w: WorldMesh, s: Sweep): WorldMesh {
       v.fromArray(w.vertices, i).applyMatrix4(frame).sub(o);
       reach = Math.max(reach, v.sub(axis.clone().multiplyScalar(v.dot(axis))).length());
     }
-    step = Math.max(0.25, (2 * Math.acos(Math.max(-1, 1 - 0.03 / reach)) * 180) / Math.PI);
+    step = Math.max(0.25, (2 * Math.acos(Math.max(-1, 1 - tol / reach)) * 180) / Math.PI);
   }
   const count = Math.min(240, Math.max(1, Math.ceil((hi - lo) / step)));
   const back = frame.clone().invert();
   const from = jointMatrix(s.joint, s.joint.value, s.position).invert();
-  const base = toManifold(M, w, "the hole's shape has gaps, so its swing can't be swept.");
+  const whole = toManifold(M, w, "the hole's shape has gaps, so its swing can't be swept.");
+  // Fewer triangles in each copy: detail finer than the gaps between copies is lost in the sweep anyway.
+  const base = whole.simplify(tol / 2);
+  whole.delete();
   const copies = [];
   try {
     for (let i = 0; i <= count; i++) {
@@ -1307,11 +1315,14 @@ function branchTriangles(features: Feature[], f: Feature | null, inherited: Mesh
   };
   // Fillets on a merged group, or a split, need the exact result.
   if (f && ((f.kind === "group" && isMergedGroup(f)) || f.clips?.length)) {
-    const s = branch(features, f);
     // A merged group's triangles are kept with its shape (triangulating a big rounded one takes a while).
-    const entry = f.kind === "group" ? branchCache.get(branchKey(features, f)) : undefined;
-    const tris = entry && entry.shape ? (entry.tris ??= s && shapeTriangles(s)) : s && shapeTriangles(s);
-    s?.delete();
+    let tris: WorldMesh | null;
+    if (f.kind === "group") tris = groupTriangles(features, f);
+    else {
+      const s = branch(features, f);
+      tris = s && shapeTriangles(s);
+      s?.delete();
+    }
     return tris && cutAll(tris, reaching(inherited, f), f);
   }
   if (inherited.length || anyIgnoredHoles(features)) {
@@ -1836,7 +1847,42 @@ function branchIgnoring(features: Feature[], self: Feature | null, inherited: Cu
  * the way. Callers get copies: placing a shape uses it up.
  */
 const branchCache = new Map<string, { shape: Shape3D | null; failures: Record<string, string>; adjusted: Record<string, number>; tris?: WorldMesh | null }>();
-const branchKey = (features: Feature[], self: Feature) => JSON.stringify([geometryKey(features, self.id), excludeTextured]);
+const branchKey = (features: Feature[], self: Feature) => JSON.stringify([geometryKey(features, self.id), excludeTextured, unswept]);
+
+/** While set, hole groups are built without their sweep (it's then done on their triangles: see groupTriangles). */
+let unswept = false;
+
+/**
+ * A hole group's shape as triangles in its own frame. A swept one is swept as
+ * triangles and left that way: making its exact solid takes a minute or more,
+ * and only a STEP export needs it.
+ */
+function groupTriangles(features: Feature[], f: Feature): WorldMesh | null {
+  const s = unswept ? null : sweepOf(f);
+  if (!s) {
+    const shape = branch(features, f);
+    const entry = branchCache.get(branchKey(features, f));
+    const tris = entry && entry.shape ? (entry.tris ??= shape && shapeTriangles(shape)) : shape && shapeTriangles(shape);
+    shape?.delete();
+    return tris;
+  }
+  const was = unswept;
+  unswept = true;
+  try {
+    const key = `group|${branchKey(features, f)}`;
+    let w = sweptCache.get(key);
+    if (!w) {
+      const base = groupTriangles(features, f);
+      if (!base) return null;
+      w = logged(`${f.name}: sweep the hole through ${fmtRange(s)}`, () => sweepMesh(base, s, clearanceOf(f)));
+      sweptCache.set(key, w);
+      if (sweptCache.size > 16) sweptCache.delete(sweptCache.keys().next().value!);
+    }
+    return w;
+  } finally {
+    unswept = was;
+  }
+}
 
 function branch(features: Feature[], self: Feature | null, inherited: Cutter[] = []): Shape3D | null {
   // A merged group's shape depends only on what's inside it (unless something in it waits for outside holes).
@@ -1904,8 +1950,8 @@ function finishBranch(self: Feature, result: Shape3D, hasKids: boolean): Shape3D
     const s = sweepOf(self);
     try {
       if (by) result = logged(`${self.name}: grow the hole by ${by} mm (clearance)`, () => growSolid(result, by));
-      if (s) {
-        const w = logged(`${self.name}: sweep the hole through ${fmtRange(s)}`, () => sweepMesh(shapeTriangles(result), s));
+      if (s && !unswept) {
+        const w = logged(`${self.name}: sweep the hole through ${fmtRange(s)}`, () => sweepMesh(shapeTriangles(result), s, by));
         result = logged("make the swept hole a solid", () => solidFromTriangles(w.vertices, w.triangles, [1, 1, 1], "bodies"));
         knownTriangles.set(result, w);
       }
@@ -2505,9 +2551,15 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
                 const outer = adjusted;
                 adjusted = {};
                 try {
-                  const shape = logged(`${f.name}: its merged shape`, () => branch(req.features, f));
-                  kept = { mesh: shape && textured(f, toMesh(f.id, shape)), adjusted, failures: { ...failures } };
-                  shape?.delete();
+                  if (sweepOf(f)) {
+                    // A swept hole group stays as triangles (see groupTriangles).
+                    const w = logged(`${f.name}: its merged shape`, () => groupTriangles(req.features, f));
+                    kept = { mesh: w && { ...meshForView("", w, null), id: f.id }, adjusted, failures: { ...failures } };
+                  } else {
+                    const shape = logged(`${f.name}: its merged shape`, () => branch(req.features, f));
+                    kept = { mesh: shape && textured(f, toMesh(f.id, shape)), adjusted, failures: { ...failures } };
+                    shape?.delete();
+                  }
                 } finally {
                   adjusted = Object.assign(outer, adjusted);
                 }
