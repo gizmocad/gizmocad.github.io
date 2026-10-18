@@ -754,10 +754,10 @@ const fmtRange = (s: Sweep) => `${s.from} to ${s.to}${s.joint.type === "slider" 
 /**
  * Triangles moved through a joint's range (copies close enough together that
  * the gaps between them are tiny), joined into one shape. With clearance the
- * gaps can be a quarter of it (up to 0.1 mm): far fewer copies, and quicker.
+ * gaps can be half of it (up to 0.15 mm): far fewer copies, and quicker.
  */
 function sweepMesh(w: WorldMesh, s: Sweep, clearance = 0): WorldMesh {
-  const tol = Math.max(0.03, Math.min(0.1, clearance / 4));
+  const tol = Math.max(0.03, Math.min(0.15, clearance / 2));
   const M = manifoldReady;
   if (!M) throw new Error("The mesh library isn't loaded.");
   const [lo, hi] = [Math.min(s.from, s.to), Math.max(s.from, s.to)];
@@ -858,22 +858,35 @@ function sweepGaps(M: ManifoldLib, base: InstanceType<ManifoldLib["Manifold"]>, 
     }
     const edge = new Uint8Array(nt);
     for (let t = 0; t < nt; t++) {
-      // A face nearly square to the hinge's axis turns almost within its own plane: its notches are only
-      // as deep as its slope over the distance it moves (a blade's ground edge leaves ridges this way).
-      const c = Math.abs(normals[t].dot(axis));
-      if (moved[t] * (c < 1e-6 ? Infinity : Math.sqrt(1 - c * c) / c) < minGap) continue;
-      edge[t] = Number(Math.abs(side[t]) < 0.1 || neighbours[t].some((n) => Math.abs(side[n]) >= 0.1 && Math.sign(side[n]) !== Math.sign(side[t])));
+      // A notch forms only where a face turned towards the motion meets one turned away (a face along
+      // the motion, or one hardly moving, leaves no more than the arc's own small sag between copies).
+      if (moved[t] < minGap || Math.abs(side[t]) < 0.02) continue;
+      edge[t] = Number(neighbours[t].some((n) => Math.abs(side[n]) >= 0.02 && Math.sign(side[n]) !== Math.sign(side[t])));
     }
-    // Two edge triangles side by side in one plane (usually a rectangle) fill as one.
+    // Neighbouring edge triangles nearly in one plane (within the tolerance) fill as one:
+    // far fewer pieces to join, and the shape strays from the true sweep by no more than the tolerance.
     const done = new Uint8Array(nt);
     for (let t = 0; t < nt; t++) {
       if (!edge[t] || done[t]) continue;
       done[t] = 1;
-      const mate = neighbours[t].find((n) => edge[n] && !done[n] && normals[n].dot(normals[t]) > 0.9999);
-      const ids = new Set([tris[t * 3], tris[t * 3 + 1], tris[t * 3 + 2]]);
-      if (mate !== undefined) {
-        done[mate] = 1;
-        for (let k = 0; k < 3; k++) ids.add(tris[mate * 3 + k]);
+      const n = normals[t];
+      const d = n.dot(middles[t]);
+      const ids = new Set<number>();
+      const add = (k: number) => {
+        for (let j = 0; j < 3; j++) ids.add(tris[k * 3 + j]);
+      };
+      add(t);
+      const queue = [t];
+      while (queue.length && ids.size < 60) {
+        const k = queue.shift()!;
+        for (const m of neighbours[k]) {
+          if (!edge[m] || done[m] || normals[m].dot(n) < 0.95) continue;
+          const vs = [0, 1, 2].map((j) => pts[tris[m * 3 + j]]);
+          if (vs.some((p) => Math.abs(n.dot(p) - d) > minGap / 2)) continue;
+          done[m] = 1;
+          add(m);
+          queue.push(m);
+        }
       }
       const corners = [...ids].flatMap((id) => [pts[id].clone().applyMatrix4(poses[i]), pts[id].clone().applyMatrix4(poses[i + 1])].map((q) => [q.x, q.y, q.z] as [number, number, number]));
       const hull = M.Manifold.hull(corners);
