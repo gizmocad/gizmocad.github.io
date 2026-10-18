@@ -1024,8 +1024,12 @@ function objectRow(f: Feature, depth: number, inside: Set<string>) {
   li.querySelector(".kind")!.textContent = kindIcon(f);
   // Its colour, as in the view: holes are a red ring, a group of mixed colours an empty one.
   const swatch = li.querySelector<HTMLElement>(".swatch")!;
-  const colour = f.mode === "hole" ? null : (colourOf(doc.features, f) ?? (f.kind === "group" || f.kind === "plane" ? null : DEFAULT_COLOUR));
-  swatch.classList.toggle("hole", f.mode === "hole");
+  // A combined shape (or a hole group) and its parts show the colour the whole shape is drawn in.
+  let merged: Feature | undefined;
+  for (let p: Feature | null | undefined = f; p; p = findFeature(p.parentId)) if (isMergedGroup(p)) merged = p;
+  const hole = f.mode === "hole" || merged?.mode === "hole";
+  const colour = hole ? null : merged ? (colourOf(doc.features, merged) ?? DEFAULT_COLOUR) : (colourOf(doc.features, f) ?? (f.kind === "group" || f.kind === "plane" ? null : DEFAULT_COLOUR));
+  swatch.classList.toggle("hole", hole);
   if (colour) swatch.style.background = colour;
   else swatch.classList.add("empty");
   li.querySelector(".name > span:last-child")!.textContent = f.name;
@@ -1588,7 +1592,7 @@ function importedFields(f: Extract<Feature, { kind: "imported" }>, update: (muta
   const { size, scale } = f.params;
   const even = Math.abs(scale[0] - scale[1]) < 1e-9 && Math.abs(scale[1] - scale[2]) < 1e-9;
   const items: HTMLElement[] = SIZE_LABELS.map((label, i) =>
-    lengthField(label, Math.round(size[i] * scale[i] * 1e4) / 1e4, (v) => size[i] > 1e-9 && resizeAlong(f.id, i, v / (size[i] * scale[i]), (size[2] * scale[2]) / 2), { min: 0 }),
+    lengthField(label, Math.round(size[i] * scale[i] * 1e4) / 1e4, (v) => size[i] > 1e-9 && resizeAlong(f.id, i, v / (size[i] * scale[i]), 0), { min: 0 }),
   );
   if (even) {
     items.push(
@@ -1633,23 +1637,23 @@ function meshSizeFields(f: SculptFeature): HTMLElement[] {
   const { lo, hi } = meshExtents;
   return SIZE_LABELS.map((label, i) => {
     const now = hi[i] - lo[i];
-    return lengthField(label, Math.round(now * 1e4) / 1e4, (v) => now > 1e-9 && resizeAlong(f.id, i, v / now, (lo[2] + hi[2]) / 2), { min: 0 });
+    return lengthField(label, Math.round(now * 1e4) / 1e4, (v) => now > 1e-9 && resizeAlong(f.id, i, v / now, lo[2]), { min: 0 });
   });
 }
 
 /**
  * Resize an imported object along its own axis `i` by `factor` from the side
- * panel, as the resize handles do: its height grows up and down from its
- * middle (`midZ`, in its own frame), so typing a height doesn't lift it.
+ * panel, as the resize handles do: its height grows up from its bottom
+ * (`bottomZ`, in its own frame), as other shapes' does.
  */
-function resizeAlong(id: string, i: number, factor: number, midZ: number) {
+function resizeAlong(id: string, i: number, factor: number, bottomZ: number) {
   const s = { x: 1, y: 1, z: 1 };
   s[(["x", "y", "z"] as const)[i]] = factor;
   commit((features) => {
     const f = features.find((x) => x.id === id);
     if (!f) return;
     const up = new Vector3(0, 0, 1).transformDirection(baseMatrix(f));
-    resizeFeature(features, id, s, 0, i === 2 ? { axis: "z", at: midZ, dir: { x: up.x, y: up.y, z: up.z } } : undefined);
+    resizeFeature(features, id, s, 0, i === 2 ? { axis: "z", at: bottomZ, dir: { x: up.x, y: up.y, z: up.z } } : undefined);
   });
 }
 

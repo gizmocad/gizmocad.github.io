@@ -2477,7 +2477,7 @@ export class Viewport {
     s[axis] = k;
     if (this.keepRatio || f.kind === "hedron") s.x = s.y = s.z = k;
     else if (staysRound(f) && axis !== "z") s.x = s.y = k;
-    // The same fixed side as dragging: One side keeps the low end; imported objects grow up and down from their middle.
+    // The same fixed side as dragging: One side keeps the low end, and so does an imported object's height.
     const imported = f.kind === "imported" || (f.kind === "sculpt" && f.params.base === "imported");
     let anchor: ResizeAnchor | undefined;
     if (this.oneSide || (imported && axis === "z")) {
@@ -2485,7 +2485,7 @@ export class Viewport {
       const dir = new THREE.Vector3();
       dir[axis] = axis === "x" ? flip : 1;
       dir.applyQuaternion(obj.quaternion);
-      anchor = { axis, at: this.oneSide ? box.min[axis] : (box.min[axis] + box.max[axis]) / 2, dir: { x: dir.x, y: dir.y, z: dir.z } };
+      anchor = { axis, at: box.min[axis], dir: { x: dir.x, y: dir.y, z: dir.z } };
     }
     this.events.onResized(id!, s, anchor, true);
   }
@@ -2497,14 +2497,14 @@ export class Viewport {
     const handle = this.gizmo.axis;
     if (!obj || this.gizmo.mode !== "scale" || (handle !== "X" && handle !== "Y" && handle !== "Z")) return;
     const f = this.features.get(obj.userData.id);
-    // An imported object (its origin is the bottom of the shape it came in as) grows up and down from its middle.
+    // An imported object's origin needn't be at the bottom of its shape: its bottom stays put, as other shapes' does.
     const imported = f?.kind === "imported" || (f?.kind === "sculpt" && f.params.base === "imported");
     if (!this.oneSide && !(imported && handle === "Z")) return;
     const box = this.localBox(obj.userData.id, obj);
     if (!box) return;
     const axis = handle.toLowerCase() as "x" | "y" | "z";
     if (!this.oneSide) {
-      this.resizeAnchor = { axis, at: (box.min[axis] + box.max[axis]) / 2, start: obj.position.clone() };
+      this.resizeAnchor = { axis, at: box.min[axis], start: obj.position.clone() };
       return;
     }
     // Each axis has a handle on both ends; the grab point says which end this is.

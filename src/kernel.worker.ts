@@ -884,6 +884,14 @@ function sweepGaps(M: ManifoldLib, base: InstanceType<ManifoldLib["Manifold"]>, 
   return fills;
 }
 
+/** The model without the solid parts hidden inside a merged group (and what's inside them). */
+function withoutHiddenInside(features: Feature[], group: Feature): Feature[] {
+  const inside = subtreeIds(features, group.id);
+  const gone = new Set<string>();
+  for (const x of features) if (x.id !== group.id && x.hidden && x.mode === "solid" && inside.has(x.id)) for (const id of subtreeIds(features, x.id)) gone.add(id);
+  return gone.size ? features.filter((x) => !gone.has(x.id)) : features;
+}
+
 /** A big box filling one side of a tilted cut plane, around the shape's bounds lo..hi. */
 function halfSpace(c: Clip, lo: number[], hi: number[]): Shape3D {
   const n = clipNormal(c);
@@ -2623,12 +2631,14 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
               if (w) meshes.push(meshForView(f.id, w, worldMatrix(req.features, f.id)));
               continue;
             }
-            const cut = req.cuts ? logged(`${f.name}: holes cut for the view`, () => cutMesh(req.features, f)) : null;
+            // A merged group is drawn as one shape: the parts hidden inside it are left out of that (just in the view).
+            const shown = isMergedGroup(f) ? withoutHiddenInside(req.features, f) : req.features;
+            const cut = req.cuts ? logged(`${f.name}: holes cut for the view`, () => cutMesh(shown, f)) : null;
             if (cut) meshes.push(cut);
             else if (isMergedGroup(f)) {
               failures = {};
               // Its mesh is kept like an object's own (see ownMesh): the group's shape is cached, but meshing it isn't quick.
-              const key = `group|${branchKey(req.features, f)}|${JSON.stringify(isTextured(f) ? f.texture : null)}`;
+              const key = `group|${branchKey(shown, f)}|${JSON.stringify(isTextured(f) ? f.texture : null)}`;
               let kept = meshCache.get(key);
               if (!kept) {
                 const outer = adjusted;
@@ -2636,10 +2646,10 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
                 try {
                   if (sweepOf(f)) {
                     // A swept hole group stays as triangles (see groupTriangles).
-                    const w = logged(`${f.name}: its merged shape`, () => groupTriangles(req.features, f));
+                    const w = logged(`${f.name}: its merged shape`, () => groupTriangles(shown, f));
                     kept = { mesh: w && { ...meshForView("", w, null), id: f.id }, adjusted, failures: { ...failures } };
                   } else {
-                    const shape = logged(`${f.name}: its merged shape`, () => branch(req.features, f));
+                    const shape = logged(`${f.name}: its merged shape`, () => branch(shown, f));
                     kept = { mesh: shape && textured(f, toMesh(f.id, shape)), adjusted, failures: { ...failures } };
                     shape?.delete();
                   }

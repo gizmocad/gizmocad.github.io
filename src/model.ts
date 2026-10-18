@@ -1006,8 +1006,11 @@ export function colourOf(features: Iterable<Feature>, f: Feature): string | unde
     for (let p = x.parentId; p; p = all.find((y) => y.id === p)?.parentId ?? null) if (p === f.id) return true;
     return false;
   };
-  const colours = new Set(all.filter((x) => x.kind !== "group" && x.mode === "solid" && inside(x)).map((x) => x.color));
-  return colours.size === 1 ? [...colours][0] : undefined;
+  const parts = all.filter((x) => x.kind !== "group" && x.mode === "solid" && inside(x));
+  const colours = new Set(parts.map((x) => x.color));
+  if (colours.size === 1) return [...colours][0];
+  // A combined shape is one solid in one colour: its first part's.
+  return isMergedGroup(f) ? parts[0]?.color : undefined;
 }
 
 /** A hole's sweep (null for solids); a hole group's sweeps its joined shape. */
