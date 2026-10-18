@@ -21,6 +21,7 @@ import {
   placeFeature,
   moveJointFrame,
   clampJoint,
+  sweepOf,
   subtreeIds,
   type CadDocument,
   type ImportedFont,
@@ -143,6 +144,15 @@ function commit(mutate: (features: Feature[]) => void) {
 /** A clearance cut and the object it follows swing together: whichever joint just moved, the other matches it. */
 function followJoints(before: Map<string, number>) {
   for (const h of doc.features) {
+    // A swept cut's swing stretches to wherever its part is turned or slid past either end.
+    const s = sweepOf(h);
+    const part = s?.source ? findFeature(s.source) : undefined;
+    if (s && part?.joint && part.joint.value !== before.get(part.id)) {
+      const v = part.joint.value;
+      const [lo, hi] = s.from <= s.to ? (["from", "to"] as const) : (["to", "from"] as const);
+      if (v < s[lo]) s[lo] = v;
+      else if (v > s[hi]) s[hi] = v;
+    }
     const src = h.follows ? findFeature(h.follows) : undefined;
     if (!h.joint || !src?.joint) continue;
     if (src.joint.value !== before.get(src.id)) h.joint.value = src.joint.value;
@@ -372,7 +382,11 @@ const viewport = new Viewport($("#viewport"), {
   onSweepMoved(id, end, value) {
     commit((features) => {
       const f = features.find((x) => x.id === id);
-      if (f?.sweep) f.sweep[end] = value;
+      if (!f?.sweep) return;
+      f.sweep[end] = value;
+      // The part it was made from goes to where the end was dragged (and stays there).
+      const src = f.sweep.source ? features.find((x) => x.id === f.sweep!.source) : undefined;
+      if (src?.joint) src.joint.value = clampJoint(src.joint, value);
     });
   },
   onJointMoved(id, value) {

@@ -1082,6 +1082,8 @@ export class Viewport {
     drag: { end: "from" | "to"; plane: THREE.Plane; value: number } | null;
     /** The part that swings (made into this cut), shown moving with the handle being dragged. */
     source: { node: THREE.Object3D; joint: Joint; base: THREE.Matrix4 } | null;
+    /** The part's outline at each end of the swing (beside the part, in its parent's frame). */
+    outlines: { group: THREE.Group; ends: { end: "from" | "to"; obj: THREE.Object3D }[] } | null;
   } | null = null;
 
   private drawSwing(sel: { f: Feature; node: THREE.Object3D } | null) {
@@ -1089,6 +1091,10 @@ export class Viewport {
     if (this.swing) {
       this.swing.group.removeFromParent();
       disposeTree(this.swing.group);
+      if (this.swing.outlines) {
+        this.swing.outlines.group.removeFromParent();
+        disposeTree(this.swing.outlines.group);
+      }
       this.swing = null;
     }
     const s = sel ? (sweepOf(sel.f) ?? undefined) : undefined;
@@ -1161,9 +1167,40 @@ export class Viewport {
     const src = (s.source && this.features.get(s.source)) || [...this.features.values()].find((x) => x.joint && x.ignoreHoles?.includes(f.id));
     const srcNode = src?.joint ? this.nodes.get(src.id) : undefined;
     const source = src?.joint && srcNode ? { node: srcNode, joint: src.joint, base: baseMatrix(src) } : null;
-    this.swing = { id: f.id, group, handles, at, valueAt, axis, centre, slider, from: s.from, to: s.to, drag: keepDrag, source };
+    const outlines = source ? this.swingOutlines(source.node, color) : null;
+    this.swing = { id: f.id, group, handles, at, valueAt, axis, centre, slider, from: s.from, to: s.to, drag: keepDrag, source, outlines };
     if (keepDrag) this.swing[keepDrag.end] = keepDrag.value;
     this.placeSwing();
+  }
+
+  /** The part's edges (hidden or not), as an outline at each end of the swing. */
+  private swingOutlines(node: THREE.Object3D, color: number): NonNullable<NonNullable<typeof this.swing>["outlines"]> | null {
+    node.updateMatrixWorld(true);
+    const toNode = node.matrixWorld.clone().invert();
+    const parts: THREE.BufferGeometry[] = [];
+    node.traverse((o) => {
+      if (!(o instanceof THREE.Mesh) || !o.userData.id) return;
+      const lines = o.children.find((c): c is THREE.LineSegments => c instanceof THREE.LineSegments);
+      const g = lines ? lines.geometry.clone() : new THREE.EdgesGeometry(o.geometry, 30);
+      parts.push(g.applyMatrix4(toNode.clone().multiply((lines ?? o).matrixWorld)));
+    });
+    if (!parts.length) return null;
+    const group = new THREE.Group();
+    const material = new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.55 });
+    const ends = (["from", "to"] as const).map((end) => {
+      const obj = new THREE.Group();
+      obj.matrixAutoUpdate = false;
+      for (const g of parts) {
+        const l = new THREE.LineSegments(g, material);
+        l.renderOrder = 31;
+        l.raycast = () => {}; // Only an outline: clicks go through it.
+        obj.add(l);
+      }
+      group.add(obj);
+      return { end, obj };
+    });
+    (node.parent ?? this.root).add(group);
+    return { group, ends };
   }
 
   /** Show the swinging part at a joint value (its own value puts it back). */
@@ -1187,6 +1224,14 @@ export class Viewport {
     line.geometry = new THREE.BufferGeometry().setFromPoints(pts);
     for (const h of w.handles) h.mesh.position.copy(w.at(w[h.end]));
     w.group.updateMatrixWorld(true);
+    const src = w.source;
+    if (src && w.outlines) {
+      const pos = new THREE.Vector3().setFromMatrixPosition(src.base);
+      for (const o of w.outlines.ends) {
+        o.obj.matrix.copy(jointMatrix(src.joint, w[o.end], pos).multiply(src.base));
+        o.obj.updateMatrixWorld(true);
+      }
+    }
   }
 
   private swingHandleAt(e: PointerEvent): { end: "from" | "to"; mesh: THREE.Mesh } | null {
@@ -1252,7 +1297,7 @@ export class Viewport {
       if (!w?.drag) return;
       const { end, value } = w.drag;
       w.drag = null;
-      if (w.source) this.poseSource(w.source.joint.value);
+      // The part stays where it was dragged: the change moves it there for good.
       this.events.onSweepMoved(w.id, end, value);
     };
     host.addEventListener("pointerup", finish, true);
