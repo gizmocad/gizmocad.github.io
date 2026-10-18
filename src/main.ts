@@ -1015,7 +1015,7 @@ function objectRow(f: Feature, depth: number, inside: Set<string>) {
   if (colour) swatch.style.background = colour;
   else swatch.classList.add("empty");
   li.querySelector(".name > span:last-child")!.textContent = f.name;
-  if (buildErrors[f.id]) li.title = buildErrors[f.id];
+  li.title = buildErrors[f.id] ? `${f.name}: ${buildErrors[f.id]}` : f.name;
   li.onclick = (e) => selectObject(f.id, e.shiftKey || e.ctrlKey || e.metaKey);
   li.ondblclick = () => f.kind === "sketch" && startSketchEdit(f.id);
 
@@ -1350,33 +1350,31 @@ const escapeHtml = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "
 function startConnect(id: string, type: "hinge" | "orbit" | "slider") {
   const f = findFeature(id);
   if (!f) return;
-  const connect = (targetId: string, point: Vec3, rotation: Vec3) => {
+  // targetId null: the ground (the object stays top-level and moves on a fixed axis).
+  const connect = (targetId: string | null, point: Vec3, rotation: Vec3) => {
     setStatus("");
     commit((features) => addJoint(features, id, targetId, type, point, rotation));
     setGizmoMode("joint");
-    setNotice(`${f.name} is now connected to ${findFeature(targetId)?.name}. Drag the ${type === "slider" ? "arrow" : "ring"} to move it (${type === "slider" ? "Slide" : "Spin"}, J); Move and Rotate move it with its connection.`);
+    setNotice(`${f.name} is now connected to ${findFeature(targetId)?.name ?? "the ground"}. Drag the ${type === "slider" ? "arrow" : "ring"} to move it (${type === "slider" ? "Slide" : "Spin"}, J); Move and Rotate move it with its connection.`);
   };
   viewport.startPlacement({
     feature: f,
     marker: true,
     allowSelf: true,
-    noGround: true,
     onPlace(point, rotation, targetId) {
-      if (!targetId) return;
-      if (!subtreeIds(doc.features, id).has(targetId)) return connect(targetId, point, rotation);
+      if (!targetId || !subtreeIds(doc.features, id).has(targetId)) return connect(targetId, point, rotation);
       // Picked on the object itself (e.g. the middle of a wheel): now pick what it attaches to.
       viewport.startPlacement({
         feature: f,
         pickOnly: true,
-        noGround: true,
         onPlace(_p, _r, other) {
-          if (other) connect(other, point, rotation);
+          connect(other, point, rotation);
         },
         onCancel() {
           setStatus("");
         },
       });
-      setStatus(`Now click the object ${f.name} attaches to. Esc to cancel.`);
+      setStatus(`Now click the object ${f.name} attaches to, or the empty ground to fix it to the ground. Esc to cancel.`);
     },
     onCancel() {
       setStatus("");
@@ -1384,8 +1382,8 @@ function startConnect(id: string, type: "hinge" | "orbit" | "slider") {
   });
   setStatus(
     type !== "slider"
-      ? `${type === "orbit" ? `Click the centre ${f.name} circles around` : `Click where ${f.name} turns`}, on it or on the object it attaches to. The arrow is the axle; F flips it (e.g. down under an object). Esc to cancel.`
-      : `Click a face of ${f.name} or of what it slides on: it slides along the arrow. F flips it (e.g. down). Esc to cancel.`,
+      ? `${type === "orbit" ? `Click the centre ${f.name} circles around` : `Click where ${f.name} turns`}, on it, on the object it attaches to, or on the ground. The arrow is the axle; F flips it (e.g. down under an object). Esc to cancel.`
+      : `Click a face of ${f.name} or of what it slides on (or the ground): it slides along the arrow. F flips it (e.g. down). Esc to cancel.`,
   );
 }
 
@@ -4734,6 +4732,109 @@ window.addEventListener("keydown", (e) => {
     else selectObject(null);
   }
 });
+
+// ---- Help under section titles ----------------------------------------------------
+//
+// A section's help text is folded away behind a "?" on its title; the sections
+// whose help is open are remembered. Help with no section above it stays shown.
+
+const HELP_KEY = "gizmocad.help";
+const helpOpen = new Set<string>(
+  (() => {
+    try {
+      return JSON.parse(stored(HELP_KEY) ?? "[]") as string[];
+    } catch {
+      return [];
+    }
+  })(),
+);
+
+/** The section title above an element in the panel (searching earlier siblings, then the parents' ones). */
+function sectionAbove(el: Element, panel: Element): HTMLElement | null {
+  for (let node: Element | null = el; node && node !== panel; node = node.parentElement) {
+    for (let prev = node.previousElementSibling; prev; prev = prev.previousElementSibling) if (prev.classList.contains("section")) return prev as HTMLElement;
+  }
+  return null;
+}
+
+function foldHelp(panel: Element) {
+  for (const p of panel.querySelectorAll<HTMLElement>(".units-hint:not([data-help])")) {
+    const title = sectionAbove(p, panel);
+    p.dataset.help = title ? "folded" : "shown";
+    if (!title) continue;
+    const name = (title.dataset.title ??= title.textContent ?? "");
+    p.hidden = !helpOpen.has(name);
+    if (title.querySelector(".help-btn")) continue;
+    const btn = document.createElement("button");
+    btn.className = "help-btn";
+    btn.textContent = "?";
+    const show = (open: boolean) => {
+      btn.classList.toggle("on", open);
+      btn.title = open ? "Hide the help" : "Show help for this";
+      btn.setAttribute("aria-expanded", String(open));
+    };
+    show(helpOpen.has(name));
+    btn.onclick = () => {
+      const open = !helpOpen.has(name);
+      if (open) helpOpen.add(name);
+      else helpOpen.delete(name);
+      store(HELP_KEY, JSON.stringify([...helpOpen]));
+      show(open);
+      // Every help paragraph under this title (up to the next one).
+      for (const q of panel.querySelectorAll<HTMLElement>('.units-hint[data-help="folded"]')) if (sectionAbove(q, panel) === title) q.hidden = !open;
+    };
+    title.append(btn);
+  }
+}
+for (const panel of document.querySelectorAll(".panel")) {
+  foldHelp(panel);
+  new MutationObserver(() => foldHelp(panel)).observe(panel, { childList: true, subtree: true });
+}
+
+// ---- Resizable side panels ------------------------------------------------------------
+
+const PANEL_KEY = "gizmocad.panels";
+const panelWidths = (() => {
+  try {
+    return { left: 220, right: 260, ...(JSON.parse(stored(PANEL_KEY) ?? "{}") as { left?: number; right?: number }) };
+  } catch {
+    return { left: 220, right: 260 };
+  }
+})();
+const setPanelWidths = () => {
+  document.body.style.setProperty("--left-w", `${panelWidths.left}px`);
+  document.body.style.setProperty("--right-w", `${panelWidths.right}px`);
+};
+setPanelWidths();
+for (const side of ["left", "right"] as const) {
+  const grip = document.createElement("div");
+  grip.className = `panel-grip ${side}`;
+  grip.title = "Drag to make this panel wider or narrower (double-click: back to normal)";
+  grip.onpointerdown = (e) => {
+    e.preventDefault();
+    grip.setPointerCapture(e.pointerId);
+    grip.classList.add("dragging");
+    const move = (m: PointerEvent) => {
+      const w = side === "left" ? m.clientX : window.innerWidth - m.clientX;
+      panelWidths[side] = Math.round(Math.max(180, Math.min(window.innerWidth * 0.4, w)));
+      setPanelWidths();
+    };
+    const up = () => {
+      grip.classList.remove("dragging");
+      grip.removeEventListener("pointermove", move);
+      store(PANEL_KEY, JSON.stringify(panelWidths));
+    };
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", up, { once: true });
+    grip.addEventListener("pointercancel", up, { once: true });
+  };
+  grip.ondblclick = () => {
+    panelWidths[side] = side === "left" ? 220 : 260;
+    setPanelWidths();
+    store(PANEL_KEY, JSON.stringify(panelWidths));
+  };
+  document.body.append(grip);
+}
 
 kernel.ready.catch((err: Error) => setStatus(err.message, true));
 loadBed();

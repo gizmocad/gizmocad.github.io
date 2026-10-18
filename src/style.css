@@ -78,7 +78,7 @@ body {
   margin: 0;
   height: 100vh;
   display: grid;
-  grid-template-columns: 220px 1fr 260px;
+  grid-template-columns: var(--left-w, 220px) 1fr var(--right-w, 260px);
   grid-template-rows: auto 1fr;
   grid-template-areas: "top top top" "left view right";
   background: var(--bg);
@@ -293,6 +293,21 @@ button.icon.danger { background: var(--panel); border-color: color-mix(in srgb, 
 button.icon.danger:hover:not(:disabled) { background: var(--danger-soft); border-color: var(--hole); }
 button.icon.danger:disabled { background: none; color: var(--muted); border-color: var(--border); }
 .units-hint { font-size: 12px; color: var(--muted); margin-top: 12px; }
+/* A "?" on a section title shows or hides the help under it. */
+.section { display: flex; align-items: center; gap: 6px; }
+.help-btn {
+  flex: none; width: 16px; height: 16px; padding: 0; border-radius: 50%;
+  border: 1px solid var(--border); background: none; color: var(--muted);
+  font-size: 10px; font-weight: 600; line-height: 14px; text-align: center; cursor: pointer;
+}
+.help-btn:hover { color: var(--text); border-color: var(--muted); }
+.help-btn.on { background: var(--accent-soft); border-color: var(--accent); color: var(--text); }
+
+/* Drag a side panel's inner edge to resize it. */
+.panel-grip { position: fixed; top: 0; bottom: 0; width: 7px; z-index: 40; cursor: col-resize; touch-action: none; }
+.panel-grip.left { left: calc(var(--left-w, 220px) - 4px); }
+.panel-grip.right { right: calc(var(--right-w, 260px) - 4px); }
+.panel-grip:hover, .panel-grip.dragging { background: color-mix(in srgb, var(--accent) 35%, transparent); }
 
 @media (max-width: 800px) {
   body {
@@ -303,6 +318,7 @@ button.icon.danger:disabled { background: none; color: var(--muted); border-colo
     height: auto;
   }
   .panel.left, .panel.right { border: none; border-top: 1px solid var(--border); }
+  .panel-grip { display: none; }
 }
 
 .ico.plane { background: none; color: var(--plane); font-size: 18px; line-height: 22px; text-align: center; }
