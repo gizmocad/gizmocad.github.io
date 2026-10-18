@@ -1891,7 +1891,7 @@ function branchNow(features: Feature[], self: Feature | null, inherited: Cutter[
   return self ? finishBranch(self, result, kids.length > 0) : result;
 }
 
-/** A merged group's fillets and hollowing, and a split's side, on a branch's result. */
+/** A merged group's fillets and hollowing (and a hole group's clearance and sweep), and a split's side, on a branch's result. */
 function finishBranch(self: Feature, result: Shape3D, hasKids: boolean): Shape3D {
   if (isMergedGroup(self)) {
     try {
@@ -1899,6 +1899,18 @@ function finishBranch(self: Feature, result: Shape3D, hasKids: boolean): Shape3D
       if (self.shell) result = applyShell(result, self.shell);
     } catch (err) {
       failures[self.id] = message(err); // Keep the unfinished shape so the rest still builds.
+    }
+    const by = clearanceOf(self);
+    const s = sweepOf(self);
+    try {
+      if (by) result = logged(`${self.name}: grow the hole by ${by} mm (clearance)`, () => growSolid(result, by));
+      if (s) {
+        const w = logged(`${self.name}: sweep the hole through ${fmtRange(s)}`, () => sweepMesh(shapeTriangles(result), s));
+        result = logged("make the swept hole a solid", () => solidFromTriangles(w.vertices, w.triangles, [1, 1, 1], "bodies"));
+        knownTriangles.set(result, w);
+      }
+    } catch (err) {
+      failures[self.id] = message(err);
     }
   }
   // A split piece keeps only its side, children included.

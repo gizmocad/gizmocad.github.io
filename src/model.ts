@@ -670,9 +670,9 @@ export const PARAM_FIELDS: Partial<Record<ShapeKind, { key: string; label: strin
 
 // ---- Tree helpers --------------------------------------------------------
 
-/** A group with fillets/chamfers (or a hollow, or a texture) is shown and picked as one merged shape. */
+/** A group with fillets/chamfers (or a hollow, or a texture), or a hole group, is shown and picked as one merged shape. */
 export function isMergedGroup(f: Feature): boolean {
-  return f.kind === "group" && (!!f.combined || f.edgeOps.length > 0 || !!f.shell || !!f.texture);
+  return f.kind === "group" && (!!f.combined || f.mode === "hole" || f.edgeOps.length > 0 || !!f.shell || !!f.texture);
 }
 
 /** Is `id` inside a merged group (so its own mesh isn't shown)? */
@@ -1006,11 +1006,11 @@ export function colourOf(features: Iterable<Feature>, f: Feature): string | unde
   return colours.size === 1 ? [...colours][0] : undefined;
 }
 
-/** A hole's sweep (null for solids and groups). */
-export const sweepOf = (f: Feature) => (f.mode === "hole" && f.kind !== "group" && f.kind !== "plane" && f.sweep ? f.sweep : null);
+/** A hole's sweep (null for solids); a hole group's sweeps its joined shape. */
+export const sweepOf = (f: Feature) => (f.mode === "hole" && f.kind !== "plane" && f.sweep ? f.sweep : null);
 
-/** How much a hole is grown on every side (0 for solids and groups). */
-export const clearanceOf = (f: Feature) => (f.mode === "hole" && f.kind !== "group" && f.kind !== "plane" ? Math.max(0, f.clearance ?? 0) : 0);
+/** How much a hole is grown on every side (0 for solids); a hole group's grows its joined shape. */
+export const clearanceOf = (f: Feature) => (f.mode === "hole" && f.kind !== "plane" ? Math.max(0, f.clearance ?? 0) : 0);
 
 /** Whether anything in the model ignores a hole (when nothing does, holes are cut the quicker usual way). */
 export const anyIgnoredHoles = (features: Feature[]) => features.some((f) => f.ignoreHoles?.length);

@@ -2292,7 +2292,7 @@ function fitSection(f: Feature, update: (mutate: (f: Feature) => void) => void):
       hint("Grows this hole by this much on every side, so a part the same shape fits into what it cuts. About 0.2 mm is a snug fit on most printers; 0.3–0.5 mm slides freely."),
     ];
     const s = f.sweep;
-    if (s && f.kind !== "group") {
+    if (s) {
       const unit = s.joint.type === "slider" ? {} : { unit: "°", plain: true };
       items.push(
         section(s.joint.type === "slider" ? "Slide" : "Swing"),
@@ -2336,13 +2336,24 @@ function sweepRange(j: NonNullable<Feature["joint"]>): [number, number] {
 function makeClearanceCut(id: string, sweep = false) {
   const f = findFeature(id);
   if (!f) return;
-  const hole = { ...structuredClone(f), id: newId(), name: `${f.name} clearance`, mode: "hole", clearance: 0.2 } as Feature;
-  for (const k of ["shell", "texture", "joint", "ignoreHoles", "color"] as const) delete hole[k];
+  // A group, or an object with things inside it: a hole group around a copy of all of it, grown as one shape.
+  const whole = f.kind === "group" || childrenOf(doc.features, f.id).length > 0;
+  const copies = whole ? cloneSubtree(f) : [];
+  let hole: Feature;
+  if (!whole) hole = { ...structuredClone(f), id: newId(), name: `${f.name} clearance`, mode: "hole", clearance: 0.2 } as Feature;
+  else if (f.kind === "group") hole = Object.assign(copies.shift()!, { name: `${f.name} clearance`, mode: "hole", clearance: 0.2 });
+  else {
+    hole = { ...createFeature("group", doc.features, f.parentId), name: `${f.name} clearance`, mode: "hole", clearance: 0.2 };
+    // The copied object sits at the group's origin (the group takes its place in the world).
+    Object.assign(copies[0], { parentId: hole.id, position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 } });
+    for (const k of ["joint", "ignoreHoles", "mirrored"] as const) delete copies[0][k];
+  }
+  for (const k of ["shell", "texture", "joint", "ignoreHoles", "color", "combined"] as const) delete hole[k];
   commit((features) => {
     const t = features.find((x) => x.id === id);
     if (!t) return;
     t.ignoreHoles = [...(t.ignoreHoles ?? []), hole.id];
-    insertFeatures(features, [hole]);
+    insertFeatures(features, [hole, ...copies]);
     // Where the object is now: a hinge or slider may have moved it from its own position (the hole has no joint).
     setWorldMatrix(features, hole.id, worldMatrix(features, id));
     const h = features.find((x) => x.id === hole.id);
@@ -2717,7 +2728,7 @@ function renderPropertiesPanel() {
       ...fitSection(f, update),
     );
   }
-  if (f.kind === "group") items.push(...combineSection(f, update));
+  if (f.kind === "group") items.push(...(f.mode === "hole" ? fitSection(f, update) : [...combineSection(f, update), ...fitSection(f, update)]));
 
   if (f.kind === "sculpt") {
     const solid = button("◆ Make it a solid", () => void convertToSolid(f.id), "wide");
