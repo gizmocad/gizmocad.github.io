@@ -49,6 +49,7 @@ import {
   type SketchRef,
   type ConstraintType,
   colourOf,
+  isMergedGroup,
 } from "./model";
 import { Box3, BufferAttribute, BufferGeometry, EdgesGeometry, Matrix4, Vector3 } from "three";
 import { CONSTRAINT_LABEL, constraintFits, measure as measureConstraint, refPoints as refPointsOf, solveSketch } from "./constraints";
@@ -252,6 +253,7 @@ function describeStep(a: Feature[], b: Feature[]): string {
   if (only("hidden")) return `${f.hidden ? "hiding" : "showing"} ${f.name}`;
   if (only("ghost")) return `ghosting ${f.name}`;
   if (only("sweep")) return `the swing of ${f.name}`;
+  if (only("combined")) return `${f.combined ? "combining" : "separating"} ${f.name}`;
   if (only("clearance")) return `the clearance of ${f.name}`;
   if (only("parentId", "position", "rotation")) return `regrouping ${f.name}`;
   if (only("params", "position")) return `editing ${f.name}`;
@@ -2005,8 +2007,10 @@ function multiPanel(): HTMLElement[] {
   const actions = document.createElement("div");
   actions.className = "actions";
   const group = button("▤ Group", groupSelected);
-  group.title = "Put them in a new group (Ctrl+G)";
-  actions.append(group, button("Duplicate", duplicateSelected), button(`Delete ${selectedIds.length}`, deleteSelected, "danger"));
+  group.title = "Put them in a new group (Ctrl+G): they move together but stay separate parts";
+  const combine = button("⧉ Combine", combineSelected);
+  combine.title = "Join them into one shape: it moves, rounds and exports as one (you can split it back up)";
+  actions.append(group, combine, button("Duplicate", duplicateSelected), button(`Delete ${selectedIds.length}`, deleteSelected, "danger"));
   items.push(section("Selection"), actions, hint("Drag the gizmo to move them all together. Shift-click adds or removes one; Esc clears the selection."));
   return items;
 }
@@ -2060,8 +2064,16 @@ function groupSelected() {
   setNotice(`Grouped ${ids.length} objects.`);
 }
 
+/** Join the selected objects into one shape (a combined group), which moves, rounds and exports as one. */
+function combineSelected() {
+  const ids = topSelected();
+  if (ids.length < 2) return;
+  groupIds(ids, true);
+  setNotice(`Combined ${ids.length} objects into one. Untick "Combine into one shape" on the group to keep them as separate parts.`);
+}
+
 /** Put objects (none inside another) into a new group around them; returns the group's id. */
-function groupIds(ids: string[]): string {
+function groupIds(ids: string[], combined = false): string {
   const parents = new Set(ids.map((id) => findFeature(id)?.parentId ?? null));
   const parentId = parents.size === 1 ? [...parents][0] : null;
   const group = createFeature("group", doc.features, parentId);
@@ -2073,6 +2085,10 @@ function groupIds(ids: string[]): string {
       setWorldMatrix(features, group.id, new Matrix4().makeTranslation(Math.round(c.x * 100) / 100, Math.round(c.y * 100) / 100, Math.round(box.min.z * 100) / 100));
     }
     for (const id of ids) reparent(features, id, group.id);
+    if (combined) {
+      const g = features.find((x) => x.id === group.id);
+      if (g) g.combined = true;
+    }
   });
   selectedIds = [group.id];
   selectedId = group.id;
@@ -2230,6 +2246,26 @@ function holesReaching(features: Feature[], f: Feature): Feature[] {
   }
   holes.push(...childrenOf(features, null).filter((c) => c.mode === "hole" && c.id !== node.id));
   return holes;
+}
+
+/** A group's parts as one joined shape, or separate parts that move together. */
+function combineSection(f: Feature, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
+  // Rounding, hollowing or texturing a group works on its joined shape, so those keep it combined.
+  const needed = f.edgeOps.length > 0 || !!f.shell || !!f.texture;
+  const row = checkToggle("Combine into one shape", isMergedGroup(f), (on) => update((t) => (on ? (t.combined = true) : delete t.combined)));
+  if (needed) {
+    (row.querySelector("input") as HTMLInputElement).disabled = true;
+    row.title = "Its edge finishes, hollowing or texture work on the joined shape, so it stays combined";
+  }
+  return [
+    section("Combine"),
+    row,
+    hint(
+      isMergedGroup(f)
+        ? "Its parts are joined into one shape: it shows, rounds and exports as one solid. Holes inside the group cut it."
+        : "Its parts move together but stay separate shapes. Tick to join them into one solid (where they touch or overlap becomes one).",
+    ),
+  ];
 }
 
 /** Clearance on a hole; on a solid, a quick way to make a hole it fits into. */
@@ -2667,6 +2703,7 @@ function renderPropertiesPanel() {
       ...fitSection(f, update),
     );
   }
+  if (f.kind === "group") items.push(...combineSection(f, update));
 
   if (f.kind === "sculpt") {
     const solid = button("◆ Make it a solid", () => void convertToSolid(f.id), "wide");

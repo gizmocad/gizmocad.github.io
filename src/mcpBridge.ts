@@ -184,11 +184,12 @@ async function run(host: BridgeHost, method: string, a: Args): Promise<unknown> 
       if (!ids.length) throw new Error("Give the ids of the objects to group.");
       const id = host.group(ids);
       if (!id) throw new Error("Couldn't group those objects.");
-      if (a.name !== undefined || a.mode !== undefined)
+      if (a.name !== undefined || a.mode !== undefined || a.combine)
         host.commit((features) => {
           const g = features.find((x) => x.id === id)!;
           if (typeof a.name === "string" && a.name.trim()) g.name = a.name.trim();
           if (a.mode === "solid" || a.mode === "hole") g.mode = a.mode;
+          if (a.combine) g.combined = true;
         });
       host.notify(`AI assistant grouped ${ids.length} objects.`);
       return report(host, [id], { id, name: findIn(host, id)?.name, children: ids });
@@ -334,6 +335,11 @@ function applyFields(f: Feature, a: Args) {
     if (!Array.isArray(ids)) throw new Error("ignore_holes is a list of hole ids ([] lets every hole cut it again).");
     if (ids.length) f.ignoreHoles = [...new Set(ids)];
     else delete f.ignoreHoles;
+  }
+  if (a.combined !== undefined) {
+    if (f.kind !== "group") throw new Error("combined is for groups (use group_objects with combine: true to join objects).");
+    if (a.combined) f.combined = true;
+    else delete f.combined;
   }
   if (a.clearance !== undefined) {
     const c = Number(a.clearance);
@@ -550,6 +556,7 @@ function describeModel(host: BridgeHost, sketchGeometry: boolean) {
     if (f.ghost) o.ghost = true;
     if (f.ignoreHoles?.length) o.ignore_holes = f.ignoreHoles;
     if (f.clearance) o.clearance = f.clearance;
+    if (f.combined) o.combined = true;
     if (f.suppressed) o.switched_off = true;
     if (f.joint) o.joint = f.joint.type;
     if (f.clips?.length) o.split_piece = true;

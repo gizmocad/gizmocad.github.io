@@ -2004,7 +2004,7 @@ const r6 = (v: number) => Math.round(v * 1e6) / 1e6 + 0;
 const geometryKey = (features: Feature[], id: string) =>
   features
     .filter((x) => subtreeIds(features, id).has(x.id))
-    .map((x) => [x.id, x.parentId, x.kind, x.mode, keyParams(x), x.position, x.rotation, x.edgeOps, x.clips, x.shell, x.tilt, x.mirrored, x.joint, x.ignoreHoles]);
+    .map((x) => [x.id, x.parentId, x.kind, x.mode, keyParams(x), x.position, x.rotation, x.edgeOps, x.clips, x.shell, x.tilt, x.mirrored, x.joint, x.ignoreHoles, x.combined]);
 
 const cutCache = new Map<string, { mesh: MeshData | null; error?: string }>();
 

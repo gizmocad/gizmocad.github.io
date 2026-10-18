@@ -239,6 +239,7 @@ const objectFields = {
   mirrored: { type: "boolean", description: "Mirror it across its own YZ plane (X → −X)." },
   hidden: { type: "boolean", description: "Hide it in the view (still part of the model)." },
   ghost: { type: "boolean", description: "Ghost it: see-through in the view, and clicks and placing go through it (still part of the model and exports)." },
+  combined: { type: "boolean", description: "Groups only: join the group's parts into one shape (true) or keep them separate parts that move together (false). Edge finishes, hollowing or a texture on a group keep it joined." },
   clearance: { type: "number", description: "Holes only: grow the hole by this many mm on every side, so a part the same shape fits into what it cuts (0.2 snug, 0.3-0.5 loose). To fit a peg into a socket: add a copy of the peg as a hole with clearance, and set the peg to ignore_holes that copy. 0 removes it." },
   ignore_holes: { type: "array", items: { type: "string" }, description: "Ids of holes that must not cut this object (or anything inside it), though they'd otherwise reach it; they still cut everything else. [] lets every hole cut it again." },
 };
@@ -287,7 +288,12 @@ const TOOLS = [
       "Put objects into a new group, keeping where they are in the world. A group merges its solids into one part, and holes inside it cut only that group, so group a part with its holes. Fillets/chamfers on a group act on the merged result (e.g. a hole's rim).",
     inputSchema: {
       type: "object",
-      properties: { ids: { type: "array", items: { type: "string" } }, name: { type: "string" }, mode: { type: "string", enum: ["solid", "hole"] } },
+      properties: {
+        ids: { type: "array", items: { type: "string" } },
+        name: { type: "string" },
+        mode: { type: "string", enum: ["solid", "hole"] },
+        combine: { type: "boolean", description: "Join them into one shape (shown and exported as one solid), rather than separate parts that move together." },
+      },
       required: ["ids"],
     },
   },

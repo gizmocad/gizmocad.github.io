@@ -446,6 +446,8 @@ interface FeatureBase {
   ignoreHoles?: string[];
   /** Holes only: grown by this much (mm) on every side, so a part the same shape fits into what it cuts. */
   clearance?: number;
+  /** Groups only: shown, and exported, as one joined shape rather than separate parts that move together. */
+  combined?: boolean;
   /** Holes only: swept through a hinge's swing (or a slider's travel), so a moving part clears all of it. */
   sweep?: Sweep;
 }
@@ -668,7 +670,7 @@ export const PARAM_FIELDS: Partial<Record<ShapeKind, { key: string; label: strin
 
 /** A group with fillets/chamfers (or a hollow, or a texture) is shown and picked as one merged shape. */
 export function isMergedGroup(f: Feature): boolean {
-  return f.kind === "group" && (f.edgeOps.length > 0 || !!f.shell || !!f.texture);
+  return f.kind === "group" && (!!f.combined || f.edgeOps.length > 0 || !!f.shell || !!f.texture);
 }
 
 /** Is `id` inside a merged group (so its own mesh isn't shown)? */
