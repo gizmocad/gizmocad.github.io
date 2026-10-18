@@ -37,7 +37,7 @@ import { hedron } from "./hedron";
 import { CUSTOM_FONT, builtInFontUrl, fontFamily, isCustomFont } from "./fonts";
 import { Matrix3, Matrix4, Vector3 } from "three";
 import { applyTexture } from "./texture";
-import { BufferAttribute, BufferGeometry, EdgesGeometry } from "three";
+import { BufferAttribute, BufferGeometry, EdgesGeometry, Triangle } from "three";
 import { toCreasedNormals } from "three/addons/utils/BufferGeometryUtils.js";
 import ManifoldModule from "manifold-3d/manifold.js";
 import manifoldWasm from "manifold-3d/manifold.wasm?url";
@@ -2196,7 +2196,16 @@ function cutMesh(features: Feature[], f: Feature): MeshData | null {
       // Cut as triangles (Manifold): far quicker than OpenCascade's exact cut, and it's only for the view.
       // A textured object needs its exact shape for the pattern; if the triangles won't cut, the exact way still can.
       const quickCut = () => {
-        const own = f.kind === "group" ? branchTriangles(features, f) : f.kind === "imported" && plainFaceted(f) ? facetOwn(f) : shapeTriangles(buildOwn(f)!);
+        // An exact shape's own edges (where its faces meet, rounded ones too) are kept where they're still on it.
+        let ownEdges: Float32Array | undefined;
+        let own: WorldMesh | null;
+        if (f.kind === "group") own = branchTriangles(features, f);
+        else if (f.kind === "imported" && plainFaceted(f)) own = facetOwn(f);
+        else {
+          const shape = buildOwn(f)!;
+          own = shapeTriangles(shape);
+          if (!knownTriangles.has(shape)) ownEdges = new Float32Array(shape.meshEdges(MESH_OPTS).lines);
+        }
         let w = own ? transformMesh(own, world) : null;
         const [lo, hi] = w ? meshBounds(w) : [[0, 0, 0], [-1, -1, -1]];
         let cut = false;
@@ -2209,7 +2218,7 @@ function cutMesh(features: Feature[], f: Feature): MeshData | null {
           w = meshBoolean(w!, placed, "cut");
           cut = true;
         }
-        if (cut && w) mesh = f.kind === "imported" && plainFaceted(f) ? facetView(transformMesh(w, world.clone().invert())) : meshForView(f.id, w, world);
+        if (cut && w) mesh = f.kind === "imported" && plainFaceted(f) ? facetView(transformMesh(w, world.clone().invert())) : meshForView(f.id, w, world, ownEdges);
       };
       const exactCut = () => {
         const own = f.kind === "group" ? branch(features, f) : buildOwn(f);
@@ -2529,7 +2538,54 @@ async function cutMeshObject(features: Feature[], f: Extract<Feature, { kind: "s
 }
 
 /** A mesh for the view: sharp edges kept and outlined (like an imported CAD mesh). */
-function meshForView(id: string, w: WorldMesh, toFrame: import("three").Matrix4 | null): MeshData {
+/**
+ * Line segments (pairs of points) that lie on a mesh's surface, within `eps`:
+ * a shape's own edges that a cut left in place (those it cut away go).
+ */
+function edgesOnSurface(lines: Float32Array, vertices: Float32Array, triangles: Uint32Array, eps = 0.01): Float32Array {
+  const cell = 2;
+  const grid = new Map<string, number[]>();
+  const key = (x: number, y: number, z: number) => `${Math.floor(x / cell)},${Math.floor(y / cell)},${Math.floor(z / cell)}`;
+  for (let t = 0; t < triangles.length / 3; t++) {
+    const lo = [Infinity, Infinity, Infinity];
+    const hi = [-Infinity, -Infinity, -Infinity];
+    for (let k = 0; k < 3; k++)
+      for (let a = 0; a < 3; a++) {
+        const v = vertices[triangles[t * 3 + k] * 3 + a];
+        lo[a] = Math.min(lo[a], v - eps);
+        hi[a] = Math.max(hi[a], v + eps);
+      }
+    for (let x = Math.floor(lo[0] / cell); x <= Math.floor(hi[0] / cell); x++)
+      for (let y = Math.floor(lo[1] / cell); y <= Math.floor(hi[1] / cell); y++)
+        for (let z = Math.floor(lo[2] / cell); z <= Math.floor(hi[2] / cell); z++) {
+          const k = `${x},${y},${z}`;
+          const list = grid.get(k);
+          if (list) list.push(t);
+          else grid.set(k, [t]);
+        }
+  }
+  const [a, b, c, p, q] = [new Vector3(), new Vector3(), new Vector3(), new Vector3(), new Vector3()];
+  const tri = new Triangle();
+  const onSurface = (x: number, y: number, z: number) => {
+    p.set(x, y, z);
+    for (const t of grid.get(key(x, y, z)) ?? []) {
+      a.fromArray(vertices, triangles[t * 3] * 3);
+      b.fromArray(vertices, triangles[t * 3 + 1] * 3);
+      c.fromArray(vertices, triangles[t * 3 + 2] * 3);
+      tri.set(a, b, c).closestPointToPoint(p, q);
+      if (q.distanceToSquared(p) <= eps * eps) return true;
+    }
+    return false;
+  };
+  const kept: number[] = [];
+  for (let i = 0; i < lines.length; i += 6) {
+    const [x0, y0, z0, x1, y1, z1] = lines.subarray(i, i + 6);
+    if (onSurface((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2)) kept.push(x0, y0, z0, x1, y1, z1);
+  }
+  return new Float32Array(kept);
+}
+
+function meshForView(id: string, w: WorldMesh, toFrame: import("three").Matrix4 | null, ownEdges?: Float32Array): MeshData {
   const g = new BufferGeometry();
   const vertices = w.vertices.slice();
   const triangles = w.triangles.slice();
@@ -2543,12 +2599,20 @@ function meshForView(id: string, w: WorldMesh, toFrame: import("three").Matrix4 
   g.setIndex(new BufferAttribute(triangles, 1));
   const creased = toCreasedNormals(g, Math.PI / 6);
   const edges = new EdgesGeometry(g, 30);
+  let lines = edges.getAttribute("position").array as Float32Array;
+  if (ownEdges?.length) {
+    const kept = edgesOnSurface(ownEdges, vertices, triangles);
+    const all = new Float32Array(lines.length + kept.length);
+    all.set(lines);
+    all.set(kept, lines.length);
+    lines = all;
+  }
   const mesh: MeshData = {
     id,
     vertices: creased.getAttribute("position").array as Float32Array,
     normals: creased.getAttribute("normal").array as Float32Array,
     triangles: Uint32Array.from({ length: creased.getAttribute("position").count }, (_, i) => i),
-    edges: edges.getAttribute("position").array as Float32Array,
+    edges: lines,
     edgeGroups: new Int32Array(),
   };
   for (const x of [g, creased, edges]) x.dispose();
