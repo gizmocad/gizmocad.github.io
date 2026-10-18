@@ -95,7 +95,7 @@
   On a solid, **Make a clearance cut** adds a copy of it as a hole 0.2 mm bigger all round that cuts what it sits in but not itself.
   On a group (or an object with parts inside it) the cut is one hole around all of it.
   A cut made from a hinged or sliding object (without clearing the full swing) gets a copy of its joint, and the two move together.
-  On something with a hinge or slider, **Clear the full swing** sweeps the cut where the part moves: it starts at 0 to 0, and dragging its orange ends (or moving the part past them) stretches it.
+  On something with a hinge or slider, **Clear the full swing** sweeps the cut where the part moves: it starts at 0 to 0, and dragging its orange ends stretches it (turning the part itself leaves it alone).
   The same tick box on the cut switches the sweep off and on again.
 - **Cut by holes:** untick a hole in an object's panel and it leaves that object (and anything inside it) alone, while still cutting everything else it reaches.
 - **AI assistant (MCP):** let Claude (or any MCP-capable assistant) build and edit the model while you watch. See below.

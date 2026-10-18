@@ -21,7 +21,6 @@ import {
   placeFeature,
   moveJointFrame,
   clampJoint,
-  sweepOf,
   subtreeIds,
   type CadDocument,
   type ImportedFont,
@@ -144,15 +143,6 @@ function commit(mutate: (features: Feature[]) => void) {
 /** A clearance cut and the object it follows swing together: whichever joint just moved, the other matches it. */
 function followJoints(before: Map<string, number>) {
   for (const h of doc.features) {
-    // A swept cut's swing stretches to wherever its part is turned or slid past either end.
-    const s = sweepOf(h);
-    const part = s?.source ? findFeature(s.source) : undefined;
-    if (s && part?.joint && part.joint.value !== before.get(part.id)) {
-      const v = part.joint.value;
-      const [lo, hi] = s.from <= s.to ? (["from", "to"] as const) : (["to", "from"] as const);
-      if (v < s[lo]) s[lo] = v;
-      else if (v > s[hi]) s[hi] = v;
-    }
     const src = h.follows ? findFeature(h.follows) : undefined;
     if (!h.joint || !src?.joint) continue;
     if (src.joint.value !== before.get(src.id)) h.joint.value = src.joint.value;
@@ -2349,10 +2339,10 @@ function fitSection(f: Feature, update: (mutate: (f: Feature) => void) => void):
       sweepNext = on;
       renderPanels();
     });
-    row.title = `Sweep the cut along the ${j.type === "slider" ? "slider" : "hinge"}: it starts at 0 to 0; drag its orange ends (or move this) to stretch it`;
+    row.title = `Sweep the cut along the ${j.type === "slider" ? "slider" : "hinge"}: it starts at 0 to 0; drag its orange ends to stretch it`;
     items.push(row);
   }
-  items.push(make, hint(f.joint && sweepNext ? "Cuts a path 0.2 mm bigger all round where this moves, in whatever it passes through. It starts at 0 to 0: drag its orange ends, or move this past them, to stretch it." : "For a peg, lid or insert: place it where it goes, then this cuts a socket 0.2 mm bigger all round in whatever it overlaps. Change the clearance on the new hole."));
+  items.push(make, hint(f.joint && sweepNext ? "Cuts a path 0.2 mm bigger all round where this moves, in whatever it passes through. It starts at 0 to 0: drag its orange ends to stretch it." : "For a peg, lid or insert: place it where it goes, then this cuts a socket 0.2 mm bigger all round in whatever it overlaps. Change the clearance on the new hole."));
   return items;
 }
 
