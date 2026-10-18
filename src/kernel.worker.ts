@@ -858,10 +858,10 @@ function sweepGaps(M: ManifoldLib, base: InstanceType<ManifoldLib["Manifold"]>, 
     }
     const edge = new Uint8Array(nt);
     for (let t = 0; t < nt; t++) {
-      // Faces square to the hinge's axis turn within their own plane: no notches there.
-      if (Math.abs(normals[t].dot(axis)) > 0.9) continue;
-      // Near the axis it hardly moves between copies: any notch there is tiny.
-      if (moved[t] < minGap) continue;
+      // A face nearly square to the hinge's axis turns almost within its own plane: its notches are only
+      // as deep as its slope over the distance it moves (a blade's ground edge leaves ridges this way).
+      const c = Math.abs(normals[t].dot(axis));
+      if (moved[t] * (c < 1e-6 ? Infinity : Math.sqrt(1 - c * c) / c) < minGap) continue;
       edge[t] = Number(Math.abs(side[t]) < 0.1 || neighbours[t].some((n) => Math.abs(side[n]) >= 0.1 && Math.sign(side[n]) !== Math.sign(side[t])));
     }
     // Two edge triangles side by side in one plane (usually a rectangle) fill as one.
@@ -2396,11 +2396,13 @@ function meshBooleanNow(a: WorldMesh, b: WorldMesh, op: "fuse" | "cut"): WorldMe
   const gaps = "a shape has gaps or crossing faces";
   const ma = toManifold(M, a, gaps);
   const mb = toManifold(M, b, gaps);
-  const r = op === "cut" ? ma.subtract(mb) : ma.add(mb);
+  const raw = op === "cut" ? ma.subtract(mb) : ma.add(mb);
+  // Booleans leave slivers where faces nearly meet; they shade and outline as stray lines. Under 5 µm: gone.
+  const r = raw.simplify(0.005);
   try {
     return fromManifold(r);
   } finally {
-    for (const m of [ma, mb, r]) m.delete();
+    for (const m of [ma, mb, raw, r]) m.delete();
   }
 }
 
