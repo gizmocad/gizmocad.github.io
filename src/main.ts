@@ -128,7 +128,9 @@ function commit(mutate: (features: Feature[]) => void) {
   redoStack.length = 0;
   // Sketches with constraints: note their drawing before the change, so the solver can tell what was edited.
   const before = new Map(doc.features.flatMap((f) => (f.kind === "sketch" && f.params.constraints?.length ? [[f.id, structuredClone(f.params.entities)] as const] : [])));
+  const jointsBefore = new Map(doc.features.flatMap((f) => (f.joint ? [[f.id, f.joint.value] as const] : [])));
   mutate(doc.features);
+  followJoints(jointsBefore);
   for (const f of doc.features) {
     if (f.kind !== "sketch" || !f.params.constraints?.length) continue;
     const result = solveSketch(f.params.entities, f.params.constraints, before.get(f.id));
@@ -136,6 +138,16 @@ function commit(mutate: (features: Feature[]) => void) {
     if (result.error > 1e-3) setNotice("These constraints can't all be met at once: remove one, or change a dimension.");
   }
   refresh();
+}
+
+/** A clearance cut and the object it follows swing together: whichever joint just moved, the other matches it. */
+function followJoints(before: Map<string, number>) {
+  for (const h of doc.features) {
+    const src = h.follows ? findFeature(h.follows) : undefined;
+    if (!h.joint || !src?.joint) continue;
+    if (src.joint.value !== before.get(src.id)) h.joint.value = src.joint.value;
+    else if (h.joint.value !== before.get(h.id)) src.joint.value = h.joint.value;
+  }
 }
 
 /** Add new objects at the history marker (or the end), moving the marker past them. */
@@ -2354,18 +2366,24 @@ function makeClearanceCut(id: string, sweep = false) {
     if (!t) return;
     t.ignoreHoles = [...(t.ignoreHoles ?? []), hole.id];
     insertFeatures(features, [hole, ...copies]);
-    // Where the object is now: a hinge or slider may have moved it from its own position (the hole has no joint).
+    // Where the object is now: a hinge or slider may have moved it from its own position (unless the hole gets the joint too).
     setWorldMatrix(features, hole.id, worldMatrix(features, id));
     const h = features.find((x) => x.id === hole.id);
     if (sweep && t.joint && h) {
       const [from, to] = sweepRange(t.joint);
       h.sweep = { joint: structuredClone(t.joint), position: { ...t.position }, frame: localMatrix(h).toArray(), from, to, source: t.id };
+    } else if (t.joint && h) {
+      // Its own copy of the hinge or slider (beside the object, so in the same frame), moving with the object's.
+      Object.assign(h, { position: { ...t.position }, rotation: { ...t.rotation }, joint: structuredClone(t.joint), follows: t.id });
+      if (t.mirrored) h.mirrored = true;
+      else delete h.mirrored;
     }
   });
   selectedIds = [hole.id];
   selectedId = hole.id;
   renderPanels();
-  setNotice(`${hole.name} cuts a socket 0.2 mm bigger than ${f.name} in whatever it overlaps. ${f.name} isn't cut by it. Move them together by selecting both.`);
+  const moves = f.joint && !sweep ? ` It has a copy of ${f.name}'s ${f.joint.type === "slider" ? "slider" : "hinge"} and moves with it.` : "";
+  setNotice(`${hole.name} cuts a socket 0.2 mm bigger than ${f.name} in whatever it overlaps. ${f.name} isn't cut by it.${moves} Move them together by selecting both.`);
 }
 
 /** Which holes cut this object: untick one and it leaves this object (and everything inside it) alone. */

@@ -450,6 +450,8 @@ interface FeatureBase {
   combined?: boolean;
   /** Holes only: swept through a hinge's swing (or a slider's travel), so a moving part clears all of it. */
   sweep?: Sweep;
+  /** A clearance cut with a copy of its object's hinge or slider: moving either joint moves the other (the object's id). */
+  follows?: string;
 }
 
 /**
