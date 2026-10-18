@@ -184,6 +184,9 @@ body.sketching .panel.left .shape-buttons { opacity: 0.6; }
 #object-list li.failed .name::after { content: " ⚠"; }
 #object-list .name { display: flex; gap: 6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #object-list .kind { color: var(--muted); width: 14px; text-align: center; }
+#object-list .swatch { flex: none; align-self: center; width: 9px; height: 9px; border-radius: 50%; border: 1px solid color-mix(in srgb, var(--text) 25%, transparent); box-sizing: border-box; }
+#object-list .swatch.hole { border: 2px solid var(--hole); }
+#object-list .swatch.empty:not(.hole) { border-style: dashed; }
 #object-list li {
   padding: 6px 8px;
   border-radius: 6px;

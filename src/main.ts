@@ -908,6 +908,9 @@ function hideMenu() {
 
 window.addEventListener("pointerdown", (e) => !menuEl.contains(e.target as Node) && hideMenu(), true);
 
+/** Objects with no colour of their own show in this one (as the view does). */
+const DEFAULT_COLOUR = "#3ddc97";
+
 /** Groups folded shut in the list (remembered in this browser). */
 const folded = new Set<string>(
   (() => {
@@ -958,7 +961,7 @@ function objectRow(f: Feature, depth: number, inside: Set<string>) {
   li.className = [selectedIds.includes(f.id) ? "selected" : "", holdsSelected ? "holds-selected" : "", buildErrors[f.id] ? "failed" : "", hiddenInView(f) ? "hidden-obj" : "", f.suppressed ? "suppressed" : ""].join(" ");
   li.style.paddingLeft = `${8 + depth * 16}px`;
   li.draggable = true;
-  li.innerHTML = `<span class="name"><button class="fold"></button><span class="kind"></span><span></span></span><span class="row-end"><span class="tag ${f.mode}"></span><button class="eye ghost-btn"></button><button class="eye"></button></span>`;
+  li.innerHTML = `<span class="name"><button class="fold"></button><span class="swatch"></span><span class="kind"></span><span></span></span><span class="row-end"><span class="tag ${f.mode}"></span><button class="eye ghost-btn"></button><button class="eye"></button></span>`;
   li.querySelector(".tag")!.textContent = (f.kind === "group" ? "group" : f.mode) + (shut ? ` · ${inside.size}` : "");
   const fold = li.querySelector<HTMLButtonElement>(".fold")!;
   if (inside.size) {
@@ -993,6 +996,12 @@ function objectRow(f: Feature, depth: number, inside: Set<string>) {
   };
   eye.ondblclick = (e) => e.stopPropagation();
   li.querySelector(".kind")!.textContent = kindIcon(f);
+  // Its colour, as in the view: holes are a red ring, a group of mixed colours an empty one.
+  const swatch = li.querySelector<HTMLElement>(".swatch")!;
+  const colour = f.mode === "hole" ? null : (colourOf(doc.features, f) ?? (f.kind === "group" || f.kind === "plane" ? null : DEFAULT_COLOUR));
+  swatch.classList.toggle("hole", f.mode === "hole");
+  if (colour) swatch.style.background = colour;
+  else swatch.classList.add("empty");
   li.querySelector(".name > span:last-child")!.textContent = f.name;
   if (buildErrors[f.id]) li.title = buildErrors[f.id];
   li.onclick = (e) => selectObject(f.id, e.shiftKey || e.ctrlKey || e.metaKey);
