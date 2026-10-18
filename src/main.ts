@@ -2733,6 +2733,8 @@ function renderProperties() {
 function renderPropertiesPanel() {
   const panel = $("#properties");
   const f = selected();
+  // With nothing selected (and no sketch or sculpt open) the right panel steps aside for the view.
+  document.body.classList.toggle("nothing-selected", !f && !(editingSketchId && sketchEditor) && !findFeature(sculptingId));
   if (editingSketchId && sketchEditor && editingSketch()) return renderSketchPanel(panel, editingSketch()!, sketchEditor);
   const sculpting = findFeature(sculptingId);
   if (sculpting?.kind === "sculpt") return panel.replaceChildren(...sculptPanel(sculpting));

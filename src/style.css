@@ -307,6 +307,9 @@ button.icon.danger:disabled { background: none; color: var(--muted); border-colo
 .panel-grip { position: fixed; top: 0; bottom: 0; width: 7px; z-index: 40; cursor: col-resize; touch-action: none; }
 .panel-grip.left { left: calc(var(--left-w, 220px) - 4px); }
 .panel-grip.right { right: calc(var(--right-w, 260px) - 4px); }
+/* Nothing selected: no right panel, the view takes its place. */
+body.nothing-selected { grid-template-columns: var(--left-w, 220px) 1fr 0; }
+body.nothing-selected .panel.right, body.nothing-selected .panel-grip.right { display: none; }
 .panel-grip:hover, .panel-grip.dragging { background: color-mix(in srgb, var(--accent) 35%, transparent); }
 
 @media (max-width: 800px) {
@@ -319,6 +322,7 @@ button.icon.danger:disabled { background: none; color: var(--muted); border-colo
   }
   .panel.left, .panel.right { border: none; border-top: 1px solid var(--border); }
   .panel-grip { display: none; }
+  body.nothing-selected { grid-template-columns: 1fr; }
 }
 
 .ico.plane { background: none; color: var(--plane); font-size: 18px; line-height: 22px; text-align: center; }
