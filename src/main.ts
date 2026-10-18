@@ -2304,16 +2304,24 @@ function fitSection(f: Feature, update: (mutate: (f: Feature) => void) => void):
       hint("Grows this hole by this much on every side, so a part the same shape fits into what it cuts. About 0.2 mm is a snug fit on most printers; 0.3–0.5 mm slides freely."),
     ];
     const s = f.sweep;
-    if (s) {
-      const unit = s.joint.type === "slider" ? {} : { unit: "°", plain: true };
+    // What it can sweep with: its own earlier sweep, or the moving part it was made from.
+    const src = s?.source ? findFeature(s.source) : f.follows ? findFeature(f.follows) : doc.features.find((x) => x.joint && x.ignoreHoles?.includes(f.id));
+    const type = s?.joint.type ?? src?.joint?.type;
+    if (!type) return items;
+    const slider = type === "slider";
+    const on = checkToggle(slider ? "Clear the full slide" : "Clear the full swing", !!s && !s.off, (want) => {
+      if (want) sweepClearanceCut(f.id);
+      else update((t) => t.sweep && (t.sweep.off = true));
+    });
+    items.push(section(slider ? "Slide" : "Swing"), on);
+    if (s && !s.off) {
+      const unit = slider ? {} : { unit: "°", plain: true };
       items.push(
-        section(s.joint.type === "slider" ? "Slide" : "Swing"),
         lengthField("From", s.from, (v) => update((t) => t.sweep && (t.sweep.from = v)), unit),
         lengthField("To", s.to, (v) => update((t) => t.sweep && (t.sweep.to = v)), unit),
-        button("Stop sweeping", () => update((t) => delete t.sweep), "wide"),
-        hint(`Swept through its ${s.joint.type === "slider" ? "slider's travel" : "hinge's swing"} (the values the ${s.joint.type === "slider" ? "slider" : "hinge"} shows), so the moving part clears all of it.`),
+        hint(`Swept through its ${slider ? "slider's travel" : "hinge's swing"} (the values the ${slider ? "slider" : "hinge"} shows), so the moving part clears all of it. Untick to cut just where it sits.`),
       );
-    }
+    } else items.push(hint(`Tick to sweep it through ${src?.name ?? "its part"}'s ${slider ? "travel" : "swing"}, so the moving part clears all of it.`));
     return items;
   }
   const make = button("Make a clearance cut", () => makeClearanceCut(f.id, !!f.joint && sweepNext), "wide");
@@ -2384,6 +2392,27 @@ function makeClearanceCut(id: string, sweep = false) {
   renderPanels();
   const moves = f.joint && !sweep ? ` It has a copy of ${f.name}'s ${f.joint.type === "slider" ? "slider" : "hinge"} and moves with it.` : "";
   setNotice(`${hole.name} cuts a socket 0.2 mm bigger than ${f.name} in whatever it overlaps. ${f.name} isn't cut by it.${moves} Move them together by selecting both.`);
+}
+
+/** Sweep a clearance cut through its part's movement again: its kept sweep, or a new one from the part. */
+function sweepClearanceCut(id: string) {
+  commit((features) => {
+    const h = features.find((x) => x.id === id);
+    if (!h) return;
+    if (h.sweep) {
+      delete h.sweep.off;
+      return;
+    }
+    const t = (h.follows && features.find((x) => x.id === h.follows)) || features.find((x) => x.joint && x.ignoreHoles?.includes(h.id));
+    if (!t?.joint) return;
+    // A swept cut stays put: one that swung with its part keeps where it is now, without the joint.
+    const world = worldMatrix(features, h.id);
+    delete h.joint;
+    delete h.follows;
+    setWorldMatrix(features, h.id, world);
+    const [from, to] = sweepRange(t.joint);
+    h.sweep = { joint: structuredClone(t.joint), position: { ...t.position }, frame: localMatrix(h).toArray(), from, to, source: t.id };
+  });
 }
 
 /** Which holes cut this object: untick one and it leaves this object (and everything inside it) alone. */

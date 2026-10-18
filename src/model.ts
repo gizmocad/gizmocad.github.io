@@ -468,6 +468,8 @@ export interface Sweep {
   to: number;
   /** The moving part it was made from (shown swinging while an end is dragged). */
   source?: string;
+  /** Switched off: the hole cuts just where it sits (the sweep is kept to switch back on). */
+  off?: boolean;
 }
 
 export type Feature =
@@ -1009,7 +1011,7 @@ export function colourOf(features: Iterable<Feature>, f: Feature): string | unde
 }
 
 /** A hole's sweep (null for solids); a hole group's sweeps its joined shape. */
-export const sweepOf = (f: Feature) => (f.mode === "hole" && f.kind !== "plane" && f.sweep ? f.sweep : null);
+export const sweepOf = (f: Feature) => (f.mode === "hole" && f.kind !== "plane" && f.sweep && !f.sweep.off ? f.sweep : null);
 
 /** How much a hole is grown on every side (0 for solids); a hole group's grows its joined shape. */
 export const clearanceOf = (f: Feature) => (f.mode === "hole" && f.kind !== "plane" ? Math.max(0, f.clearance ?? 0) : 0);

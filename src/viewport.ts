@@ -8,7 +8,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import type { MeshData } from "./kernel";
 import { scenePalette } from "./theme";
-import { PLANE_ROTATIONS, baseMatrix, clampJoint, colourOf, jointMatrix, localMatrix, worldMatrix, type Feature, type Joint, type SketchParams, type Vec3 } from "./model";
+import { PLANE_ROTATIONS, baseMatrix, clampJoint, colourOf, jointMatrix, localMatrix, sweepOf, worldMatrix, type Feature, type Joint, type SketchParams, type Vec3 } from "./model";
 import { featureExtents, isTilted, rulerLength, staysRound, type ResizeAnchor } from "./resize";
 import { isClosed, outline, prismPoints } from "./sketchGeometry";
 import { hedron } from "./hedron";
@@ -1091,7 +1091,7 @@ export class Viewport {
       disposeTree(this.swing.group);
       this.swing = null;
     }
-    const s = sel?.f.mode === "hole" ? sel.f.sweep : undefined;
+    const s = sel ? (sweepOf(sel.f) ?? undefined) : undefined;
     if (!sel || !s || this.selectedIds.size > 1) return;
     const { f, node } = sel;
     const j = s.joint;

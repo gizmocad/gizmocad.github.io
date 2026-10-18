@@ -96,6 +96,7 @@
   On a group (or an object with parts inside it) the cut is one hole around all of it.
   A cut made from a hinged or sliding object (without clearing the full swing) gets a copy of its joint, and the two move together.
   On something with a hinge or slider, **Clear the full swing** sweeps the cut through the connection's Min–Max range, so it clears everywhere the part moves.
+  The same tick box on the cut switches the sweep off and on again.
 - **Cut by holes:** untick a hole in an object's panel and it leaves that object (and anything inside it) alone, while still cutting everything else it reaches.
 - **AI assistant (MCP):** let Claude (or any MCP-capable assistant) build and edit the model while you watch. See below.
 
