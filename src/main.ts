@@ -2787,7 +2787,19 @@ function renderPropertiesPanel() {
       ...fitSection(f, update),
     );
   }
-  if (f.kind === "group") items.push(...(f.mode === "hole" ? fitSection(f, update) : [...combineSection(f, update), ...fitSection(f, update)]));
+  if (f.kind === "group") {
+    // A hole group cuts with all its parts joined as one shape.
+    const mode = segmented(
+      [
+        { value: "solid", label: "Solid" },
+        { value: "hole", label: "Hole", title: "Cut its parts, joined as one shape, out of what they overlap" },
+      ],
+      f.mode,
+      (m) => update((t) => (t.mode = m)),
+      "mode",
+    );
+    items.push(mode, ...(f.mode === "hole" ? fitSection(f, update) : [...combineSection(f, update), ...fitSection(f, update)]));
+  }
 
   if (f.kind === "sculpt") {
     const solid = button("◆ Make it a solid", () => void convertToSolid(f.id), "wide");
