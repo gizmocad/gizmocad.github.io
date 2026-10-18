@@ -2696,6 +2696,8 @@ export class Viewport {
     this.perspCamera.aspect = w / h;
     this.perspCamera.updateProjectionMatrix();
     this.orthoFrustum((this.orthoCamera.top - this.orthoCamera.bottom) / 2 || 60);
+    // Resizing clears the canvas: draw again now, before the page is shown, or it flashes blank for a frame.
+    this.renderer.render(this.scene, this.camera);
   }
 }
 
