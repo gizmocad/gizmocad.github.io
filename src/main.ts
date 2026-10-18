@@ -2076,13 +2076,18 @@ function groupSelected() {
 /** Join the selected objects into one shape (a combined group), which moves, rounds and exports as one. */
 function combineSelected() {
   const ids = topSelected();
-  if (ids.length < 2) return;
-  groupIds(ids, true);
-  setNotice(`Combined ${ids.length} objects into one. Untick "Combine into one shape" on the group to keep them as separate parts.`);
+  // A selected object inside another selected one (e.g. a part and its parent) joins in too.
+  const inner = selectedIds.filter((id) => !ids.includes(id) && findFeature(id));
+  if (ids.length + inner.length < 2) return;
+  groupIds(ids, true, inner);
+  setNotice(`Combined ${ids.length + inner.length} objects into one. Untick "Combine into one shape" on the group to keep them as separate parts.`);
 }
 
-/** Put objects (none inside another) into a new group around them; returns the group's id. */
-function groupIds(ids: string[], combined = false): string {
+/**
+ * Put objects (none inside another) into a new group around them; returns the
+ * group's id. `inner` (objects inside those) are lifted out into the group too.
+ */
+function groupIds(ids: string[], combined = false, inner: string[] = []): string {
   const parents = new Set(ids.map((id) => findFeature(id)?.parentId ?? null));
   const parentId = parents.size === 1 ? [...parents][0] : null;
   const group = createFeature("group", doc.features, parentId);
@@ -2093,7 +2098,7 @@ function groupIds(ids: string[], combined = false): string {
       const c = box.getCenter(new Vector3());
       setWorldMatrix(features, group.id, new Matrix4().makeTranslation(Math.round(c.x * 100) / 100, Math.round(c.y * 100) / 100, Math.round(box.min.z * 100) / 100));
     }
-    for (const id of ids) reparent(features, id, group.id);
+    for (const id of [...ids, ...inner]) reparent(features, id, group.id);
     if (combined) {
       const g = features.find((x) => x.id === group.id);
       if (g) g.combined = true;
