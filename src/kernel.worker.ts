@@ -12,6 +12,7 @@ import {
   ignoresHole,
   anyIgnoredHoles,
   clearanceOf,
+  isGroove,
   sweepOf,
   type Sweep,
   worldMatrix,
@@ -548,6 +549,10 @@ function cutByReachingHoles(f: Feature, shape: Shape3D): Shape3D {
   if (!features.some((x) => x.id === f.id)) return shape;
   const [lo, hi] = shape.boundingBox.bounds;
   for (const h of cuttingHoles(features, f)) {
+    // A hole made of triangles (a swept cut, a groove, a mesh) would take many seconds to cut exactly, and
+    // its faceted edges don't round well: it's left to cut afterwards, as holes usually do.
+    const sub = subtreeIds(features, h.id);
+    if (hasFaceted(features.filter((x) => sub.has(x.id)))) continue;
     const hs = branch(features, h);
     if (!hs) continue;
     const local = fromWorld(features, f, placeInWorld(features, h, hs));
@@ -722,6 +727,7 @@ const grownCache = new Map<string, WorldMesh>();
 /** An object's own shape as triangles (straight from them for faceted solids and swept holes), or null if it can't be made. */
 function ownTriangles(f: Feature): WorldMesh | null {
   if (f.kind === "imported" && plainFaceted(f)) return facetOwn(f);
+  if (plainGroove(f)) return grooveTriangles(f);
   if (!sweepOf(f)) {
     const s = buildOwnSafe(f);
     return s && shapeTriangles(s);
@@ -759,7 +765,7 @@ const sweptCache = new Map<string, WorldMesh>();
 // (IndexedDB), by everything that shapes them, and read back when the worker
 // starts. Bump KEPT_VERSION when how they're made changes.
 
-const KEPT_VERSION = 3;
+const KEPT_VERSION = 4;
 const KEPT_LIMIT = { sweeps: 12, cuts: 16 } as const;
 type KeptStore = keyof typeof KEPT_LIMIT;
 const kept: Record<KeptStore, Map<string, unknown>> = { sweeps: new Map(), cuts: new Map() };
@@ -1335,6 +1341,13 @@ function buildBase(f: Feature, taper = 0): Shape3D | null {
     case "screw":
       return buildScrewHole(f.params);
     case "sketch":
+      if (isGroove(f) && !lean && !taper) {
+        // Exact solids (a STEP export) only: everything else uses the groove's triangles.
+        const w = grooveTriangles(f);
+        const solid = solidFromTriangles(w.vertices, w.triangles, [1, 1, 1], "bodies");
+        knownTriangles.set(solid, w);
+        return solid;
+      }
       return buildSketch(f.params, lean, taper);
     case "imported":
       return importedShape(f.params);
@@ -1407,7 +1420,73 @@ function facetTriangles(p: ImportedParams): WorldMesh {
 }
 
 /** Whether the model has solids made from meshes (then results and STL/3MF exports are worked out as triangles). */
-const hasFaceted = (features: Feature[]) => features.some((f) => (f.kind === "imported" && !!f.params.faceted) || !!sweepOf(f));
+const hasFaceted = (features: Feature[]) => features.some((f) => (f.kind === "imported" && !!f.params.faceted) || !!sweepOf(f) || plainGroove(f));
+
+/** A groove with nothing done to it that needs its exact solid (as plainFaceted). */
+const plainGroove = (f: Feature): f is Feature & { kind: "sketch" } => isGroove(f) && !f.edgeOps.some((o) => o.size > 0) && !f.clips?.length && !f.shell && !f.tilt && !sweepOf(f) && !clearanceOf(f);
+
+/** Points around a circle of radius r at height z, centred on (x, y). */
+function ring(x: number, y: number, r: number, z: number, n = 24): [number, number, number][] {
+  if (r <= 1e-6) return [[x, y, z]];
+  return Array.from({ length: n }, (_, i) => [x + r * Math.cos((i / n) * 2 * Math.PI), y + r * Math.sin((i / n) * 2 * Math.PI), z] as [number, number, number]);
+}
+
+const grooveCache = new Map<string, WorldMesh>();
+
+/**
+ * A chisel groove's triangles in its own frame (Z into the object, from the
+ * sketch's offset just outside the face down to its depth): the tip's
+ * cross-section at each point of each stroke, hulled segment by segment and
+ * joined. Quick, and exact for flat, V and round tips (a fillet along a
+ * wandering stroke takes OpenCascade seconds, if it works at all).
+ */
+function grooveTriangles(f: Feature & { kind: "sketch" }): WorldMesh {
+  const key = JSON.stringify(f.params);
+  const hit = grooveCache.get(key);
+  if (hit) return hit;
+  const M = manifoldReady;
+  if (!M) throw new Error("The mesh library isn't loaded.");
+  const { offset, depth } = f.params;
+  const top = offset;
+  const bottom = offset + depth;
+  const tip = f.params.groove!.tip;
+  const pieces = [];
+  for (const e of f.params.entities) {
+    if (e.type !== "stroke") continue;
+    const half = e.width / 2;
+    // The tip's cross-section at a point on the stroke, as points to hull.
+    const section = ([x, y]: [number, number]) => {
+      const pts = ring(x, y, half, top);
+      if (tip === "flat") pts.push(...ring(x, y, half, bottom));
+      else if (tip === "v") pts.push([x, y, bottom]);
+      else {
+        // A ball at the floor (as big as fits), on a ring when the groove is wider than it is deep.
+        const ball = Math.min(half, bottom - top);
+        const core = half - ball;
+        for (let k = 0; k <= 6; k++) {
+          const a = (k / 6) * (Math.PI / 2);
+          pts.push(...ring(x, y, core + ball * Math.cos(a), bottom - ball + ball * Math.sin(a)));
+        }
+      }
+      return pts;
+    };
+    const path = e.points.length === 1 ? [e.points[0], e.points[0]] : e.points;
+    for (let i = 0; i + 1 < path.length; i++) pieces.push(M.Manifold.hull([...section(path[i]), ...section(path[i + 1])]));
+  }
+  try {
+    const joined = M.Manifold.union(pieces);
+    try {
+      const w = fromManifold(joined);
+      grooveCache.set(key, w);
+      if (grooveCache.size > 64) grooveCache.delete(grooveCache.keys().next().value!);
+      return w;
+    } finally {
+      joined.delete();
+    }
+  } finally {
+    for (const p of pieces) p.delete();
+  }
+}
 
 /** A faceted solid with nothing done to it that needs the exact solid (fillets, hollowing, tilt, splits). */
 function plainFaceted(f: Feature): boolean {
@@ -2195,6 +2274,7 @@ function ownMesh(f: Feature): MeshData | null {
     adjusted = {};
     try {
       if (sweepOf(f)) meshCache.set(key, { mesh: meshForView("", sweptTriangles(f), null), adjusted });
+      else if (plainGroove(f)) meshCache.set(key, { mesh: meshForView("", grooveTriangles(f), null), adjusted });
       else if (f.kind === "imported" && plainFaceted(f)) meshCache.set(key, { mesh: textured(f, facetView(facetOwn(f))), adjusted });
       else if (plainStretch(f)) meshCache.set(key, { mesh: textured(f, stretchMesh(toMesh("", importedBase(f.params)), f.params.scale)), adjusted });
       else {
@@ -2262,6 +2342,8 @@ const geometryKey = (features: Feature[], id: string) => {
 };
 
 const cutCache = new Map<string, { mesh: MeshData | null; error?: string }>();
+/** Objects' own triangles and edge lines (in their own frame) for cutting their holes, by their own geometry. */
+const ownCutCache = new Map<string, { tris: WorldMesh; edges?: Float32Array }>();
 
 /** Objects whose holes couldn't be cut in the last build, with why (shown as their build error). */
 let cutFailures: Record<string, string> = {};
@@ -2300,9 +2382,17 @@ function cutMesh(features: Feature[], f: Feature): MeshData | null {
         if (f.kind === "group") own = branchTriangles(features, f);
         else if (f.kind === "imported" && plainFaceted(f)) own = facetOwn(f);
         else {
-          const shape = buildOwn(f)!;
-          own = shapeTriangles(shape);
-          if (!knownTriangles.has(shape)) ownEdges = new Float32Array(shape.meshEdges(MESH_OPTS).lines);
+          // Its own triangles and edges don't change as holes come and go: kept (reading and meshing a big part takes a while).
+          const ownKey = JSON.stringify([f.kind, keyParams(f), f.edgeOps, f.clips ?? [], f.shell ?? null, f.tilt ?? null]);
+          let mine = ownCutCache.get(ownKey);
+          if (!mine) {
+            const shape = buildOwn(f)!;
+            mine = { tris: shapeTriangles(shape), edges: knownTriangles.has(shape) ? undefined : new Float32Array(shape.meshEdges(MESH_OPTS).lines) };
+            ownCutCache.set(ownKey, mine);
+            if (ownCutCache.size > 32) ownCutCache.delete(ownCutCache.keys().next().value!);
+          }
+          own = mine.tris;
+          ownEdges = mine.edges;
         }
         let w = own ? transformMesh(own, world) : null;
         const [lo, hi] = w ? meshBounds(w) : [[0, 0, 0], [-1, -1, -1]];

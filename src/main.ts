@@ -36,6 +36,7 @@ import {
   type SketchEntity,
   type SketchEntityType,
   type SketchFeature,
+  type GrooveTip,
   type SculptFeature,
   type Vec3,
   worldMatrix,
@@ -2430,9 +2431,8 @@ function sweepClearanceCut(id: string) {
 
 // ---- Chisel ------------------------------------------------------------------------------
 
-type ChiselTip = "flat" | "v" | "round";
 /** The chisel's settings, kept for the next groove. */
-const chisel: { width: number; depth: number; tip: ChiselTip } = { width: 3, depth: 2, tip: "round" };
+const chisel: { width: number; depth: number; tip: GrooveTip } = { width: 3, depth: 2, tip: "round" };
 
 /** Carve grooves into an object by dragging across it. */
 function chiselSection(f: Feature): HTMLElement[] {
@@ -2530,10 +2530,7 @@ function carveGroove(id: string, points: Vec3[], normal: Vec3) {
   // Starts a little outside the face, so the cut opens cleanly through it.
   const lip = 0.05;
   Object.assign(groove, { name: `Groove ${n}`, mode: "hole" as const });
-  groove.params = { ...groove.params, operation: "extrude", offset: -lip, depth: depth + lip, direction: "normal", entities: [{ id: newId(), mode: "add", type: "stroke", points: uv, width }] };
-  // The tip: a V is the floor's edges chamfered to a point, a round one filleted to a half circle.
-  const size = Math.min(width * 0.49, depth * 0.98);
-  if (tip !== "flat") groove.edgeOps = [{ id: newId(), type: tip === "v" ? "chamfer" : "fillet", size, target: "top", points: [] }];
+  groove.params = { ...groove.params, operation: "extrude", offset: -lip, depth: depth + lip, direction: "normal", entities: [{ id: newId(), mode: "add", type: "stroke", points: uv, width }], groove: { tip } };
   commit((features) => {
     insertFeatures(features, [groove]);
     setWorldMatrix(features, groove.id, world);
@@ -3210,8 +3207,16 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
 
   const add = document.createElement("div");
   add.className = "actions";
-  // With holes reaching it, a new finish goes after them, so the hole edges can be picked and rounded too.
-  const afterHoles = f.kind !== "group" && f.mode === "solid" && holesReaching(activeFeatures(doc.features), f).length > 0;
+  // With holes cutting into it, a new finish goes after them, so the hole edges can be picked and rounded too.
+  // (Only holes that touch it: rounding after holes cuts them first, which a far-off hole would only slow down.)
+  const mine = viewport.modelBounds(new Set([f.id]));
+  const afterHoles =
+    f.kind !== "group" &&
+    f.mode === "solid" &&
+    holesReaching(activeFeatures(doc.features), f).some((h) => {
+      const box = viewport.modelBounds(new Set([h.id]));
+      return !mine || !box || box.intersectsBox(mine);
+    });
   const newOp = (type: EdgeOp["type"]) =>
     update((t) => t.edgeOps.push({ id: newId(), type, size: 1, target: "all", points: [], ...(type === "bevel" ? { angle: 30 } : {}), ...(afterHoles ? { afterHoles: true } : {}) }));
   add.className = "actions edge-add";
@@ -3230,6 +3235,28 @@ function parentSelect(f: Feature) {
   sel.value = f.parentId ?? "";
   sel.onchange = () => moveTo(f.id, sel.value || null);
   return sel;
+}
+
+/** A chisel groove's width, depth (below the face) and tip. */
+function grooveFields(s: SketchFeature, set: (mutate: (p: SketchFeature["params"]) => void) => void): HTMLElement[] {
+  const lip = Math.max(0, -s.params.offset);
+  const stroke = s.params.entities.find((e) => e.type === "stroke");
+  return [
+    lengthField("Width", stroke?.type === "stroke" ? stroke.width : 0, (v) => set((p) => p.entities.forEach((e) => e.type === "stroke" && (e.width = Math.max(0.1, v))))),
+    lengthField("Depth", Math.round((s.params.depth - lip) * 1e4) / 1e4, (v) => set((p) => (p.depth = Math.max(0.05, v) + lip))),
+    labeled(
+      "Tip",
+      segmented(
+        [
+          { value: "flat" as const, label: "Flat", title: "Square-bottomed groove" },
+          { value: "v" as const, label: "V", title: "V-shaped groove" },
+          { value: "round" as const, label: "Round", title: "Round-bottomed groove" },
+        ],
+        s.params.groove!.tip,
+        (tip) => set((p) => (p.groove = { tip })),
+      ),
+    ),
+  ];
 }
 
 /**
@@ -3273,7 +3300,8 @@ function sketchSettings(s: SketchFeature, update: (mutate: (f: Feature) => void)
         (v) => set((p) => (p.operation = v)),
       ),
     ),
-    ...(s.params.operation === "extrude"
+    ...(s.params.groove && s.params.operation === "extrude" ? grooveFields(s, set) : []),
+    ...(s.params.operation === "extrude" && !s.params.groove
       ? [
           lengthField("Depth", s.params.depth, (v) => set((p) => (p.depth = v))),
           labeled(

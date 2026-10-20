@@ -354,6 +354,15 @@ export interface SketchParams {
   entities: SketchEntity[];
   /** Dimensions and geometric rules the drawing keeps to (see constraints.ts). */
   constraints?: SketchConstraint[];
+  /** A chisel groove: its strokes are carved to the depth with this tip (see isGroove). */
+  groove?: { tip: GrooveTip };
+}
+
+export type GrooveTip = "flat" | "v" | "round";
+
+/** A chisel groove: an extruded sketch of nothing but strokes, carved with a flat, V or round tip. */
+export function isGroove(f: Feature): f is Feature & { kind: "sketch" } {
+  return f.kind === "sketch" && !!f.params.groove && f.params.operation === "extrude" && f.params.entities.length > 0 && f.params.entities.every((e) => e.type === "stroke" && e.mode === "add");
 }
 
 /**
@@ -977,6 +986,14 @@ export function normalizeDocument(doc: CadDocument): CadDocument {
       const p = f.params;
       p.offset ??= 0;
       p.direction ??= "normal";
+      // A chisel groove from before grooves had their own tip: its tip was a fillet (round) or chamfer (V) on its floor.
+      if (!p.groove && f.mode === "hole" && /^Groove \d+$/.test(f.name) && p.operation === "extrude" && p.entities.length && p.entities.every((e) => e.type === "stroke")) {
+        const floor = f.edgeOps.length === 1 && f.edgeOps[0].target === "top" ? f.edgeOps[0] : null;
+        if (!f.edgeOps.length || floor) {
+          p.groove = { tip: !floor ? "flat" : floor.type === "chamfer" ? "v" : "round" };
+          f.edgeOps = [];
+        }
+      }
       for (const e of p.entities) {
         if (e.type === "rect") {
           e.angle ??= 0;
