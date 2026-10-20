@@ -307,7 +307,8 @@ export interface SphereParams {
 /** Plane the sketch is drawn on, in the feature's local frame. */
 export type SketchPlane = "XY" | "XZ" | "YZ";
 /** "flat" is just the drawing (no solid yet); new sketches start flat until extruded or revolved in the 3D view. */
-export type SketchOperation = "flat" | "extrude" | "revolve";
+/** Sweep: brush strokes become tubes as thick as the stroke. Loft: the first shape blends into another sketch's. */
+export type SketchOperation = "flat" | "extrude" | "revolve" | "sweep" | "loft";
 /** Which way an extrusion goes from the sketch plane. */
 export type ExtrudeDirection = "normal" | "reversed" | "both";
 /**
@@ -382,6 +383,15 @@ export interface SketchParams {
   constraints?: SketchConstraint[];
   /** A chisel groove: its strokes are carved to the depth with this tip (see isGroove). */
   groove?: { tip: GrooveTip };
+  /** Sweep: the tubes' cross-section (default round). */
+  sweepProfile?: "round" | "square";
+  /** Loft: the sketch (by id) whose first shape this one's blends into. */
+  loftTo?: string;
+}
+
+/** A sweep: an extruded sketch's brush strokes become tubes. */
+export function isSweepSketch(f: Feature): f is Feature & { kind: "sketch" } {
+  return f.kind === "sketch" && f.params.operation === "sweep" && f.params.entities.some((e) => e.type === "stroke" && e.mode === "add");
 }
 
 export type GrooveTip = "flat" | "v" | "round";

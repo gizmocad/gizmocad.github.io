@@ -42,6 +42,7 @@
 - Mark any shape as a **hole**: what it cuts is shown cut as you work, with the hole itself see-through so you can still move it.
   Holes cut imported meshes (STL, OBJ, 3MF…) too, using the Manifold mesh library, as long as the mesh is closed.
   **Show result** shows only the finished boolean result (parts merged), computed by the OpenCascade kernel.
+- **Sweep & loft:** a sketch can become a **sweep** (each brush stroke turns into a round or square tube as thick as the stroke: pipes, handles, rails) or a **loft** (its first shape blends into another sketch's, e.g. square at the bottom to round at the top; place that sketch where the loft should end).
 - **Sketches:** points, guide lines, rectangles (rounded corners, any angle), circles, ellipses,
   regular polygons, slots, polygons with arc edges, smooth curves (closer points make tighter bends), and freehand brush strokes, on the XY/XZ/YZ plane or any
   tilted Plane object. Shapes can add to the profile, cut it, or just act as guides. Snap to existing

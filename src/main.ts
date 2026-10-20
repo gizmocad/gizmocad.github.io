@@ -39,6 +39,7 @@ import {
   type SketchEntity,
   type SketchEntityType,
   type SketchFeature,
+  type SketchOperation,
   type ScrewParams,
   type GrooveTip,
   type SculptFeature,
@@ -3267,6 +3268,44 @@ function parentSelect(f: Feature) {
   return sel;
 }
 
+/** The other sketches in the model (a loft can blend into one). */
+const otherSketches = (s: SketchFeature) => doc.features.filter((x): x is SketchFeature => x.kind === "sketch" && x.id !== s.id);
+
+function sweepFields(s: SketchFeature, set: (mutate: (p: SketchFeature["params"]) => void) => void): HTMLElement[] {
+  const strokes = s.params.entities.filter((e) => e.type === "stroke" && e.mode === "add").length;
+  return [
+    labeled(
+      "Profile",
+      segmented(
+        [
+          { value: "round" as const, label: "Round", title: "Round tubes" },
+          { value: "square" as const, label: "Square", title: "Square tubes" },
+        ],
+        s.params.sweepProfile ?? "round",
+        (v) => set((p) => (p.sweepProfile = v)),
+      ),
+    ),
+    hint(
+      strokes
+        ? `Each brush stroke (${strokes}) becomes a tube as thick as the stroke, centred on the sketch's plane. Change a stroke's width in the sketch to change the tube's.`
+        : "Draw the path with the Brush tool (B) in this sketch: each stroke becomes a tube as thick as the stroke.",
+    ),
+  ];
+}
+
+function loftFields(s: SketchFeature, set: (mutate: (p: SketchFeature["params"]) => void) => void): HTMLElement[] {
+  const others = otherSketches(s);
+  if (!others.length) return [hint("Add a second sketch for this one to blend into: place it above (or anywhere off this sketch's plane) and draw a closed shape in it. It can stay flat.")];
+  const to = document.createElement("select");
+  for (const o of others) to.add(new Option(o.name, o.id));
+  to.value = s.params.loftTo ?? "";
+  to.onchange = () => set((p) => (p.loftTo = to.value));
+  return [
+    labeled("Loft to", to),
+    hint("This sketch's first closed shape blends smoothly into the first one in the sketch picked; move or tilt that sketch to change where (and how) it ends. The other sketch can stay flat."),
+  ];
+}
+
 /** A chisel groove's width, depth (below the face) and tip. */
 function grooveFields(s: SketchFeature, set: (mutate: (p: SketchFeature["params"]) => void) => void): HTMLElement[] {
   const lip = Math.max(0, -s.params.offset);
@@ -3314,22 +3353,28 @@ function sketchSettings(s: SketchFeature, update: (mutate: (f: Feature) => void)
     extrude.title = "Pull the sketch's shapes up into a solid";
     const revolve = button("⟳ Revolve", () => set((p) => (p.operation = "revolve")));
     revolve.title = "Spin the sketch's shapes around its V axis (green line) into a solid";
-    row.append(extrude, revolve);
+    const sweep = button("〰 Sweep", () => set((p) => (p.operation = "sweep")));
+    sweep.title = "Turn the sketch's brush strokes into tubes (pipes, handles, rails)";
+    const loft = button("◭ Loft", () => set((p) => ((p.operation = "loft"), (p.loftTo ??= otherSketches(s)[0]?.id))));
+    loft.title = "Blend the sketch's shape into another sketch's shape (square to round, wide to narrow…)";
+    row.append(extrude, revolve, sweep, loft);
     return [hint("This sketch is flat: it's only a drawing for now. Make it 3D:"), row, ...placement];
   }
+  const op = document.createElement("select");
+  for (const [value, label] of [
+    ["flat", "Flat (just a drawing)"],
+    ["extrude", "Extrude"],
+    ["revolve", "Revolve (spin round V)"],
+    ["sweep", "Sweep (strokes become tubes)"],
+    ["loft", "Loft (blend into another sketch)"],
+  ] as const)
+    op.add(new Option(label, value));
+  op.value = s.params.operation;
+  op.onchange = () => set((p) => ((p.operation = op.value as SketchOperation), op.value === "loft" && (p.loftTo ??= otherSketches(s)[0]?.id)));
   return [
-    stacked(
-      "Make 3D by",
-      segmented(
-        [
-          { value: "flat", label: "Flat", title: "Back to just the drawing, no solid" },
-          { value: "extrude", label: "Extrude" },
-          { value: "revolve", label: "Revolve", title: "Spin the profile around the sketch's V axis (green line)" },
-        ],
-        s.params.operation,
-        (v) => set((p) => (p.operation = v)),
-      ),
-    ),
+    labeled("Make 3D by", op),
+    ...(s.params.operation === "sweep" ? sweepFields(s, set) : []),
+    ...(s.params.operation === "loft" ? loftFields(s, set) : []),
     ...(s.params.groove && s.params.operation === "extrude" ? grooveFields(s, set) : []),
     ...(s.params.operation === "extrude" && !s.params.groove
       ? [

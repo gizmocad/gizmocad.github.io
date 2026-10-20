@@ -2,7 +2,7 @@
 
 import opencascade from "replicad-opencascadejs";
 import wasmUrl from "replicad-opencascadejs/wasm?url";
-import { measureVolume, EdgeFinder, type Edge, assembleWire, cast, deserializeShape, draw, drawCircle, drawEllipse, drawText, genericSweep, getOC, importSTEP, loadFont, makeBaseBox, makeBox, makeCircle, makeCompound, makeCylinder, makeHelix, makeLine, makeEllipsoid, makePolygon, makeSolid, makeSphere, setOC, type Drawing, type Shape3D } from "replicad";
+import { measureVolume, Plane, EdgeFinder, type Edge, assembleWire, cast, deserializeShape, draw, drawCircle, drawEllipse, drawText, genericSweep, getOC, importSTEP, loadFont, makeBaseBox, makeBox, makeCircle, makeCompound, makeCylinder, makeHelix, makeLine, makeEllipsoid, makePolygon, makeSolid, makeSphere, setOC, type Drawing, type Shape3D } from "replicad";
 import {
   PLANE_ROTATIONS,
   SCREW_SIZES,
@@ -13,6 +13,7 @@ import {
   anyIgnoredHoles,
   clearanceOf,
   isGroove,
+  isSweepSketch,
   INSERT_SIZES,
   NUT_PLAY,
   NUT_SIZES,
@@ -225,8 +226,14 @@ function entitySolid(e: SketchEntity, p: SketchParams, lean: Lean, taper: number
  * which OpenCascade handles far more reliably than 2D booleans on complex,
  * overlapping outlines (e.g. crossing brush strokes).
  */
-function buildSketch(p: SketchParams, featureLean: Lean, taper = 0): Shape3D | null {
+function buildSketch(p: SketchParams, featureLean: Lean, taper = 0, self?: Feature): Shape3D | null {
   if (p.operation === "flat") return null; // Just a drawing until it's extruded or revolved.
+  if (p.operation === "sweep") throw new Error("A sweep needs a brush stroke to follow: draw one with the Brush tool (B).");
+  if (p.operation === "loft") {
+    let shape = loftShape(p, self);
+    for (const r of PLANE_ROTATIONS[p.plane]) shape = shape.rotate(r.degrees, [0, 0, 0], r.axis);
+    return p.offset ? shape.translate(...(new Vector3(0, 0, p.offset).applyMatrix4(planeTurn(p)).toArray() as [number, number, number])) : shape;
+  }
   // Only an extrusion straight up from the XY plane leans (other planes would lean sideways).
   const lean = p.operation === "extrude" && p.plane === "XY" ? featureLean : null;
   const profileEntities = p.entities.filter(isProfile);
@@ -788,7 +795,7 @@ const grownCache = new Map<string, WorldMesh>();
 /** An object's own shape as triangles (straight from them for faceted solids and swept holes), or null if it can't be made. */
 function ownTriangles(f: Feature): WorldMesh | null {
   if (f.kind === "imported" && plainFaceted(f)) return facetOwn(f);
-  if (plainGroove(f)) return grooveTriangles(f);
+  if (plainGroove(f)) return meshSketchTriangles(f);
   if (!sweepOf(f)) {
     const s = buildOwnSafe(f);
     return s && shapeTriangles(s);
@@ -1415,14 +1422,14 @@ function buildBase(f: Feature, taper = 0): Shape3D | null {
     case "screw":
       return buildScrewHole(f.params);
     case "sketch":
-      if (isGroove(f) && !lean && !taper) {
+      if ((isGroove(f) || isSweepSketch(f)) && !lean && !taper) {
         // Exact solids (a STEP export) only: everything else uses the groove's triangles.
-        const w = grooveTriangles(f);
+        const w = meshSketchTriangles(f);
         const solid = solidFromTriangles(w.vertices, w.triangles, [1, 1, 1], "bodies");
         knownTriangles.set(solid, w);
         return solid;
       }
-      return buildSketch(f.params, lean, taper);
+      return buildSketch(f.params, lean, taper, f);
     case "imported":
       return importedShape(f.params);
     case "group":
@@ -1455,6 +1462,15 @@ function rememberBreps(features: Feature[]) {
 
 /** An imported solid's parameters for cache keys: its geometry is named by its ref (the data can be megabytes). */
 const keyParams = (f: Feature) => {
+  // A loft depends on the sketch it blends into, and where that is.
+  if (f.kind === "sketch" && f.params.operation === "loft") {
+    try {
+      const { target, rel } = loftTarget(f.params, f);
+      return { ...f.params, loftTarget: [target.params, rel.elements.map((v) => Math.round(v * 1e6) / 1e6)] };
+    } catch {
+      return f.params;
+    }
+  }
   const p = f.kind === "imported" ? { ...f.params, brep: undefined, mesh: undefined } : f.params;
   return clearanceOf(f) || sweepOf(f) ? { ...p, clearance: clearanceOf(f), sweep: sweepOf(f) } : p;
 };
@@ -1496,13 +1512,123 @@ function facetTriangles(p: ImportedParams): WorldMesh {
 /** Whether the model has solids made from meshes (then results and STL/3MF exports are worked out as triangles). */
 const hasFaceted = (features: Feature[]) => features.some((f) => (f.kind === "imported" && !!f.params.faceted) || !!sweepOf(f) || plainGroove(f));
 
-/** A groove with nothing done to it that needs its exact solid (as plainFaceted). */
-const plainGroove = (f: Feature): f is Feature & { kind: "sketch" } => isGroove(f) && !f.edgeOps.some((o) => o.size > 0) && !f.clips?.length && !f.shell && !f.tilt && !sweepOf(f) && !clearanceOf(f);
+/** A groove or sweep with nothing done to it that needs its exact solid (as plainFaceted): made from triangles. */
+const plainGroove = (f: Feature): f is Feature & { kind: "sketch" } => (isGroove(f) || isSweepSketch(f)) && !f.edgeOps.some((o) => o.size > 0) && !f.clips?.length && !f.shell && !f.tilt && !sweepOf(f) && !clearanceOf(f);
 
 /** Points around a circle of radius r at height z, centred on (x, y). */
 function ring(x: number, y: number, r: number, z: number, n = 24): [number, number, number][] {
   if (r <= 1e-6) return [[x, y, z]];
   return Array.from({ length: n }, (_, i) => [x + r * Math.cos((i / n) * 2 * Math.PI), y + r * Math.sin((i / n) * 2 * Math.PI), z] as [number, number, number]);
+}
+
+/** Just the turn of a sketch's plane (no offset). */
+function planeTurn(p: SketchParams): Matrix4 {
+  return sketchPlaneMatrix({ ...p, offset: 0 });
+}
+
+/** A sketch's first shape (not a stroke or guide) as a drawing, for a loft. */
+function firstShape(p: SketchParams, what: string): Drawing {
+  for (const e of p.entities) {
+    if (e.mode !== "add" || e.type === "stroke" || !isProfile(e)) continue;
+    const d = entityDrawing(e);
+    if (d) return d;
+  }
+  throw new Error(`${what} has no closed shape to loft (a rectangle, circle, polygon, …).`);
+}
+
+/** Where a sketch's drawing plane sits in the world. */
+const sketchWorld = (f: Feature & { kind: "sketch" }) => worldMatrix(modelFeatures, f.id).multiply(sketchPlaneMatrix(f.params));
+
+/** The sketch a loft blends into, and where its drawing sits in the loft's drawing frame. */
+function loftTarget(p: SketchParams, self: Feature | undefined): { target: Feature & { kind: "sketch" }; rel: Matrix4 } {
+  const target = modelFeatures.find((x) => x.id === p.loftTo);
+  if (!target || target.kind !== "sketch" || target.id === self?.id) throw new Error("Pick the sketch to loft to (in Loft to). It can be just a flat drawing.");
+  if (!self || self.kind !== "sketch") throw new Error("The loft's sketch isn't in the model.");
+  return { target, rel: sketchWorld(self).invert().multiply(sketchWorld(target)) };
+}
+
+/** A loft, in the sketch's drawing frame (XY): its first shape blended into the other sketch's first shape. */
+function loftShape(p: SketchParams, self: Feature | undefined): Shape3D {
+  const { target, rel } = loftTarget(p, self);
+  const origin = new Vector3().setFromMatrixPosition(rel);
+  const x = new Vector3(1, 0, 0).transformDirection(rel);
+  const z = new Vector3(0, 0, 1).transformDirection(rel);
+  if (Math.abs(z.z) < 1e-6 && Math.abs(origin.z) < 1e-6) throw new Error("The sketch to loft to lies in this sketch's plane: move it away (up, or to the side).");
+  type Loftable = { loftWith(other: unknown, config?: { ruled?: boolean }): Shape3D };
+  const from = firstShape(p, "This sketch").sketchOnPlane("XY") as unknown as Loftable;
+  const plane = new Plane(origin.toArray() as [number, number, number], x.toArray() as [number, number, number], z.toArray() as [number, number, number]);
+  const to = firstShape(target.params, target.name).sketchOnPlane(plane);
+  return from.loftWith(to, { ruled: false });
+}
+
+/** A groove's or sweep's triangles in its own frame. */
+const meshSketchTriangles = (f: Feature & { kind: "sketch" }) => (isGroove(f) ? grooveTriangles(f) : sweepSketchTriangles(f));
+
+/** Where a sketch's drawing sits in its object's frame: shifted by its offset, then turned onto its plane. */
+function sketchPlaneMatrix(p: SketchParams): Matrix4 {
+  const m = new Matrix4().makeTranslation(0, 0, p.offset);
+  for (const r of PLANE_ROTATIONS[p.plane]) m.premultiply(new Matrix4().makeRotationAxis(new Vector3(...r.axis), (r.degrees * Math.PI) / 180));
+  return m;
+}
+
+const sweepCache = new Map<string, WorldMesh>();
+
+/**
+ * A sweep's triangles in its own frame: each brush stroke a tube as thick as
+ * the stroke, centred on the sketch's plane, round (a ball hulled from point
+ * to point) or square (a square across the stroke, its corners filled).
+ */
+function sweepSketchTriangles(f: Feature & { kind: "sketch" }): WorldMesh {
+  const key = JSON.stringify(f.params);
+  const hit = sweepCache.get(key);
+  if (hit) return hit;
+  const M = manifoldReady;
+  if (!M) throw new Error("The mesh library isn't loaded.");
+  const square = f.params.sweepProfile === "square";
+  const pieces = [];
+  for (const e of f.params.entities) {
+    if (e.type !== "stroke" || e.mode !== "add") continue;
+    const r = e.width / 2;
+    const path = e.points.length === 1 ? [e.points[0], e.points[0]] : e.points;
+    if (!square) {
+      const ball = ([x, y]: [number, number]) => {
+        const pts: [number, number, number][] = [];
+        for (let k = -5; k <= 5; k++) {
+          const a = (k / 5) * (Math.PI / 2);
+          pts.push(...ring(x, y, r * Math.cos(a), r * Math.sin(a), 20));
+        }
+        return pts;
+      };
+      for (let i = 0; i + 1 < path.length; i++) pieces.push(M.Manifold.hull([...ball(path[i]), ...ball(path[i + 1])]));
+      continue;
+    }
+    // A square across the stroke at a point, facing along direction (dx, dy).
+    const across = ([x, y]: [number, number], [dx, dy]: [number, number]) => {
+      const len = Math.hypot(dx, dy) || 1;
+      const [nx, ny] = [(-dy / len) * r, (dx / len) * r];
+      return [-1, 1].flatMap((s) => [-1, 1].map((t) => [x + s * nx, y + s * ny, t * r] as [number, number, number]));
+    };
+    const dirs = path.slice(1).map((q, i) => [q[0] - path[i][0], q[1] - path[i][1]] as [number, number]);
+    for (let i = 0; i + 1 < path.length; i++) {
+      pieces.push(M.Manifold.hull([...across(path[i], dirs[i]), ...across(path[i + 1], dirs[i])]));
+      // The corner where it turns: the squares of both directions, hulled.
+      if (i > 0) pieces.push(M.Manifold.hull([...across(path[i], dirs[i - 1]), ...across(path[i], dirs[i])]));
+    }
+  }
+  if (!pieces.length) throw new Error("A sweep needs a brush stroke to follow: draw one with the Brush tool (B).");
+  try {
+    const joined = M.Manifold.union(pieces);
+    try {
+      const w = transformMesh(fromManifold(joined), sketchPlaneMatrix(f.params));
+      sweepCache.set(key, w);
+      if (sweepCache.size > 64) sweepCache.delete(sweepCache.keys().next().value!);
+      return w;
+    } finally {
+      joined.delete();
+    }
+  } finally {
+    for (const p of pieces) p.delete();
+  }
 }
 
 const grooveCache = new Map<string, WorldMesh>();
@@ -2348,7 +2474,7 @@ function ownMesh(f: Feature): MeshData | null {
     adjusted = {};
     try {
       if (sweepOf(f)) meshCache.set(key, { mesh: meshForView("", sweptTriangles(f), null), adjusted });
-      else if (plainGroove(f)) meshCache.set(key, { mesh: meshForView("", grooveTriangles(f), null), adjusted });
+      else if (plainGroove(f)) meshCache.set(key, { mesh: meshForView("", meshSketchTriangles(f), null), adjusted });
       else if (f.kind === "imported" && plainFaceted(f)) meshCache.set(key, { mesh: textured(f, facetView(facetOwn(f))), adjusted });
       else if (plainStretch(f)) meshCache.set(key, { mesh: textured(f, stretchMesh(toMesh("", importedBase(f.params)), f.params.scale)), adjusted });
       else {
