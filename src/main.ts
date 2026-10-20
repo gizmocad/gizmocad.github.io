@@ -3161,7 +3161,12 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
     if (used !== undefined) {
       const note = document.createElement("div");
       note.className = "safe-note";
-      if (used > 0) {
+      const some = edgeAdjustments[`${op.id}@edges`];
+      if (used >= 0 && some) {
+        const rest = edgeAdjustments[`${op.id}@rest`];
+        const others = rest !== undefined ? `the rest ${formatLength(rest)} mm (the most they can take beside them)` : `the rest the full ${formatLength(op.size)} mm`;
+        note.append(used > 0 ? `Too big for ${some} of the edges: they use ${formatLength(used)} mm (the largest that fits there), ${others}.` : `Too big for ${some} of the edges, so they're left sharp; ${others}.`);
+      } else if (used > 0) {
         note.append(`Too big for these edges, so ${formatLength(used)} mm (the largest safe size) is used.`);
         note.append(button(`Set to ${formatLength(used)}`, () => setOp(op.id, (o) => (o.size = used)), "link"));
         // Ways to keep it bigger: a chamfer can become a flatter bevel; a fillet can round fewer edges.

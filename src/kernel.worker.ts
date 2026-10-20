@@ -447,6 +447,14 @@ function safeEdgeOp(shape: Shape3D, op: EdgeOp): Shape3D {
       return flatter.shape;
     }
   }
+  // Too big for some edges only (a thin part's sharp tip, a tiny step): the full size where it fits, smaller just there.
+  const partial = !facetedBuild && op.type !== "bevel" ? partialEdgeOp(shape, op) : null;
+  if (partial) {
+    adjusted[op.id] = partial.size;
+    adjusted[`${op.id}@edges`] = partial.reduced;
+    if (partial.rest !== undefined) adjusted[`${op.id}@rest`] = partial.rest;
+    return partial.shape;
+  }
   let lo = 0;
   let hi = op.size;
   for (let i = 0; i < 10; i++) {
@@ -458,6 +466,56 @@ function safeEdgeOp(shape: Shape3D, op: EdgeOp): Shape3D {
   const result = safe > 0 ? tryEdgeOp(shape, op, safe) : null;
   adjusted[op.id] = result ? safe : 0;
   return result ?? shape;
+}
+
+/** A fillet or chamfer with its own size for each edge (null skips one), or null if it fails. */
+function tryEdgeSizes(shape: Shape3D, op: EdgeOp, size: (e: Edge) => number | null): Shape3D | null {
+  try {
+    const result = op.type === "fillet" ? shape.fillet(size) : shape.chamfer(size);
+    return isValidShape(result) ? result : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * When an edge finish doesn't fit all its edges at its size: each edge tried
+ * on its own, the size kept on those it fits, and the largest that fits used
+ * on the rest. Null if it fits none, or the two sizes don't go together.
+ */
+function partialEdgeOp(shape: Shape3D, op: EdgeOp): { shape: Shape3D; size: number; reduced: number; rest?: number } | null {
+  const filter = edgeFilter(shape, op);
+  const edges = filter ? filter(new EdgeFinder(), shape).find(shape) : shape.edges;
+  // Each edge is a try of its own: not for a part with very many.
+  if (edges.length < 2 || edges.length > 80) return null;
+  const only = (set: Edge[], size: number) => (e: Edge) => (set.some((x) => x.isSame(e)) ? size : null);
+  const bad = edges.filter((e) => !tryEdgeSizes(shape, op, only([e], op.size)));
+  if (!bad.length || bad.length === edges.length) return null;
+  const good = edges.filter((e) => !bad.includes(e));
+  let lo = 0;
+  let hi = op.size;
+  for (let i = 0; i < 8; i++) {
+    const mid = (lo + hi) / 2;
+    if (tryEdgeSizes(shape, op, only(bad, mid))) lo = mid;
+    else hi = mid;
+  }
+  const small = Math.floor(lo * 0.98 * 100) / 100;
+  const both = (big: number) => tryEdgeSizes(shape, op, (e) => (good.some((x) => x.isSame(e)) ? big : small > 0 && bad.some((x) => x.isSame(e)) ? small : null));
+  let result = both(op.size);
+  if (!result) {
+    // The full size beside the small one doesn't fit: the biggest the rest can take alongside it.
+    let [a, b] = [small, op.size];
+    for (let i = 0; i < 7; i++) {
+      const mid = (a + b) / 2;
+      if (both(mid)) a = mid;
+      else b = mid;
+    }
+    const big = Math.floor(a * 0.98 * 100) / 100;
+    if (big <= small * 1.2) return null; // No better than one size for all.
+    result = both(big);
+    if (result) return { shape: result, size: small, reduced: bad.length, rest: big };
+  }
+  return result ? { shape: result, size: small, reduced: bad.length } : null;
 }
 
 /** A bevel at its full distance with the steepest angle (below the one asked for) that still fits, if any. */
