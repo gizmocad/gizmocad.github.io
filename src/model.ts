@@ -497,6 +497,8 @@ interface FeatureBase {
   sweep?: Sweep;
   /** A clearance cut with a copy of its object's hinge or slider: moving either joint moves the other (the object's id). */
   follows?: string;
+  /** Fields set from parameters: the expression typed, by the field's label in the object's panel. */
+  exprs?: Record<string, string>;
 }
 
 /**
@@ -560,6 +562,14 @@ export interface CadDocument {
   version: 1;
   features: Feature[];
   fonts?: ImportedFont[];
+  /** Named values (`wall = 2`) that fields can use; each may use the ones before it. */
+  variables?: Variable[];
+}
+
+export interface Variable {
+  name: string;
+  /** An expression: a number with units, maths, and earlier parameters' names. */
+  value: string;
 }
 
 export function emptyDocument(): CadDocument {

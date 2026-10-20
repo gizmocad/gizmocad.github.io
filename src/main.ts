@@ -39,6 +39,7 @@ import {
   type SketchEntity,
   type SketchEntityType,
   type SketchFeature,
+  type Variable,
   type SketchOperation,
   type ScrewParams,
   type GrooveTip,
@@ -67,7 +68,7 @@ import { HEDRON_FACES, HEDRON_NAMES, type HedronFaces } from "./hedron";
 import { BUILT_IN_FONTS, CUSTOM_FONT, builtInFont, builtInFontUrl, fontFamily, isCustomFont } from "./fonts";
 import { addDetail, appendToStl, baseMesh, decodeFloats, decodeIndices, encodeFloats, encodeIndices, importedMesh, meshToSculpt, scaleSculpt, sculptTriangles, vertexCount, type BrushKind, type BrushSettings, type SculptBase } from "./sculpt";
 import { openImportFiles, openTextFile, saveFile } from "./storage";
-import { formatLength, parseLength } from "./units";
+import { expressionNames, formatLength, parseLength, validName } from "./units";
 import { onThemeChange, setThemeSetting, themeSetting, type ThemeSetting } from "./theme";
 import { Viewport, type GizmoMode, type PreviewSpec } from "./viewport";
 import { DEFAULT_MCP_PORT, McpBridge, type BridgeState } from "./mcpBridge";
@@ -127,6 +128,12 @@ const UNDO_LIMIT = { steps: 200, bytes: 120_000_000 };
 let undoBytes = 0;
 
 function commit(mutate: (features: Feature[]) => void) {
+  // Part of a larger change (parameters re-applied): one undo step and one update for all of it.
+  if (batching) {
+    mutate(doc.features);
+    keepPendingExpr();
+    return;
+  }
   const snapshot = undoSnapshot();
   undoStack.push(snapshot);
   undoBytes += snapshot.length;
@@ -136,6 +143,7 @@ function commit(mutate: (features: Feature[]) => void) {
   const before = new Map(doc.features.flatMap((f) => (f.kind === "sketch" && f.params.constraints?.length ? [[f.id, structuredClone(f.params.entities)] as const] : [])));
   const jointsBefore = new Map(doc.features.flatMap((f) => (f.joint ? [[f.id, f.joint.value] as const] : [])));
   mutate(doc.features);
+  keepPendingExpr();
   followJoints(jointsBefore);
   for (const f of doc.features) {
     if (f.kind !== "sketch" || !f.params.constraints?.length) continue;
@@ -808,6 +816,7 @@ function sketchStateChanged() {
 
 function renderPanels() {
   renderObjectList();
+  renderVariables();
   renderProperties();
   updateToolbar();
 }
@@ -1106,7 +1115,15 @@ function lengthField(label: string, value: number, onChange: (mm: number) => voi
   row.className = "field";
   row.innerHTML = `<span></span>`;
   row.querySelector("span")!.textContent = label;
-  const input = lengthInput(value, onChange, opts);
+  // In an object's panel, a field can take parameters: it's known by its label (and which one, when repeated).
+  let link: { id: string; key: string } | undefined;
+  if (fieldContext && !opts.unit?.includes("°")) {
+    const n = fieldContext.counts.get(label) ?? 0;
+    fieldContext.counts.set(label, n + 1);
+    link = { id: fieldContext.id, key: n ? `${label}#${n}` : label };
+    fieldAppliers.set(`${link.id}|${link.key}`, onChange);
+  }
+  const input = lengthInput(value, onChange, opts, link);
   if (opts.unit || opts.plain) {
     row.append(input);
   } else {
@@ -1121,18 +1138,44 @@ function lengthField(label: string, value: number, onChange: (mm: number) => voi
   return row;
 }
 
-function lengthInput(value: number, onChange: (mm: number) => void, opts: { min?: number; unit?: string } = {}) {
+function lengthInput(value: number, onChange: (mm: number) => void, opts: { min?: number; unit?: string } = {}, link?: { id: string; key: string }) {
   const input = document.createElement("input");
   input.type = "text";
   input.inputMode = "decimal";
   input.spellcheck = false;
   const initial = formatLength(value) + (opts.unit ?? "");
   input.value = initial;
+  // Set from parameters: shows the value, and the expression while it's being edited.
+  const expr = link ? findFeature(link.id)?.exprs?.[link.key] : undefined;
+  if (expr) {
+    input.classList.add("linked");
+    input.title = `= ${expr} (from parameters)`;
+    input.addEventListener("focus", () => {
+      input.value = expr;
+      input.select();
+    });
+  }
   const apply = () => {
-    const parsed = opts.unit ? parseFloat(input.value) : parseLength(input.value);
+    const text = input.value.trim();
+    if (expr && text === expr) {
+      input.value = initial;
+      return;
+    }
+    const names = opts.unit ? [] : expressionNames(text);
+    const parsed = opts.unit ? parseFloat(text) : parseLength(text, variableValues());
     const valid = parsed !== null && Number.isFinite(parsed) && (opts.min === undefined || parsed > opts.min);
     input.classList.toggle("invalid", !valid);
-    if (valid && parsed !== value) onChange(parsed);
+    if (!valid) {
+      if (names.length) input.title = `Unknown parameter${names.length > 1 ? "s" : ""}: add ${names.join(", ")} under Parameters`;
+      return;
+    }
+    if (link) pendingExpr = { ...link, expr: names.length ? text : null };
+    try {
+      if (parsed !== value) onChange(parsed);
+      else if ((expr ?? null) !== (names.length ? text : null)) commit(() => {}); // Just the link changes.
+    } finally {
+      pendingExpr = null;
+    }
   };
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") input.blur();
@@ -2888,12 +2931,31 @@ function renderPropertiesPanel() {
   if (!f) {
     panel.innerHTML = `<p class="hint">Select an object to edit its exact dimensions.</p>`;
     panel.append(
-      hint("Fields accept units and maths, e.g. <code>1in</code>, <code>2.5cm</code>, <code>40/3</code>."),
+      hint("Fields accept units, maths and parameters, e.g. <code>1in</code>, <code>2.5cm</code>, <code>40/3</code>, <code>wall*2</code>."),
       hint("Drag objects onto each other in the list to make parent/child groups. Children move with their parent, and a child hole only cuts its parent."),
       hint("Shift-click or Shift-drag a box to select several objects, then align, group or move them together."),
     );
     return;
   }
+  panel.replaceChildren(...objectItems(f));
+}
+
+/**
+ * An object's panel. Built off the page too (`offscreen`), to re-apply its
+ * fields that use parameters when those change.
+ */
+function objectItems(f: Feature, offscreen = false): HTMLElement[] {
+  const outer = [fieldContext, offscreenPanel] as const;
+  fieldContext = { id: f.id, counts: new Map() };
+  offscreenPanel = offscreen;
+  try {
+    return objectItemsNow(f);
+  } finally {
+    [fieldContext, offscreenPanel] = outer;
+  }
+}
+
+function objectItemsNow(f: Feature): HTMLElement[] {
   const update = (mutate: (f: Feature) => void) =>
     commit((features) => {
       const target = features.find((x) => x.id === f.id);
@@ -3036,7 +3098,7 @@ function renderPropertiesPanel() {
     items.push(hint("Tilt the plane with the rotation fields or the rotate gizmo (E). Sketches and shapes inside it follow it."));
   }
 
-  panel.replaceChildren(...items);
+  return items;
 }
 
 const TARGETS: { value: EdgeTarget; label: string }[] = [
@@ -3940,6 +4002,122 @@ function deleteIds(targets: string[]) {
  * it still cut (lifted out of their groups, keeping where they are), or the
  * whole model when nothing is selected. `label` names the selection.
  */
+// ---- Parameters ------------------------------------------------------------------------
+//
+// Named values (`wall = 2`) that any length field can use (`wall*2`). A field
+// typed with a parameter keeps its expression (by its label in the object's
+// panel), and changing a parameter re-applies them all as one undo step.
+
+/** The parameters' values by lower-case name (each can use the ones before it). */
+function variableValues(): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const v of doc.variables ?? []) {
+    if (!validName(v.name)) continue;
+    const n = parseLength(v.value, out);
+    if (n !== null) out[v.name.toLowerCase()] = n;
+  }
+  return out;
+}
+
+/** While an object's panel is being built: its id, and how many fields of each label so far. */
+let fieldContext: { id: string; counts: Map<string, number> } | null = null;
+/** An object's panel built only to re-apply its fields (no estimates or other work). */
+let offscreenPanel = false;
+/** Fields' setters, by object id and field key, from the last time their panel was built. */
+const fieldAppliers = new Map<string, (mm: number) => void>();
+/** The expression a field change goes with (kept on the object by the commit it makes). */
+let pendingExpr: { id: string; key: string; expr: string | null } | null = null;
+/** Changes made as one (no undo step or update of their own). */
+let batching = false;
+
+function keepPendingExpr() {
+  const p = pendingExpr;
+  if (!p) return;
+  const f = doc.features.find((x) => x.id === p.id);
+  if (!f) return;
+  const exprs = { ...(f.exprs ?? {}) };
+  if (p.expr) exprs[p.key] = p.expr;
+  else delete exprs[p.key];
+  if (Object.keys(exprs).length) f.exprs = exprs;
+  else delete f.exprs;
+}
+
+/** Change the parameters, and every field that uses them, as one step. */
+function changeVariables(mutate: (vars: Variable[]) => void) {
+  commit(() => {
+    doc.variables = [...(doc.variables ?? [])];
+    mutate(doc.variables);
+    if (!doc.variables.length) delete doc.variables;
+    reapplyVariables();
+  });
+}
+
+/** Set every field that uses parameters from them again (inside a commit). */
+function reapplyVariables() {
+  const vars = variableValues();
+  const was = batching;
+  batching = true;
+  try {
+    for (const f of doc.features.filter((x) => x.exprs)) {
+      objectItems(f, true); // Builds its panel's fields, so their setters are known.
+      for (const [key, expr] of Object.entries(f.exprs ?? {})) {
+        const v = parseLength(expr, vars);
+        const set = fieldAppliers.get(`${f.id}|${key}`);
+        if (v !== null && set) set(v);
+      }
+    }
+  } finally {
+    batching = was;
+  }
+}
+
+function renderVariables() {
+  const box = $("#variables");
+  const vars = doc.variables ?? [];
+  const values = variableValues();
+  const rows = vars.map((v, i) => {
+    const row = document.createElement("div");
+    row.className = "variable";
+    const name = document.createElement("input");
+    name.value = v.name;
+    name.spellcheck = false;
+    name.classList.toggle("invalid", !validName(v.name));
+    name.title = "Its name: letters, digits and _ (not a unit like mm or in)";
+    const value = document.createElement("input");
+    value.value = v.value;
+    value.spellcheck = false;
+    const n = values[v.name.toLowerCase()];
+    value.classList.toggle("invalid", n === undefined);
+    value.title = n === undefined ? "Not a number: check the maths, and that any names it uses are above it" : `= ${formatLength(n)} mm`;
+    for (const input of [name, value]) input.onkeydown = (e) => (e.key === "Enter" && input.blur(), e.stopPropagation());
+    name.onchange = () => {
+      const next = name.value.trim();
+      if (!next || next === v.name) return;
+      // Fields using the old name use the new one.
+      const re = new RegExp(`\\b${v.name}\\b`, "gi");
+      changeVariables((list) => {
+        list[i] = { ...list[i], name: next };
+        for (let k = i + 1; k < list.length; k++) list[k] = { ...list[k], value: list[k].value.replace(re, next) };
+        for (const f of doc.features) if (f.exprs) f.exprs = Object.fromEntries(Object.entries(f.exprs).map(([key, e]) => [key, e.replace(re, next)]));
+      });
+    };
+    value.onchange = () => changeVariables((list) => (list[i] = { ...list[i], value: value.value.trim() }));
+    const remove = button("✕", () => changeVariables((list) => list.splice(i, 1)), "icon danger");
+    remove.title = `Remove ${v.name} (fields using it keep their value)`;
+    const eq = document.createElement("span");
+    eq.textContent = "=";
+    row.append(name, eq, value, remove);
+    return row;
+  });
+  const add = button("+ Parameter", () => {
+    let k = vars.length + 1;
+    while (vars.some((v) => v.name === `p${k}`)) k++;
+    changeVariables((list) => list.push({ name: `p${k}`, value: "10" }));
+  });
+  add.title = "A named value (wall = 2) that any size field can use: type wall*2 and it follows the parameter";
+  box.replaceChildren(...rows, add);
+}
+
 // ---- Print estimate -------------------------------------------------------------------
 
 /** Filament densities (g/cm³). */
@@ -3975,6 +4153,7 @@ let estimate: { key: string; stats: ModelStats | null } | null = null;
 let estimating: string | null = null;
 
 function estimateSection(): HTMLElement[] {
+  if (offscreenPanel) return [];
   const key = `${modelRevision}|${topSelected().join(",")}`;
   if (estimate?.key !== key && estimating !== key) {
     estimating = key;

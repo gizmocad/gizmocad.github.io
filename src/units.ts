@@ -10,9 +10,10 @@ const UNIT_MM: Record<string, number> = {
   ft: 304.8,
 };
 
-const TOKEN = /\s*(?:(\d*\.?\d+(?:e[+-]?\d+)?)\s*(mm|cm|m|in|"|ft)?|([-+*/()]))/y;
+// A number (with an optional unit), an operator, or a parameter's name.
+const TOKEN = /\s*(?:(\d*\.?\d+(?:e[+-]?\d+)?)\s*(mm|cm|m|in|"|ft)?(?![a-z_0-9])|([-+*/()])|([a-z_][a-z0-9_]*))/y;
 
-type Token = { num: number } | { op: string };
+type Token = { num: number } | { op: string } | { name: string };
 
 function tokenize(src: string): Token[] | null {
   const tokens: Token[] = [];
@@ -22,12 +23,22 @@ function tokenize(src: string): Token[] | null {
     const m = TOKEN.exec(src);
     if (!m) return null;
     if (m[1] !== undefined) tokens.push({ num: parseFloat(m[1]) * (m[2] ? UNIT_MM[m[2]] : 1) });
-    else tokens.push({ op: m[3] });
+    else if (m[3] !== undefined) tokens.push({ op: m[3] });
+    else tokens.push({ name: m[4] });
   }
   return tokens;
 }
 
-export function parseLength(text: string): number | null {
+/** The parameter names an expression uses (lower case). */
+export function expressionNames(text: string): string[] {
+  return (tokenize(text.trim().toLowerCase()) ?? []).flatMap((t) => ("name" in t ? [t.name] : []));
+}
+
+/** Whether a name can be a parameter's: letters, digits and _, not starting with a digit, and not a unit. */
+export const validName = (name: string) => /^[a-z_][a-z0-9_]*$/i.test(name) && !(name.toLowerCase() in UNIT_MM);
+
+/** `vars`: parameters' values by (lower-case) name, which the text may use. */
+export function parseLength(text: string, vars: Record<string, number> = {}): number | null {
   const maybeTokens = tokenize(text.trim().toLowerCase());
   if (!maybeTokens || maybeTokens.length === 0) return null;
   const tokens = maybeTokens;
@@ -40,6 +51,10 @@ export function parseLength(text: string): number | null {
     const t = tokens[i++];
     if (!t) throw new Error("unexpected end");
     if ("num" in t) return t.num;
+    if ("name" in t) {
+      if (!(t.name in vars)) throw new Error(`unknown name ${t.name}`);
+      return vars[t.name];
+    }
     if (t.op === "-") return -factor();
     if (t.op === "+") return factor();
     if (t.op === "(") {

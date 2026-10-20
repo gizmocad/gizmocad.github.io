@@ -10,7 +10,7 @@
   inside the model). Any alignment, several lines; make it a Hole to engrave it.
   **Screw holes** (M2–M10) go down into the face you put them on, with a tap, close, normal or loose fit and an optional
   counterbore, countersink, hex nut trap (ISO 4032 nuts, 0.2 mm play) or heat-set insert hole at the top.
-  Fields accept units and maths (`1in`, `2.5cm`, `40/3`).
+  Fields accept units and maths (`1in`, `2.5cm`, `40/3`), and **parameters**: add named values under Parameters (`wall = 2`, `gap = wall/4`) and type `wall*2` into any size field. Such a field stays linked (marked green) and follows when the parameter changes.
 - **Placing shapes:** click a shape button (or drag it into the view) and a preview follows the mouse. Click to put it
   on the face under the mouse, standing out from that face and snapped to its grid, centre and corners, or on the ground grid.
   Press F while placing to flip it into the face instead (hanging under it, or an axle pointing down). Right-click or Esc cancels.
