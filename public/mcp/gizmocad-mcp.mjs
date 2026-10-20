@@ -374,7 +374,7 @@ star      points, radius (outer), inner (inner radius), height.               de
 text      text (string, \\n for new lines), font "sans"|"serif"|"mono"|"rounded"|"condensed"|"poster"|"stencil"|"techno"|"cartoon"|"comic"|"script"|"handwriting"|"blackletter" (fonts the user imported show as "custom:<id>"), bold (bool), size (capital height), height (Z),
           spacing (extra mm between letters), align "left"|"center"|"right". As a hole it engraves.   default "Text", sans, bold, 10, 2, 0, center
 screw     (a hole for a metric screw, going DOWN from its position into what it sits on) size "M2"|"M2.5"|"M3"|"M4"|"M5"|"M6"|"M8"|"M10",
-          fit "tap"|"close"|"normal"|"loose", head "none"|"counterbore"|"countersink", depth. Put it on a top face, e.g. z = the part's top.
+          fit "tap"|"close"|"normal"|"loose", head "none"|"counterbore"|"countersink"|"nut" (hex nut trap)|"insert" (heat-set insert hole), depth. Put it on a top face, e.g. z = the part's top.
 group     no params: a container. Its solids merge into one part; holes inside a group cut only that group.
 plane     size: a reference plane (display only); sketches inside it are drawn on it.
 imported  (made by import_files from STEP/FreeCAD/BREP, and from closed meshes up to 200,000 triangles) a solid; its only param is scale: a number (1 = as imported) or [x, y, z]. Uneven scales make curves faceted. Can be a hole and take fillets.

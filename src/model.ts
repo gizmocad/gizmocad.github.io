@@ -145,7 +145,8 @@ export interface TextParams {
 export interface ScrewParams {
   size: ScrewSize;
   fit: "tap" | "close" | "normal" | "loose";
-  head: "none" | "counterbore" | "countersink";
+  /** At the top: a recess for the screw's head, a hex nut trap, or a hole for a heat-set threaded insert. */
+  head: "none" | "counterbore" | "countersink" | "nut" | "insert";
   depth: number;
 }
 export type ScrewSize = "M2" | "M2.5" | "M3" | "M4" | "M5" | "M6" | "M8" | "M10";
@@ -160,6 +161,31 @@ export const SCREW_SIZES: Record<ScrewSize, { tap: number; close: number; normal
   M8: { tap: 6.8, close: 8.4, normal: 9, loose: 10, bore: 15, boreDepth: 8.6, sink: 17.9 },
   M10: { tap: 8.5, close: 10.5, normal: 11, loose: 12, bore: 18, boreDepth: 10.8, sink: 22.4 },
 };
+/** Hex nuts (ISO 4032): width across the flats and thickness. */
+export const NUT_SIZES: Record<ScrewSize, { flats: number; thick: number }> = {
+  M2: { flats: 4, thick: 1.6 },
+  "M2.5": { flats: 5, thick: 2 },
+  M3: { flats: 5.5, thick: 2.4 },
+  M4: { flats: 7, thick: 3.2 },
+  M5: { flats: 8, thick: 4.7 },
+  M6: { flats: 10, thick: 5.2 },
+  M8: { flats: 13, thick: 6.8 },
+  M10: { flats: 16, thick: 8.4 },
+};
+/** Heat-set threaded inserts (the usual sizes for 3D printing): the hole's diameter and the insert's length. */
+export const INSERT_SIZES: Record<ScrewSize, { hole: number; length: number }> = {
+  M2: { hole: 3.2, length: 4 },
+  "M2.5": { hole: 3.6, length: 5.7 },
+  M3: { hole: 4, length: 5.7 },
+  M4: { hole: 5.6, length: 8.1 },
+  M5: { hole: 6.4, length: 9.5 },
+  M6: { hole: 8, length: 12.7 },
+  M8: { hole: 9.7, length: 12.7 },
+  M10: { hole: 11.5, length: 15 },
+};
+/** How much bigger a nut trap is than the nut, across the flats and in depth (so the nut drops in). */
+export const NUT_PLAY = 0.2;
+
 /** A straight prism on a regular polygon; `radius` is centre to corner. */
 export interface PrismParams {
   radius: number;

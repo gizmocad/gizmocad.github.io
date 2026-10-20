@@ -4,6 +4,9 @@ import {
   childrenOf,
   createFeature,
   FINISHABLE,
+  INSERT_SIZES,
+  NUT_PLAY,
+  NUT_SIZES,
   baseMatrix,
   ignoresHole,
   emptyDocument,
@@ -36,6 +39,7 @@ import {
   type SketchEntity,
   type SketchEntityType,
   type SketchFeature,
+  type ScrewParams,
   type GrooveTip,
   type SculptFeature,
   type Vec3,
@@ -1688,6 +1692,25 @@ function screwFields(f: Extract<Feature, { kind: "screw" }>, update: (mutate: (f
   size.value = p.size;
   size.onchange = () => set((t) => (t.size = size.value as ScrewSize));
   const d = SCREW_SIZES[p.size];
+  const nut = NUT_SIZES[p.size];
+  const ins = INSERT_SIZES[p.size];
+  // What's at the top of the hole: for the screw's head, a nut, or a threaded insert.
+  const head = document.createElement("select");
+  const HEADS: [ScrewParams["head"], string, string][] = [
+    ["none", "Plain hole", "Just the hole"],
+    ["counterbore", "Counterbore", `A ${d.bore} mm pocket ${d.boreDepth} mm deep, so a socket head sits flush`],
+    ["countersink", "Countersink", `A 90° cone ${d.sink} mm wide, for flat (countersunk) heads`],
+    ["nut", "Nut trap", `A hex pocket for an ${p.size} nut: ${nut.flats + NUT_PLAY} mm across the flats, ${nut.thick + NUT_PLAY} mm deep`],
+    ["insert", "Heat-set insert", `A ${ins.hole} mm hole ${ins.length + 1} mm deep for an ${p.size} threaded insert`],
+  ];
+  for (const [value, label, title] of HEADS) {
+    const o = new Option(label, value);
+    o.title = title;
+    head.add(o);
+  }
+  head.value = p.head;
+  head.title = HEADS.find(([v]) => v === p.head)?.[2] ?? "";
+  head.onchange = () => set((t) => (t.head = head.value as ScrewParams["head"]));
   return [
     labeled("Screw", size),
     stacked(
@@ -1703,20 +1726,15 @@ function screwFields(f: Extract<Feature, { kind: "screw" }>, update: (mutate: (f
         (v) => set((t) => (t.fit = v)),
       ),
     ),
-    stacked(
-      "Head",
-      segmented(
-        [
-          { value: "none", label: "None" },
-          { value: "counterbore", label: "Counterbore", title: `A ${d.bore} mm pocket ${d.boreDepth} mm deep, so a socket head sits flush` },
-          { value: "countersink", label: "Countersink", title: `A 90° cone ${d.sink} mm wide, for flat (countersunk) heads` },
-        ],
-        p.head,
-        (v) => set((t) => (t.head = v)),
-      ),
-    ),
+    labeled("Top", head),
     lengthField("Depth", p.depth, (v) => set((t) => (t.depth = v)), { min: 0 }),
-    hint(`Hole ${d[p.fit]} mm. It goes down into the face it's placed on. For 3D printing, holes come out a little small: Normal or Loose fit allows for that.`),
+    hint(
+      p.head === "nut"
+        ? `Hole ${d[p.fit]} mm, with a nut trap at the top (${nut.flats + NUT_PLAY} mm across the flats, ${nut.thick + NUT_PLAY} mm deep). Rotate the hole to line the hex up; flip it over to put the nut at the bottom.`
+        : p.head === "insert"
+          ? `A ${ins.hole} mm hole ${ins.length + 1} mm deep for a heat-set insert (press it in with a soldering iron), then ${d[p.fit]} mm for the screw. Insert sizes vary by maker: check yours.`
+          : `Hole ${d[p.fit]} mm. It goes down into the face it's placed on. For 3D printing, holes come out a little small: Normal or Loose fit allows for that.`,
+    ),
   ];
 }
 

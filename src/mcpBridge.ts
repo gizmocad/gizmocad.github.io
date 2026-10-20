@@ -278,7 +278,7 @@ const CHOICES: Record<string, (string | number)[]> = {
   "text.align": ["left", "center", "right"],
   "screw.size": ["M2", "M2.5", "M3", "M4", "M5", "M6", "M8", "M10"],
   "screw.fit": ["tap", "close", "normal", "loose"],
-  "screw.head": ["none", "counterbore", "countersink"],
+  "screw.head": ["none", "counterbore", "countersink", "nut", "insert"],
   "spring.style": ["coil", "flat"],
   "spring.section": ["round", "square"],
   "spring.bends": ["round", "sharp"],

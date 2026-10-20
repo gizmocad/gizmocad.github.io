@@ -9,7 +9,7 @@
   script, handwriting, old English; bold where the font has it), or **import your own** .ttf, .otf or .woff font (it's saved
   inside the model). Any alignment, several lines; make it a Hole to engrave it.
   **Screw holes** (M2–M10) go down into the face you put them on, with a tap, close, normal or loose fit and an optional
-  counterbore or countersink.
+  counterbore, countersink, hex nut trap (ISO 4032 nuts, 0.2 mm play) or heat-set insert hole at the top.
   Fields accept units and maths (`1in`, `2.5cm`, `40/3`).
 - **Placing shapes:** click a shape button (or drag it into the view) and a preview follows the mouse. Click to put it
   on the face under the mouse, standing out from that face and snapped to its grid, centre and corners, or on the ground grid.

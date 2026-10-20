@@ -13,6 +13,9 @@ import {
   anyIgnoredHoles,
   clearanceOf,
   isGroove,
+  INSERT_SIZES,
+  NUT_PLAY,
+  NUT_SIZES,
   sweepOf,
   type Sweep,
   worldMatrix,
@@ -1263,9 +1266,22 @@ function buildScrewHole(p: ScrewParams): Shape3D {
     const R = size.sink / 2;
     const depth = Math.min(R - r, p.depth); // 90°: as deep as it is wide (per side).
     pts.push([r, -depth], [R, 0], [R + top, top]);
+  } else if (p.head === "insert") {
+    // The insert's hole (an extra millimetre deep, for the plastic it pushes down), then the screw's.
+    const ins = INSERT_SIZES[p.size];
+    const depth = Math.min(ins.length + 1, p.depth);
+    pts.push([r, -depth], [ins.hole / 2, -depth], [ins.hole / 2, top]);
   } else pts.push([r, top]);
   pts.push([0, top]);
-  return revolveUpright(polygonDrawing(pts));
+  const hole = revolveUpright(polygonDrawing(pts));
+  if (p.head !== "nut") return hole;
+  // A hex pocket the nut drops into, flats along X.
+  const nut = NUT_SIZES[p.size];
+  const corner = (nut.flats + NUT_PLAY) / Math.sqrt(3);
+  const depth = Math.min(nut.thick + NUT_PLAY, p.depth);
+  const hex = Array.from({ length: 6 }, (_, i) => [corner * Math.cos((i * Math.PI) / 3), corner * Math.sin((i * Math.PI) / 3)] as [number, number]);
+  const pocket = extrudeUp(polygonDrawing(hex), depth + top, null).translate(0, 0, -depth);
+  return hole.fuse(pocket);
 }
 
 function polygonDrawing(points: [number, number][]): Drawing {
