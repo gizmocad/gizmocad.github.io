@@ -3440,7 +3440,17 @@ function parentSelect(f: Feature) {
   sel.className = "wide";
   const blocked = subtreeIds(doc.features, f.id);
   sel.add(new Option("None (top level)", ""));
-  for (const p of doc.features) if (!blocked.has(p.id)) sel.add(new Option(`${kindIcon(p)} ${p.name}`, p.id));
+  // As the tree in the list: indented under their parents, so which is which is clear (names can repeat).
+  const walk = (parentId: string | null, depth: number) => {
+    for (const p of childrenOf(doc.features, parentId)) {
+      const o = new Option(`${"\u00a0\u00a0\u00a0".repeat(depth)}${depth ? "└ " : ""}${kindIcon(p)} ${p.name}`, p.id);
+      // Not into itself or anything inside it.
+      if (blocked.has(p.id)) o.disabled = true;
+      sel.add(o);
+      walk(p.id, depth + 1);
+    }
+  };
+  walk(null, 0);
   sel.value = f.parentId ?? "";
   sel.onchange = () => moveTo(f.id, sel.value || null);
   return sel;

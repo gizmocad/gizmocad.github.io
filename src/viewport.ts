@@ -200,6 +200,8 @@ export class Viewport {
   /** Camera flying to fit objects in view. */
   private viewFly: { from: THREE.Vector3; to: THREE.Vector3; fromDist: number; toDist: number; fromZoom: number; toZoom: number; start: number } | null = null;
   private boxSelect: { x: number; y: number; el: HTMLDivElement } | null = null;
+  /** While dragging a selection box: what it would select, highlighted already. */
+  private boxPreview = new Set<string>();
   private combined = false;
   private snap = 1;
   private sketch: SketchSession | null = null;
@@ -1013,7 +1015,7 @@ export class Viewport {
       const f = this.features.get(o.userData.id);
       const mat = o.material as THREE.MeshStandardMaterial;
       const isHole = f?.mode === "hole";
-      const selected = !this.combined && this.selectedIds.has(o.userData.id);
+      const selected = !this.combined && (this.selectedIds.has(o.userData.id) || this.boxPreview.has(o.userData.id));
       const colour = f && colourOf(this.features.values(), f);
       const own = colour ? new THREE.Color(colour).getHex() : COLORS.solid;
       // The sketch being edited shows as its drawing only: its extruded (or revolved) solid is hidden until editing ends.
@@ -1539,35 +1541,49 @@ export class Viewport {
       const [y0, y1] = [Math.min(b.y, e.clientY), Math.max(b.y, e.clientY)];
       b.el.hidden = x1 - x0 < 4 && y1 - y0 < 4;
       Object.assign(b.el.style, { left: `${x0 - r.left}px`, top: `${y0 - r.top}px`, width: `${x1 - x0}px`, height: `${y1 - y0}px` });
+      // Light up what it would select, as it goes.
+      const inside = new Set(b.el.hidden ? [] : this.idsInBox(b.x, b.y, e.clientX, e.clientY));
+      if (inside.size !== this.boxPreview.size || [...inside].some((id) => !this.boxPreview.has(id))) {
+        this.boxPreview = inside;
+        this.applyAppearance();
+      }
     });
     el.addEventListener("pointerup", (e) => {
       const b = this.boxSelect;
       if (!b) return;
       this.boxSelect = null;
       b.el.remove();
+      if (this.boxPreview.size) {
+        this.boxPreview = new Set();
+        this.applyAppearance();
+      }
       if (Math.hypot(e.clientX - b.x, e.clientY - b.y) < 4) {
         // A click: add or remove the object under it.
         const id = this.pick(e);
         if (id) this.events.onSelect(id, true);
         return;
       }
-      const rect = el.getBoundingClientRect();
-      const [x0, x1] = [Math.min(b.x, e.clientX) - rect.left, Math.max(b.x, e.clientX) - rect.left];
-      const [y0, y1] = [Math.min(b.y, e.clientY) - rect.top, Math.max(b.y, e.clientY) - rect.top];
-      const ids: string[] = [];
-      this.root.updateMatrixWorld(true);
-      for (const [id, node] of this.nodes) {
-        if (!this.solidTarget(node) || this.features.get(id)?.kind === "group") continue;
-        const box = this.localBox(id, node);
-        if (!box) continue;
-        // Inside when its middle is in the box on screen.
-        const c = box.getCenter(new THREE.Vector3()).applyMatrix4(node.matrixWorld).project(this.camera);
-        const sx = ((c.x + 1) / 2) * rect.width;
-        const sy = ((1 - c.y) / 2) * rect.height;
-        if (sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1 && c.z < 1) ids.push(id);
-      }
-      this.events.onBoxSelect(ids);
+      this.events.onBoxSelect(this.idsInBox(b.x, b.y, e.clientX, e.clientY));
     });
+  }
+
+  /** The objects inside a box dragged on screen (corners in client pixels): those whose middle is in it. */
+  private idsInBox(ax: number, ay: number, bx: number, by: number): string[] {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const [x0, x1] = [Math.min(ax, bx) - rect.left, Math.max(ax, bx) - rect.left];
+    const [y0, y1] = [Math.min(ay, by) - rect.top, Math.max(ay, by) - rect.top];
+    const ids: string[] = [];
+    this.root.updateMatrixWorld(true);
+    for (const [id, node] of this.nodes) {
+      if (!this.solidTarget(node) || this.features.get(id)?.kind === "group") continue;
+      const box = this.localBox(id, node);
+      if (!box) continue;
+      const c = box.getCenter(new THREE.Vector3()).applyMatrix4(node.matrixWorld).project(this.camera);
+      const sx = ((c.x + 1) / 2) * rect.width;
+      const sy = ((1 - c.y) / 2) * rect.height;
+      if (sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1 && c.z < 1) ids.push(id);
+    }
+    return ids;
   }
 
   // ---- Measuring ---------------------------------------------------------------
