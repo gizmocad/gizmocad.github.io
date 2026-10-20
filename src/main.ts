@@ -3686,11 +3686,21 @@ function deleteIds(targets: string[]) {
  * it still cut (lifted out of their groups, keeping where they are), or the
  * whole model when nothing is selected. `label` names the selection.
  */
+/** What an export holds: the selected objects' names, or null for the whole model. */
+function exportLabel(): string | null {
+  const all = new Set(activeFeatures(doc.features).map((f) => f.id));
+  const names = topSelected()
+    .filter((id) => all.has(id))
+    .map((id) => findFeature(id)!.name);
+  return !names.length ? null : names.length === 1 ? names[0] : names.length === 2 ? `${names[0]} and ${names[1]}` : `${names.length} selected objects`;
+}
+
 function exportFeatures(): { features: Feature[]; label: string | null } {
   const all = activeFeatures(doc.features);
   const targets = topSelected().filter((id) => all.some((f) => f.id === id));
   if (!targets.length) return { features: all, label: null };
-  const features = structuredClone(all);
+  // Copies to place and change; shallow is enough (only top-level fields are replaced), and imported geometry can be megabytes.
+  const features = all.map((f) => ({ ...f }) as Feature);
   const inTargets = (id: string) => targets.some((t) => subtreeIds(features, t).has(id));
   const holes = new Set<string>();
   for (const id of targets) {
@@ -3705,8 +3715,7 @@ function exportFeatures(): { features: Feature[]; label: string | null } {
   const out = features.filter((f) => keep.has(f.id));
   // A selected hole exports as its shape.
   for (const f of out) if (targets.includes(f.id) && f.mode === "hole") f.mode = "solid";
-  const names = targets.map((id) => findFeature(id)!.name);
-  return { features: out, label: names.length === 1 ? names[0] : names.length === 2 ? `${names[0]} and ${names[1]}` : `${names.length} selected objects` };
+  return { features: out, label: exportLabel() };
 }
 
 /** A file name from an object's name. */
@@ -3842,7 +3851,7 @@ const appMenuButton = $("#app-menu-button");
 function setAppMenu(open: boolean) {
   if (open) {
     // The exports say whether they'll hold the selection or the whole model.
-    const { label } = exportFeatures();
+    const label = exportLabel();
     appMenu.querySelectorAll<HTMLElement>("[id^=export-] .note").forEach((note) => {
       note.dataset.usual ??= note.textContent ?? "";
       note.textContent = label ? `only ${label}` : note.dataset.usual;
@@ -4849,12 +4858,12 @@ for (const side of ["left", "right"] as const) {
     };
     const up = () => {
       grip.classList.remove("dragging");
-      grip.removeEventListener("pointermove", move);
+      for (const [type, fn] of [["pointermove", move], ["pointerup", up], ["pointercancel", up]] as const) grip.removeEventListener(type, fn as EventListener);
       store(PANEL_KEY, JSON.stringify(panelWidths));
     };
     grip.addEventListener("pointermove", move);
-    grip.addEventListener("pointerup", up, { once: true });
-    grip.addEventListener("pointercancel", up, { once: true });
+    grip.addEventListener("pointerup", up);
+    grip.addEventListener("pointercancel", up);
   };
   grip.ondblclick = () => {
     panelWidths[side] = side === "left" ? 220 : 260;

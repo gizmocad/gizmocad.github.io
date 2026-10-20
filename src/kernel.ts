@@ -149,10 +149,16 @@ export class Kernel {
     );
   }
 
+  /** The features with imported geometry the worker already has left out (shallow: posting them copies them). */
+  private withoutSentGeometry(features: Feature[]): Feature[] {
+    return features.map((f) => (f.kind === "imported" && (f.params.brep || f.params.mesh) && this.sentBreps.has(f.params.ref) ? { ...f, params: { ...f.params, brep: "", mesh: undefined } } : f));
+  }
+
   private request<T>(req: DistributiveOmit<KernelRequest, "requestId">): Promise<T> {
     const requestId = this.nextId++;
     if ("features" in req) {
-      req = { ...req, features: this.snapshot(req.features) };
+      // Posting copies them anyway: just leave out the geometry the worker already has.
+      req = { ...req, features: this.withoutSentGeometry(req.features) };
       for (const f of req.features) if (f.kind === "imported" && (f.params.brep || f.params.mesh)) this.sentBreps.add(f.params.ref);
     }
     return new Promise<T>((resolve, reject) => {

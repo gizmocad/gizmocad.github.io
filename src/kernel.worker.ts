@@ -1503,12 +1503,19 @@ function importedBase(p: ImportedParams): Shape3D {
     else if (mesh) shape = logged("make an exact solid from a mesh's triangles", () => solidFromTriangles(decodeFloats(mesh.positions), decodeIndices(mesh.indices), [1, 1, 1], "bodies"));
     else throw new Error("This imported solid has no geometry.");
     importedCache.set(p.ref, shape);
-    if (importedCache.size > 64) importedCache.delete(importedCache.keys().next().value!);
+    if (importedCache.size > 64) evictShape(importedCache);
   }
   return shape.clone();
 }
 
 const isEven = ([x, y, z]: number[]) => Math.abs(x - y) < 1e-9 && Math.abs(y - z) < 1e-9;
+
+/** Drop a cache's oldest shape and free it (OpenCascade's memory isn't reclaimed otherwise; callers only ever got clones). */
+function evictShape(cache: Map<string, Shape3D>) {
+  const [key, shape] = cache.entries().next().value!;
+  cache.delete(key);
+  shape.delete();
+}
 
 /** Stretched solids take a while to make, so they're kept too. */
 const stretchedCache = new Map<string, Shape3D>();
@@ -1526,7 +1533,7 @@ function importedShape(p: ImportedParams): Shape3D {
       if (!made) {
         made = solidFromTriangles(w.vertices, w.triangles, [1, 1, 1], "bodies");
         stretchedCache.set(key, made);
-        if (stretchedCache.size > 16) stretchedCache.delete(stretchedCache.keys().next().value!);
+        if (stretchedCache.size > 16) evictShape(stretchedCache);
       }
       shape = made.clone();
     }
@@ -1539,7 +1546,7 @@ function importedShape(p: ImportedParams): Shape3D {
   if (!shape) {
     shape = stretchSolid(importedBase(p), p.scale as [number, number, number]);
     stretchedCache.set(key, shape);
-    if (stretchedCache.size > 16) stretchedCache.delete(stretchedCache.keys().next().value!);
+    if (stretchedCache.size > 16) evictShape(stretchedCache);
   }
   return shape.clone();
 }
@@ -2262,7 +2269,8 @@ function cutMesh(features: Feature[], f: Feature): MeshData | null {
       failures = outerFailures;
     }
     cutCache.set(key, { mesh, error });
-    if (cutCache.size > 200) cutCache.delete(cutCache.keys().next().value!);
+    // Moving a cut object makes a new entry each time, and a big part's mesh is megabytes: keep the recent few.
+    if (cutCache.size > 40) cutCache.delete(cutCache.keys().next().value!);
   }
   const { mesh: m, error: cutError } = cutCache.get(key)!;
   if (cutError) cutFailures[f.id] = cutError;
