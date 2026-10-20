@@ -571,6 +571,7 @@ export class Viewport {
       }
     }
     this.root.updateMatrixWorld(true);
+    if (this.printCheckOn) this.drawPrintCheck();
     if (this.sketch) this.updateSketchFrame(false);
     if (this.sculpt) this.bindSculptMesh();
     this.applyAppearance();
@@ -1709,6 +1710,125 @@ export class Viewport {
   setSeeThrough(style: "off" | "xray" | "wire") {
     this.seeThrough = style;
     this.applyAppearance();
+  }
+
+  // ---- Print check: overhangs and thin walls ------------------------------------------
+
+  private printCheckOn = false;
+  private printCheckGroup = new THREE.Group();
+  /** What the last print check found: area of overhangs and of thin walls (mm²). */
+  printCheckResult: { overhang: number; thin: number } | null = null;
+
+  /** Show (or hide) where the model would print badly: overhangs past `angle`° and walls under `wall` mm. */
+  setPrintCheck(on: boolean) {
+    this.printCheckOn = on;
+    this.drawPrintCheck();
+  }
+
+  private drawPrintCheck(angle = 45, wall = 0.8) {
+    this.printCheckGroup.removeFromParent();
+    disposeTree(this.printCheckGroup);
+    this.printCheckGroup = new THREE.Group();
+    this.printCheckResult = null;
+    this.needsRender = true;
+    if (!this.printCheckOn) return;
+    this.root.updateMatrixWorld(true);
+    // The solids as shown (holes already cut), in the world.
+    const solids: { pos: Float32Array; count: number }[] = [];
+    let bed = Infinity;
+    this.root.traverse((o) => {
+      if (!(o instanceof THREE.Mesh) || !o.userData.id || !isShown(o)) return;
+      const f = this.features.get(o.userData.id);
+      if (!f || f.mode === "hole" || f.kind === "plane") return;
+      const g = o.geometry;
+      const src = g.getAttribute("position");
+      const index = g.getIndex();
+      const count = index ? index.count : src.count;
+      const pos = new Float32Array(count * 3);
+      const v = new THREE.Vector3();
+      for (let i = 0; i < count; i++) {
+        v.fromBufferAttribute(src, index ? index.getX(i) : i).applyMatrix4(o.matrixWorld);
+        pos.set([v.x, v.y, v.z], i * 3);
+        bed = Math.min(bed, v.z);
+      }
+      solids.push({ pos, count });
+    });
+    const down = Math.cos((angle * Math.PI) / 180);
+    const over: number[] = [];
+    const thin: number[] = [];
+    let overArea = 0;
+    let thinArea = 0;
+    const [a, b, c, n, mid, e1, e2, p, q] = Array.from({ length: 9 }, () => new THREE.Vector3());
+    for (const { pos, count } of solids) {
+      // Triangles by grid cell, to find the ones near a point quickly.
+      const cell = Math.max(wall * 2, 1);
+      const grid = new Map<string, number[]>();
+      const key = (x: number, y: number, z: number) => `${Math.floor(x / cell)},${Math.floor(y / cell)},${Math.floor(z / cell)}`;
+      for (let t = 0; t < count; t += 3) {
+        const lo = [0, 1, 2].map((k) => Math.min(pos[t * 3 + k], pos[t * 3 + 3 + k], pos[t * 3 + 6 + k]));
+        const hi = [0, 1, 2].map((k) => Math.max(pos[t * 3 + k], pos[t * 3 + 3 + k], pos[t * 3 + 6 + k]));
+        for (let x = Math.floor(lo[0] / cell); x <= Math.floor(hi[0] / cell); x++)
+          for (let y = Math.floor(lo[1] / cell); y <= Math.floor(hi[1] / cell); y++)
+            for (let z = Math.floor(lo[2] / cell); z <= Math.floor(hi[2] / cell); z++) {
+              const k = `${x},${y},${z}`;
+              const list = grid.get(k);
+              if (list) list.push(t);
+              else grid.set(k, [t]);
+            }
+      }
+      const tri = new THREE.Triangle();
+      const ray = new THREE.Ray();
+      for (let t = 0; t < count; t += 3) {
+        a.fromArray(pos, t * 3);
+        b.fromArray(pos, t * 3 + 3);
+        c.fromArray(pos, t * 3 + 6);
+        n.crossVectors(e1.subVectors(b, a), e2.subVectors(c, a));
+        const area = n.length() / 2;
+        if (area < 1e-9) continue;
+        n.normalize();
+        mid.copy(a).add(b).add(c).divideScalar(3);
+        const pts = [a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z];
+        // Facing down more steeply than the angle, and not sitting on the bed.
+        if (n.z < -down && mid.z > bed + 0.2) {
+          over.push(...pts);
+          overArea += area;
+        }
+        // A short look straight into the part: another surface within `wall` means it's thin there.
+        ray.set(p.copy(mid).addScaledVector(n, -1e-3), q.copy(n).negate());
+        const end = p.clone().addScaledVector(q, wall);
+        const cells = new Set([key(p.x, p.y, p.z), key(end.x, end.y, end.z), key((p.x + end.x) / 2, (p.y + end.y) / 2, (p.z + end.z) / 2)]);
+        let hit = false;
+        for (const k of cells) {
+          for (const o of grid.get(k) ?? []) {
+            if (o === t) continue;
+            tri.set(e1.fromArray(pos, o * 3), e2.fromArray(pos, o * 3 + 3), new THREE.Vector3().fromArray(pos, o * 3 + 6));
+            const at = ray.intersectTriangle(tri.a, tri.b, tri.c, false, new THREE.Vector3());
+            if (at && at.distanceTo(p) > 0.02 && at.distanceTo(p) < wall) {
+              hit = true;
+              break;
+            }
+          }
+          if (hit) break;
+        }
+        if (hit) {
+          thin.push(...pts);
+          thinArea += area;
+        }
+      }
+    }
+    const layer = (pts: number[], color: number, order: number) => {
+      if (!pts.length) return;
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
+      const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.75, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2, depthWrite: false }));
+      m.renderOrder = order;
+      m.raycast = () => {};
+      this.printCheckGroup.add(m);
+    };
+    layer(over, 0xff8a00, 20);
+    layer(thin, 0xff3355, 21);
+    this.scene.add(this.printCheckGroup);
+    this.printCheckResult = { overhang: overArea, thin: thinArea };
   }
 
   // ---- Section view -------------------------------------------------------------

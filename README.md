@@ -39,6 +39,7 @@
 - **Colours** per object (new objects take turns through green, orange, purple, yellow and pink), shown in the view and saved into 3MF exports.
 - **Measure** (M): click two points (corners and edges snap) for the distance and its X/Y/Z parts; two faces also give their angle.
 - **Print estimate:** a selected object (or several) shows roughly what printing it takes: weight in grams for the chosen material and infill, metres of 1.75 mm filament, and cost at your price per kg. GizmoCAD menu ▸ Print estimate does the whole model.
+- **Print check** (⚠ in the view's corner): overhangs steeper than 45° that don't sit on the bed show orange, walls thinner than 0.8 mm (two nozzle widths) red, with how much of each.
 - Mark any shape as a **hole**: what it cuts is shown cut as you work, with the hole itself see-through so you can still move it.
   Holes cut imported meshes (STL, OBJ, 3MF…) too, using the Manifold mesh library, as long as the mesh is closed.
   **Show result** shows only the finished boolean result (parts merged), computed by the OpenCascade kernel.

@@ -463,6 +463,7 @@ async function buildNow() {
     const adjustmentsChanged = JSON.stringify(adjusted) !== JSON.stringify(edgeAdjustments);
     if (!edgePick) edgeAdjustments = adjusted;
     viewport.setScene(meshes, features, combined);
+    reportPrintCheck();
     viewport.select(combined ? null : selectedId, combined ? [] : selectedIds);
     if (editingSketchId && viewport.sketchId !== editingSketchId) viewport.enterSketch(editingSketchId, (e) => sketchEditor?.handle(e));
     renderObjectList();
@@ -4696,6 +4697,25 @@ function cycleSeeThrough() {
   setStatus(seeThrough === "xray" ? "X-ray: objects are see-through, with every edge showing. X again for wireframe." : seeThrough === "wire" ? "Wireframe: every object drawn as its triangles. X again turns it off." : "");
 }
 $("#see-through").onclick = cycleSeeThrough;
+let printCheckOn = false;
+/** Say what the print check found (after each update while it's on). */
+function reportPrintCheck() {
+  const r = viewport.printCheckResult;
+  if (!printCheckOn || !r) return;
+  const cm2 = (mm2: number) => (mm2 / 100).toFixed(mm2 < 1000 ? 2 : 1);
+  setNotice(
+    !r.overhang && !r.thin
+      ? "Print check: no overhangs past 45° and no walls under 0.8 mm."
+      : `Print check: ${r.overhang ? `overhangs past 45° (orange, ${cm2(r.overhang)} cm²) need supports or a different orientation (try Lay flat)` : "no overhangs past 45°"}; ${r.thin ? `walls under 0.8 mm (red, ${cm2(r.thin)} cm²) may print badly or not at all` : "no walls under 0.8 mm"}.`,
+  );
+}
+$("#print-check").onclick = () => {
+  printCheckOn = !printCheckOn;
+  $("#print-check").classList.toggle("on", printCheckOn);
+  viewport.setPrintCheck(printCheckOn);
+  if (printCheckOn) reportPrintCheck();
+  else setNotice("");
+};
 $("#section-close").onclick = () => setSectionView(null);
 ($("#section-at") as HTMLInputElement).oninput = (e) => sectionView && setSectionView({ ...sectionView, at: parseFloat((e.target as HTMLInputElement).value) });
 $("#section-flip").onclick = () => sectionView && setSectionView({ ...sectionView, flip: !sectionView.flip });
