@@ -33,7 +33,7 @@ import {
   type SketchParams,
 } from "./model";
 import { entityPath, gearPath, isProfile, outline, prismPoints, starPoints, strokePieces, type Path } from "./sketchGeometry";
-import type { BuildStep, ImportedSolid, ImportSource, KernelRequest, KernelResponse, MeshData } from "./kernel";
+import type { BuildStep, ImportedSolid, ImportSource, KernelRequest, KernelResponse, MeshData, ModelStats } from "./kernel";
 import { hedron } from "./hedron";
 import { CUSTOM_FONT, builtInFontUrl, fontFamily, isCustomFont } from "./fonts";
 import { Matrix3, Matrix4, Vector3 } from "three";
@@ -2709,6 +2709,19 @@ function booleanSafe(a: Shape3D, b: Shape3D, op: "fuse" | "cut"): Shape3D {
   }
 }
 
+/** The area of a set of triangles' surface. */
+function meshArea(m: WorldMesh): number {
+  const { vertices: v, triangles: t } = m;
+  let sum = 0;
+  for (let i = 0; i < t.length; i += 3) {
+    const [a, b, c] = [t[i] * 3, t[i + 1] * 3, t[i + 2] * 3];
+    const [ux, uy, uz] = [v[b] - v[a], v[b + 1] - v[a + 1], v[b + 2] - v[a + 2]];
+    const [wx, wy, wz] = [v[c] - v[a], v[c + 1] - v[a + 1], v[c + 2] - v[a + 2]];
+    sum += Math.hypot(uy * wz - uz * wy, uz * wx - ux * wz, ux * wy - uy * wx) / 2;
+  }
+  return sum;
+}
+
 /** The volume a closed set of triangles holds. */
 function meshVolume(m: { vertices: ArrayLike<number>; triangles: ArrayLike<number> }): number {
   const { vertices: v, triangles: t } = m;
@@ -3141,6 +3154,16 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
       // Anything that couldn't be built is missing from the file: say so rather than export it quietly without.
       const missing = Object.entries(failures).map(([id, why]) => `${req.features.find((f) => f.id === id)?.name ?? id} (${why})`);
       post({ type: "exported", requestId: req.requestId, blob, ...(missing.length ? { warning: `Left out of the file because they couldn't be built: ${missing.join("; ")}` } : {}) });
+    } else if (req.type === "stats") {
+      // As triangles (quick, and what an STL holds): the volume, the area of its surface, and its size.
+      failures = {};
+      const w = branchTriangles(req.features, null);
+      let stats: ModelStats | null = null;
+      if (w && w.triangles.length) {
+        const [lo, hi] = meshBounds(w);
+        stats = { volume: Math.abs(meshVolume(w)), area: meshArea(w), size: [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]] };
+      }
+      post({ type: "stats", requestId: req.requestId, stats });
     } else if (req.type === "cutMeshes") {
       // Mesh objects with holes through them, as world triangles (for STL and 3MF exports).
       const out: Record<string, Float32Array> = {};

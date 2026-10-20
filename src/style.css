@@ -590,3 +590,7 @@ body.menu-open .panel.left { overflow-y: hidden; }
 .debug-panel li { white-space: pre-wrap; }
 .debug-note { color: var(--muted); margin-top: 4px; }
 .debug-error { color: var(--danger, #d93a3f); white-space: pre-wrap; }
+
+/* The print estimate's figures. */
+.estimate { margin: 4px 0 6px; font-size: 13px; line-height: 1.5; }
+.estimate .muted { color: var(--muted); font-size: 12px; }

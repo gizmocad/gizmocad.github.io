@@ -43,7 +43,16 @@ export type KernelRequest =
   /** A font imported into the model, for texts whose font is "custom:<id>". */
   | { type: "font"; requestId: number; id: string; data: ArrayBuffer }
   /** Mesh objects that holes cut, as world triangles. */
-  | { type: "cutMeshes"; requestId: number; features: Feature[] };
+  | { type: "cutMeshes"; requestId: number; features: Feature[] }
+  /** How much material the finished model holds: its volume, surface area and size. */
+  | { type: "stats"; requestId: number; features: Feature[] };
+
+/** A finished model's volume (mm³), surface area (mm²) and size along X, Y and Z (mm). */
+export interface ModelStats {
+  volume: number;
+  area: number;
+  size: [number, number, number];
+}
 
 /** What each kind of request is, for the progress bar. */
 const WORKING: Record<KernelRequest["type"], string> = {
@@ -54,6 +63,7 @@ const WORKING: Record<KernelRequest["type"], string> = {
   importSolids: "Importing",
   font: "Loading the font",
   cutMeshes: "Exporting",
+  stats: "Working out the print estimate",
 };
 
 export type KernelResponse =
@@ -66,6 +76,7 @@ export type KernelResponse =
   | { type: "importedSolids"; requestId: number; parts: ImportedSolid[] }
   | { type: "fontLoaded"; requestId: number; name: string }
   | { type: "cutMeshes"; requestId: number; meshes: Record<string, Float32Array> }
+  | { type: "stats"; requestId: number; stats: ModelStats | null }
   | { type: "error"; requestId: number; message: string };
 
 /** One step of a build, for Debug info: what was done (for which object), how long it took, and any error. */
@@ -113,6 +124,7 @@ export class Kernel {
         else if (msg.type === "parts" || msg.type === "importedSolids") p.resolve(msg.parts as never);
         else if (msg.type === "fontLoaded") p.resolve(msg.name as never);
         else if (msg.type === "cutMeshes") p.resolve(msg.meshes as never);
+        else if (msg.type === "stats") p.resolve(msg.stats as never);
         else {
           this.exportWarning = msg.warning ?? "";
           p.resolve(msg.blob as never);
@@ -200,6 +212,11 @@ export class Kernel {
   /** Mesh objects (imported meshes, sculpts) that holes cut: their cut triangles in world coordinates, by id. */
   cutMeshes(features: Feature[]): Promise<Record<string, Float32Array>> {
     return this.request({ type: "cutMeshes", features });
+  }
+
+  /** The finished model's volume, surface area and size (null if there's nothing solid). */
+  stats(features: Feature[]): Promise<ModelStats | null> {
+    return this.request({ type: "stats", features });
   }
 
   export(features: Feature[], format: "stl" | "step"): Promise<Blob> {

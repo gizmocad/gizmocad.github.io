@@ -1,4 +1,4 @@
-import { Kernel, type BuildStep, type ImportedSolid } from "./kernel";
+import { Kernel, type BuildStep, type ImportedSolid, type ModelStats } from "./kernel";
 import { featureExtents, resizeFeature, sizeReadout } from "./resize";
 import {
   childrenOf,
@@ -466,7 +466,11 @@ async function buildNow() {
   }
 }
 
+/** Goes up with every change to the model (for results worked out from it, such as the print estimate). */
+let modelRevision = 0;
+
 function refresh() {
+  modelRevision++;
   if (edgePick && !pickedOp()) {
     // The operation (or its object) was removed while picking.
     edgePick = null;
@@ -2050,6 +2054,7 @@ function multiPanel(): HTMLElement[] {
   const combine = button("⧉ Combine", combineSelected);
   combine.title = "Join them into one shape: it moves, rounds and exports as one (you can split it back up)";
   actions.append(group, combine, button("Duplicate", duplicateSelected), button(`Delete ${selectedIds.length}`, deleteSelected, "danger"));
+  items.push(...estimateSection());
   items.push(section("Selection"), actions, hint("Drag the gizmo to move them all together. Shift-click adds or removes one; Esc clears the selection."));
   return items;
 }
@@ -2978,6 +2983,7 @@ function renderPropertiesPanel() {
     parentSelect(f),
   );
   if (f.kind !== "plane" && f.kind !== "group") items.push(section("Colour"), colourRow([f.id], f.color));
+  if (f.kind !== "plane" && f.mode === "solid") items.push(...estimateSection());
   // A flat sketch has no solid yet, so nothing to round, cut or sculpt.
   const flat = f.kind === "sketch" && f.params.operation === "flat";
   if (FINISHABLE.includes(f.kind) && !flat) {
@@ -3834,6 +3840,80 @@ function deleteIds(targets: string[]) {
  * it still cut (lifted out of their groups, keeping where they are), or the
  * whole model when nothing is selected. `label` names the selection.
  */
+// ---- Print estimate -------------------------------------------------------------------
+
+/** Filament densities (g/cm³). */
+const MATERIALS: Record<string, number> = { PLA: 1.24, PETG: 1.27, ABS: 1.04, ASA: 1.07, TPU: 1.21, Nylon: 1.14, "PLA-CF": 1.3, Resin: 1.15 };
+const PRINT_KEY = "gizmocad.print";
+const printSettings: { material: string; infill: number; price: number } = (() => {
+  try {
+    return { material: "PLA", infill: 15, price: 25, ...(JSON.parse(localStorage.getItem(PRINT_KEY) ?? "{}") as object) };
+  } catch {
+    return { material: "PLA", infill: 15, price: 25 };
+  }
+})();
+
+/**
+ * Roughly what a print takes: the walls, top and bottom (two 0.4 mm lines,
+ * about 0.8 mm all over its surface) are solid, the inside is the infill.
+ */
+function printEstimate(stats: ModelStats) {
+  const shell = Math.min(stats.volume, stats.area * 0.8);
+  const printed = shell + (stats.volume - shell) * (printSettings.infill / 100); // mm³
+  const grams = (printed / 1000) * (MATERIALS[printSettings.material] ?? 1.24);
+  const metres = printed / (Math.PI * 0.875 ** 2) / 1000; // 1.75 mm filament
+  return { grams, metres, cost: (grams / 1000) * printSettings.price };
+}
+
+const describeEstimate = (stats: ModelStats) => {
+  const { grams, metres, cost } = printEstimate(stats);
+  return `${grams < 10 ? grams.toFixed(1) : Math.round(grams)} g of ${printSettings.material} at ${printSettings.infill}% infill, ${metres.toFixed(metres < 10 ? 1 : 0)} m of 1.75 mm filament, about ${cost.toFixed(2)} at ${printSettings.price}/kg`;
+};
+
+/** The last estimate worked out, and what for (the model's revision and the selection). */
+let estimate: { key: string; stats: ModelStats | null } | null = null;
+let estimating: string | null = null;
+
+function estimateSection(): HTMLElement[] {
+  const key = `${modelRevision}|${topSelected().join(",")}`;
+  if (estimate?.key !== key && estimating !== key) {
+    estimating = key;
+    kernel
+      .stats(exportFeatures().features)
+      .then((stats) => {
+        estimate = { key, stats };
+        if (`${modelRevision}|${topSelected().join(",")}` === key) renderProperties();
+      })
+      .catch(() => (estimate = { key, stats: null }))
+      .finally(() => estimating === key && (estimating = null));
+  }
+  const save = () => {
+    store(PRINT_KEY, JSON.stringify(printSettings));
+    renderProperties();
+  };
+  const material = document.createElement("select");
+  for (const name of Object.keys(MATERIALS)) material.add(new Option(name, name));
+  material.value = printSettings.material;
+  material.onchange = () => ((printSettings.material = material.value), save());
+  const out = document.createElement("div");
+  out.className = "estimate";
+  const s = estimate?.key === key ? estimate.stats : null;
+  if (!s) out.textContent = estimate?.key === key ? "Nothing solid to print." : "Working it out…";
+  else {
+    const { grams, metres, cost } = printEstimate(s);
+    const solid = (s.volume / 1000) * (MATERIALS[printSettings.material] ?? 1.24);
+    out.innerHTML = `<b>${grams < 10 ? grams.toFixed(1) : Math.round(grams)} g</b> · ${metres.toFixed(metres < 10 ? 1 : 0)} m of filament · about <b>${cost.toFixed(2)}</b><br><span class="muted">${(s.volume / 1000).toFixed(2)} cm³ (${solid.toFixed(1)} g if solid) · ${s.size.map((v) => v.toFixed(1)).join(" × ")} mm</span>`;
+  }
+  return [
+    section("Print estimate"),
+    labeled("Material", material),
+    lengthField("Infill", printSettings.infill, (v) => ((printSettings.infill = Math.min(100, Math.max(0, v))), save()), { unit: "%", plain: true }),
+    lengthField("Price per kg", printSettings.price, (v) => ((printSettings.price = Math.max(0, v)), save()), { unit: "", plain: true }),
+    out,
+    hint("A rough guide: walls, top and bottom about 0.8 mm thick and solid, the inside at the infill. Your slicer gives the exact figure."),
+  ];
+}
+
 /** What an export holds: the selected objects' names, or null for the whole model. */
 function exportLabel(): string | null {
   const all = new Set(activeFeatures(doc.features).map((f) => f.id));
@@ -4102,6 +4182,16 @@ function showDebug(log: BuildStep[], errors: Record<string, string>, features: F
 $("#save").onclick = () => void saveDocument();
 $("#open").onclick = () => void openDocument();
 $("#export-stl").onclick = () => void exportModel("stl");
+$("#print-estimate").onclick = async () => {
+  const { features, label } = exportFeatures();
+  setNotice("Working out the print estimate…");
+  try {
+    const stats = await kernel.stats(features);
+    setNotice(stats ? `${label ?? "The whole model"}: ${describeEstimate(stats)} (${(stats.volume / 1000).toFixed(2)} cm³).` : "Nothing solid to print.");
+  } catch (err) {
+    setNotice(`The print estimate failed: ${(err as Error).message}`);
+  }
+};
 $("#export-step").onclick = () => void exportModel("step");
 
 // ---- AI assistant (MCP) ------------------------------------------------------------
