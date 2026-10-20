@@ -21,6 +21,7 @@
   connection (drag the ring or arrow, or type the angle/distance, with optional limits), while Move and Rotate reposition
   it together with its connection, and Pivot (P) moves just the connection (it snaps to object points).
 - **Onto face** (F): move the selected object onto another object's face (or the grid) the same way.
+- **Lay flat:** with the Move or Rotate gizmo, click **Lay flat** then a face of the selected object: it turns so that face sits on the bed, ready to print.
 - **Show/hide** objects with the eye in the object list (or H). Hidden objects still count in the model and exports.
 - **Select several objects:** Shift/Ctrl-click (in the view or the list), Shift-drag a box in the view, or Ctrl+A. Then move or
   turn them together with the gizmo, **align** their sides or centres, **space them evenly**, colour, mirror, duplicate,

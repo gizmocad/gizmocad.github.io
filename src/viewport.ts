@@ -388,6 +388,7 @@ export class Viewport {
     this.setupSculptPointer();
     this.setupSwingPointer();
     this.setupChiselPointer();
+    this.setupFacePickPointer();
     this.setupBoxSelect();
     new ResizeObserver(() => this.resize()).observe(container);
     this.resize();
@@ -1063,6 +1064,65 @@ export class Viewport {
     this.drawSnapDots();
     this.drawSection();
     this.drawSwing(target && f ? { f, node: target } : null);
+  }
+
+  // ---- Picking one face of an object (lay flat) --------------------------------------------------
+
+  private facePick: { id: string; onPick: (normal: Vec3, point: Vec3) => void } | null = null;
+
+  /** Wait for a click on object `id`: hands back the clicked face's outward normal and the point (world). */
+  startFacePick(id: string, onPick: (normal: Vec3, point: Vec3) => void) {
+    this.facePick = { id, onPick };
+    this.renderer.domElement.style.cursor = "crosshair";
+  }
+
+  stopFacePick() {
+    if (!this.facePick) return;
+    this.facePick = null;
+    this.renderer.domElement.style.cursor = "";
+  }
+
+  get pickingFace(): string | null {
+    return this.facePick?.id ?? null;
+  }
+
+  /** Where object `id` (with what's inside it) would reach if it were placed at `world` instead: its box (world). */
+  boundsAt(id: string, world: THREE.Matrix4): THREE.Box3 | null {
+    const node = this.nodes.get(id);
+    if (!node) return null;
+    node.updateMatrixWorld(true);
+    // From where it is now to where it would be.
+    const move = world.clone().multiply(node.matrixWorld.clone().invert());
+    const box = new THREE.Box3();
+    const v = new THREE.Vector3();
+    node.traverse((o) => {
+      if (!(o instanceof THREE.Mesh) || !o.userData.id || this.features.get(o.userData.id)?.mode === "hole") return;
+      const pos = o.geometry.getAttribute("position");
+      const m = move.clone().multiply(o.matrixWorld);
+      for (let i = 0; i < pos.count; i++) box.expandByPoint(v.fromBufferAttribute(pos, i).applyMatrix4(m));
+    });
+    return box.isEmpty() ? null : box;
+  }
+
+  private setupFacePickPointer() {
+    this.container.addEventListener(
+      "pointerdown",
+      (e) => {
+        const fp = this.facePick;
+        const node = fp && this.nodes.get(fp.id);
+        if (!fp || !node || e.button !== 0 || e.target !== this.renderer.domElement) return;
+        this.raycaster.setFromCamera(this.ndc(e), this.camera);
+        const hit = this.raycaster.intersectObject(node, true).find((h) => h.object instanceof THREE.Mesh && h.face && isShown(h.object));
+        if (!hit) return;
+        e.stopPropagation();
+        // The triangle's own normal (not the smoothed one): the face as it is.
+        const normal = hit.face!.normal.clone().transformDirection(hit.object.matrixWorld);
+        if (normal.dot(this.raycaster.ray.direction) > 0) normal.negate();
+        this.stopFacePick();
+        fp.onPick({ x: normal.x, y: normal.y, z: normal.z }, { x: hit.point.x, y: hit.point.y, z: hit.point.z });
+      },
+      true,
+    );
   }
 
   // ---- Chisel: drag across an object's face to carve a groove -------------------------------------

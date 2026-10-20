@@ -52,7 +52,7 @@ import {
   colourOf,
   isMergedGroup,
 } from "./model";
-import { Box3, BufferAttribute, BufferGeometry, EdgesGeometry, Matrix4, Vector3 } from "three";
+import { Box3, BufferAttribute, BufferGeometry, EdgesGeometry, Matrix4, Quaternion, Vector3 } from "three";
 import { CONSTRAINT_LABEL, constraintFits, measure as measureConstraint, refPoints as refPointsOf, solveSketch } from "./constraints";
 import { autosave, build3mf, loadAutosave, outlinesToEntities, parse3mf, parseStl, svgToEntities, type ImportedPart, type MeshPart } from "./fileFormats";
 import { parseDxf, parseFcstd, parseGltf, parseObj, parseOff, parsePly, stem, type PickedFile } from "./importFormats";
@@ -824,6 +824,7 @@ function updateToolbar() {
   joint.title = f?.joint?.type === "slider" ? "Slide it along its connection (J)" : "Turn it on its connection (J)";
   document.querySelectorAll<HTMLButtonElement>("[data-gizmo]").forEach((b) => b.classList.toggle("active", b.dataset.gizmo === mode));
   show("#snap-face", transforming && mode === "translate" && !f?.joint);
+  show("#lay-flat", transforming && (mode === "translate" || mode === "rotate") && !f?.joint);
   show("#local-axes", transforming && (mode === "translate" || mode === "rotate"));
   show("#keep-ratio, #one-side", transforming && mode === "scale");
   show("#points-option", (transforming && (mode === "translate" || mode === "pivot")) || viewport.placing);
@@ -3730,6 +3731,42 @@ function addShape(kind: ShapeKind) {
   }
 }
 
+/** Turn the selected object so the face clicked next sits flat on the bed (Z = 0), staying where it is across the bed. */
+function layFlat() {
+  const f = selected();
+  if (!f || editingSketchId || sculptingId) {
+    if (!f) setNotice("Select an object first, then click Lay flat.");
+    return;
+  }
+  if (viewport.pickingFace) {
+    viewport.stopFacePick();
+    $("#lay-flat").classList.remove("on");
+    setStatus("");
+    return;
+  }
+  if (f.joint) {
+    setNotice(`${f.name} is connected by a${f.joint.type === "orbit" ? "n orbit" : ` ${f.joint.type}`}: remove the connection to lay it flat.`);
+    return;
+  }
+  $("#lay-flat").classList.add("on");
+  setStatus(`Click the face of ${f.name} that should sit on the bed. Esc to cancel.`);
+  viewport.startFacePick(f.id, (normal) => {
+    $("#lay-flat").classList.remove("on");
+    setStatus("");
+    const world = worldMatrix(doc.features, f.id);
+    const box = viewport.modelBounds(new Set([f.id]));
+    const centre = box ? box.getCenter(new Vector3()) : new Vector3().setFromMatrixPosition(world);
+    // Turn the face to point straight down, about the object's middle.
+    const turn = new Matrix4().makeRotationFromQuaternion(new Quaternion().setFromUnitVectors(new Vector3(normal.x, normal.y, normal.z).normalize(), new Vector3(0, 0, -1)));
+    let placed = new Matrix4().makeTranslation(centre.x, centre.y, centre.z).multiply(turn).multiply(new Matrix4().makeTranslation(-centre.x, -centre.y, -centre.z)).multiply(world);
+    // Then down (or up) onto the bed.
+    const after = viewport.boundsAt(f.id, placed);
+    if (after) placed = new Matrix4().makeTranslation(0, 0, -after.min.z).multiply(placed);
+    commit((features) => setWorldMatrix(features, f.id, placed));
+    setNotice(`${f.name} now lies on that face.`);
+  });
+}
+
 /** Move the selected object onto a face: it follows the pointer until a click puts it down. */
 function snapToFace() {
   const f = selected();
@@ -4874,6 +4911,7 @@ keepRatioButton.onclick = () => {
   if (viewport.keepRatio) setGizmoMode("scale");
 };
 $("#snap-face").onclick = () => (viewport.placing ? viewport.cancelPlacement() : snapToFace());
+$("#lay-flat").onclick = () => layFlat();
 const pointSnapSelect = $("#point-snap") as HTMLSelectElement;
 const POINT_SNAP_KEY = "gizmocad.pointSnap";
 const applyPointSnap = () => viewport.setPointSnap(pointSnapSelect.value !== "off", pointSnapSelect.value === "show");
@@ -5003,7 +5041,8 @@ window.addEventListener("keydown", (e) => {
   } else if (e.key === "Delete" || e.key === "Backspace") {
     deleteSelected();
   } else if (e.key === "Escape") {
-    if (viewport.chiseling) stopChisel();
+    if (viewport.pickingFace) layFlat();
+    else if (viewport.chiseling) stopChisel();
     else if (edgePick) stopEdgePick();
     else selectObject(null);
   }
