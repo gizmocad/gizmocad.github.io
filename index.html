@@ -31,6 +31,7 @@
           <button id="export-step" role="menuitem">Export STEP <span class="note">other CAD</span></button>
           <button id="print-estimate" role="menuitem">Print estimate <span class="note">weight, filament, cost</span></button>
           <hr />
+          <button id="tips-open" role="menuitem">Tips &amp; shortcuts…</button>
           <button id="mcp-open" role="menuitem" title="Let an AI assistant such as Claude build and edit your model">AI assistant (MCP)… <span class="note" id="mcp-menu-state">off</span></button>
           <hr />
           <label class="menu-field" title="Shows your printer's bed in the view and warns when the model doesn't fit">Print bed <select id="bed"></select></label>
@@ -79,6 +80,36 @@
       </div>
       <input type="file" id="file-input" accept=".gizmocad,.mintcad,.json" hidden />
       <input type="file" id="import-input" hidden />
+    <dialog id="tips-dialog" class="dialog" aria-labelledby="tips-title">
+      <form method="dialog" class="dialog-head">
+        <h2 id="tips-title">Tips &amp; shortcuts</h2>
+        <button class="icon" value="close" aria-label="Close">✕</button>
+      </form>
+      <h3>Tips</h3>
+      <ul class="tips">
+        <li>Fields take units, maths and parameters: <code>1in</code>, <code>2.5cm</code>, <code>40/3</code>, <code>wall*2</code> (add parameters under Parameters, left).</li>
+        <li>Drag objects onto each other in the list to put one inside another. Children move with their parent, and a child hole only cuts its parent.</li>
+        <li>Shift-click, or Shift-drag a box, to select several objects; then align, group, combine or move them together.</li>
+        <li>Each section's <b>?</b> shows its help. Drag a side panel's edge to make it wider.</li>
+        <li>Before printing: <b>Lay flat</b> puts the best face down, ⚠ (top right of the view) shows overhangs and thin walls, and a selection's panel estimates its weight and cost.</li>
+      </ul>
+      <h3>Keyboard</h3>
+      <table class="keys">
+        <tr><td>W · E · R</td><td>Move · rotate · resize</td></tr>
+        <tr><td>J · P</td><td>Turn on its hinge (or slide) · move the pivot</td></tr>
+        <tr><td>L</td><td>Gizmo along the object's own axes</td></tr>
+        <tr><td>F</td><td>Move onto a face</td></tr>
+        <tr><td>G · H</td><td>Ghost · hide</td></tr>
+        <tr><td>X</td><td>See through (X-ray, then wireframe)</td></tr>
+        <tr><td>M</td><td>Measure</td></tr>
+        <tr><td>Home · .</td><td>Fit everything · zoom to the selection</td></tr>
+        <tr><td>Ctrl+Z · Ctrl+Y</td><td>Undo · redo</td></tr>
+        <tr><td>Ctrl+C · X · V · D</td><td>Copy · cut · paste · duplicate</td></tr>
+        <tr><td>Ctrl+G · Ctrl+A</td><td>Group · select all</td></tr>
+        <tr><td>Delete · Esc</td><td>Delete · let go (or cancel a tool)</td></tr>
+        <tr><td>[ · ]</td><td>Sculpt brush smaller · bigger</td></tr>
+      </table>
+    </dialog>
     <dialog id="mcp-dialog" class="dialog" aria-labelledby="mcp-title">
       <form method="dialog" class="dialog-head">
         <h2 id="mcp-title">AI assistant (MCP)</h2>

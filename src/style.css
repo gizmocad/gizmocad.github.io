@@ -601,3 +601,10 @@ body.menu-open .panel.left { overflow-y: hidden; }
 #variables .variable input { min-width: 0; font-family: var(--mono, monospace); font-size: 12px; }
 #variables .variable span { color: var(--muted); }
 input.linked { box-shadow: inset 3px 0 0 var(--accent); }
+
+/* Tips & shortcuts. */
+#tips-dialog { max-width: 560px; }
+#tips-dialog .tips { padding-left: 18px; line-height: 1.5; }
+#tips-dialog .keys { border-collapse: collapse; width: 100%; font-size: 13px; }
+#tips-dialog .keys td { padding: 3px 8px 3px 0; border-bottom: 1px solid var(--border); }
+#tips-dialog .keys td:first-child { white-space: nowrap; font-family: var(--mono, monospace); color: var(--muted); }

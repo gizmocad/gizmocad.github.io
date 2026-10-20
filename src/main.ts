@@ -3045,12 +3045,8 @@ function renderPropertiesPanel() {
   if (sculpting?.kind === "sculpt") return panel.replaceChildren(...sculptPanel(sculpting));
   if (f && selectedIds.length > 1) return panel.replaceChildren(...multiPanel());
   if (!f) {
-    panel.innerHTML = `<p class="hint">Select an object to edit its exact dimensions.</p>`;
-    panel.append(
-      hint("Fields accept units, maths and parameters, e.g. <code>1in</code>, <code>2.5cm</code>, <code>40/3</code>, <code>wall*2</code>."),
-      hint("Drag objects onto each other in the list to make parent/child groups. Children move with their parent, and a child hole only cuts its parent."),
-      hint("Shift-click or Shift-drag a box to select several objects, then align, group or move them together."),
-    );
+    // The panel is hidden now (see nothing-selected); the tips are in GizmoCAD ▸ Tips & shortcuts.
+    panel.replaceChildren();
     return;
   }
   panel.replaceChildren(...objectItems(f));
@@ -4739,6 +4735,7 @@ mcpPort.onchange = () => {
 };
 mcpPort.onkeydown = (e) => e.stopPropagation();
 const openMcpDialog = () => mcpDialog.showModal();
+$("#tips-open").onclick = () => ($("#tips-dialog") as HTMLDialogElement).showModal();
 $("#mcp-open").onclick = openMcpDialog;
 $("#mcp-badge").onclick = openMcpDialog;
 $("#mcp-download").onclick = async () => {
