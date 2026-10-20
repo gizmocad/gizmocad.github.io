@@ -2,10 +2,10 @@
 // (DXF) and FreeCAD documents (whose shapes the kernel then reads). Kept free
 // of app state so they're easy to test.
 
-import { BufferGeometry, LoadingManager, Matrix4, Vector3, type Mesh, type Object3D } from "three";
+import { BufferGeometry, Euler, LoadingManager, Matrix4, Quaternion, Vector3, type Mesh, type Object3D } from "three";
 import type { ImportSource } from "./kernel";
 import { readZip, unzipEntry, type ImportedPart, type Outline } from "./fileFormats";
-import type { Point2 } from "./model";
+import type { Point2, SketchEntity, Vec3 } from "./model";
 
 /** A picked file: its name and bytes. */
 export interface PickedFile {
@@ -615,4 +615,202 @@ async function fcColor(view: Map<string, Element> | undefined, read: (name: stri
   }
   const old = view?.get("ShapeColor")?.querySelector("PropertyColor")?.getAttribute("value");
   return old ? unpack(Number(old)) : undefined;
+}
+
+// ---- FreeCAD sketches ------------------------------------------------------------------
+
+/** A FreeCAD sketch as a GizmoCAD one: where it sits (world), and its drawing. */
+export interface FcSketch {
+  name: string;
+  hidden: boolean;
+  position: Vec3;
+  /** Degrees, X then Y then Z. */
+  rotation: Vec3;
+  entities: SketchEntity[];
+  /** Its outline's corners (world), for placing it with the rest. */
+  min: number[];
+  max: number[];
+}
+
+/** A point on a (rational) B-spline at parameter u (de Boor). */
+function bspline(poles: { x: number; y: number; w: number }[], knots: number[], degree: number, u: number): Point2 {
+  let k = degree;
+  while (k < knots.length - degree - 2 && u >= knots[k + 1]) k++;
+  const d = Array.from({ length: degree + 1 }, (_, j) => {
+    const p = poles[Math.min(poles.length - 1, Math.max(0, j + k - degree))];
+    return [p.x * p.w, p.y * p.w, p.w];
+  });
+  for (let r = 1; r <= degree; r++)
+    for (let j = degree; j >= r; j--) {
+      const i = j + k - degree;
+      const den = knots[i + degree - r + 1] - knots[i];
+      const a = den ? (u - knots[i]) / den : 0;
+      d[j] = d[j].map((v, c) => (1 - a) * d[j - 1][c] + a * v);
+    }
+  return [d[degree][0] / d[degree][2], d[degree][1] / d[degree][2]];
+}
+
+/**
+ * The sketches in a FreeCAD document, for editing: closed chains of lines,
+ * arcs and curves become shapes (arcs as bowed edges), circles and ellipses
+ * themselves, points points, and lines that don't close (or are construction
+ * geometry) guide lines.
+ */
+export async function fcstdSketches(file: PickedFile, newId: () => string): Promise<FcSketch[]> {
+  const zip = readZip(file.data, "FreeCAD");
+  const e = zip.get("document.xml");
+  if (!e) return [];
+  const doc = new DOMParser().parseFromString(new TextDecoder().decode(await unzipEntry(e)), "application/xml");
+  const kids = (el: Element | null | undefined, tag: string) => (el ? [...el.children].filter((c) => c.tagName === tag) : []);
+  const types = new Map(kids(doc.querySelector("Objects"), "Object").map((o) => [o.getAttribute("name") ?? "", o.getAttribute("type") ?? ""]));
+  const props = (holder: Element | undefined) => new Map(kids(kids(holder, "Properties")[0], "Property").map((p) => [p.getAttribute("name") ?? "", p]));
+  const data = new Map(kids(doc.querySelector("ObjectData"), "Object").map((o) => [o.getAttribute("name") ?? "", props(o)]));
+  const parentOf = new Map<string, string>();
+  for (const [name, p] of data) for (const link of p.get("Group")?.querySelectorAll("Link") ?? []) parentOf.set(link.getAttribute("value") ?? "", name);
+  const placement = (name: string) => {
+    const pl = data.get(name)?.get("Placement")?.querySelector("PropertyPlacement");
+    if (!pl) return new Matrix4();
+    const n = (k: string) => Number(pl.getAttribute(k) ?? 0);
+    return new Matrix4().compose(new Vector3(n("Px"), n("Py"), n("Pz")), new Quaternion(n("Q0"), n("Q1"), n("Q2"), n("Q3")).normalize(), new Vector3(1, 1, 1));
+  };
+  const num = (el: Element, k: string) => Number(el.getAttribute(k) ?? 0);
+  const out: FcSketch[] = [];
+  for (const [name, p] of data) {
+    if (types.get(name) !== "Sketcher::SketchObject") continue;
+    // Where it sits: its own placement, inside its body's and part's.
+    let world = placement(name);
+    for (let up = parentOf.get(name); up; up = parentOf.get(up)) if (/^(App::Part|PartDesign::Body)$/.test(types.get(up) ?? "")) world = placement(up).multiply(world);
+    type Seg = { a: Point2; b: Point2; bend: number; via?: Point2[] };
+    const segs: Seg[] = [];
+    const entities: SketchEntity[] = [];
+    const guide = (a: Point2, b: Point2) => entities.push({ id: newId(), mode: "construction", type: "line", x1: a[0], y1: a[1], x2: b[0], y2: b[1] });
+    for (const g of p.get("Geometry")?.querySelectorAll("Geometry") ?? []) {
+      const flags = g.querySelector("GeoExtension")?.getAttribute("geometryModeFlags") ?? "";
+      const construction = g.querySelector("Construction")?.getAttribute("value") === "1" || flags.at(-2) === "1";
+      const line = g.querySelector("LineSegment");
+      const circle = g.querySelector("Circle");
+      const arc = g.querySelector("ArcOfCircle");
+      const ellipse = g.querySelector("Ellipse");
+      const spline = g.querySelector("BSplineCurve");
+      const point = g.querySelector("GeomPoint");
+      if (point) {
+        // Points that belong to other geometry (an arc's centre, a spline's knots) are FreeCAD's own helpers.
+        if (g.querySelector("GeoExtension")?.getAttribute("internalGeometryType") === "0") entities.push({ id: newId(), mode: "add", type: "point", x: num(point, "X"), y: num(point, "Y") });
+        continue;
+      }
+      if (line) {
+        const a: Point2 = [num(line, "StartX"), num(line, "StartY")];
+        const b: Point2 = [num(line, "EndX"), num(line, "EndY")];
+        if (construction) guide(a, b);
+        else segs.push({ a, b, bend: 0 });
+      } else if (arc) {
+        const [cx, cy, r] = [num(arc, "CenterX"), num(arc, "CenterY"), num(arc, "Radius")];
+        let [s0, e0] = [num(arc, "StartAngle"), num(arc, "EndAngle")];
+        if (num(arc, "NormalZ") < 0) [s0, e0] = [-e0, -s0];
+        if (e0 < s0) e0 += 2 * Math.PI;
+        const at = (t: number): Point2 => [cx + r * Math.cos(t), cy + r * Math.sin(t)];
+        const [a, b, m] = [at(s0), at(e0), at((s0 + e0) / 2)];
+        // Its sagitta: how far its middle sits to the left of the chord from start to end.
+        const [dx, dy] = [b[0] - a[0], b[1] - a[1]];
+        const len = Math.hypot(dx, dy) || 1;
+        const bend = ((m[0] - (a[0] + b[0]) / 2) * -dy + (m[1] - (a[1] + b[1]) / 2) * dx) / len;
+        if (!construction) segs.push({ a, b, bend });
+      } else if (circle && !construction) {
+        entities.push({ id: newId(), mode: "add", type: "circle", x: num(circle, "CenterX"), y: num(circle, "CenterY"), radius: num(circle, "Radius") });
+      } else if (ellipse && !construction) {
+        entities.push({ id: newId(), mode: "add", type: "ellipse", x: num(ellipse, "CenterX"), y: num(ellipse, "CenterY"), rx: num(ellipse, "MajorRadius"), ry: num(ellipse, "MinorRadius"), angle: (num(ellipse, "AngleXU") * 180) / Math.PI });
+      } else if (spline && !construction) {
+        const poles = [...spline.querySelectorAll("Pole")].map((q) => ({ x: num(q, "X"), y: num(q, "Y"), w: num(q, "Weight") || 1 }));
+        const knots = [...spline.querySelectorAll("Knot")].flatMap((k) => Array<number>(Math.max(1, num(k, "Mult"))).fill(num(k, "Value")));
+        const degree = num(spline, "Degree");
+        if (poles.length < 2 || knots.length !== poles.length + degree + 1) continue;
+        const [u0, u1] = [knots[degree], knots[knots.length - degree - 1]];
+        const n = Math.max(12, poles.length * 6);
+        const pts = Array.from({ length: n + 1 }, (_, i) => bspline(poles, knots, degree, u0 + ((u1 - u0) * i) / n));
+        if (spline.getAttribute("IsPeriodic") === "1") entities.push({ id: newId(), mode: "add", type: "polygon", points: pts.slice(0, -1), bends: pts.slice(0, -1).map(() => 0) });
+        else segs.push({ a: pts[0], b: pts[n], bend: 0, via: pts.slice(1, -1) });
+      }
+    }
+    // Chain the lines, arcs and curves end to end into closed shapes.
+    const near = (p: Point2, q: Point2) => Math.hypot(p[0] - q[0], p[1] - q[1]) < 1e-3;
+    const used = new Set<number>();
+    for (let i = 0; i < segs.length; i++) {
+      if (used.has(i)) continue;
+      used.add(i);
+      const chain: Seg[] = [segs[i]];
+      for (;;) {
+        const end = chain.at(-1)!.b;
+        if (near(end, chain[0].a)) break;
+        const j = segs.findIndex((s, k) => !used.has(k) && (near(s.a, end) || near(s.b, end)));
+        if (j < 0) break;
+        used.add(j);
+        const s = segs[j];
+        chain.push(near(s.a, end) ? s : { a: s.b, b: s.a, bend: -s.bend, via: s.via?.slice().reverse() });
+      }
+      if (chain.length > 1 && near(chain.at(-1)!.b, chain[0].a)) {
+        const points: Point2[] = [];
+        const bends: number[] = [];
+        for (const s of chain) {
+          points.push(s.a);
+          bends.push(s.bend);
+          for (const v of s.via ?? []) (points.push(v), bends.push(0));
+        }
+        entities.push({ id: newId(), mode: "add", type: "polygon", points, bends });
+      } else
+        for (const s of chain) {
+          const pts = [s.a, ...(s.via ?? []), s.b];
+          for (let k = 0; k + 1 < pts.length; k++) guide(pts[k], pts[k + 1]);
+        }
+    }
+    if (!entities.length) continue;
+    // As in FreeCAD, a shape inside another is a hole in it (inside two, solid again, and so on).
+    const closed = entities.filter((en) => en.type === "polygon" || en.type === "circle" || en.type === "ellipse");
+    const someInside = (en: SketchEntity): Point2 => (en.type === "polygon" ? en.points[0] : en.type === "circle" || en.type === "ellipse" ? [en.x, en.y] : [0, 0]);
+    const contains = (outer: SketchEntity, [x, y]: Point2) => {
+      if (outer.type === "circle") return Math.hypot(x - outer.x, y - outer.y) < outer.radius;
+      if (outer.type === "ellipse") {
+        const t = (-outer.angle * Math.PI) / 180;
+        const [dx, dy] = [x - outer.x, y - outer.y];
+        const [u, v] = [dx * Math.cos(t) - dy * Math.sin(t), dx * Math.sin(t) + dy * Math.cos(t)];
+        return (u / outer.rx) ** 2 + (v / outer.ry) ** 2 < 1;
+      }
+      if (outer.type !== "polygon") return false;
+      let inside = false;
+      const pts = outer.points;
+      for (let i = 0, j = pts.length - 1; i < pts.length; j = i++)
+        if (pts[i][1] > y !== pts[j][1] > y && x < pts[j][0] + ((y - pts[j][1]) / (pts[i][1] - pts[j][1])) * (pts[i][0] - pts[j][0])) inside = !inside;
+      return inside;
+    };
+    for (const en of closed) {
+      const depth = closed.filter((o) => o !== en && contains(o, someInside(en))).length;
+      if (depth % 2 === 1) en.mode = "subtract";
+    }
+    const round = (v: number) => Math.round(v * 1e4) / 1e4 + 0;
+    for (const en of entities) {
+      if (en.type === "polygon") (en.points = en.points.map(([x, y]) => [round(x), round(y)])), (en.bends = en.bends.map(round));
+    }
+    // Its outline's box, in the world.
+    const xs: number[] = [];
+    const ys: number[] = [];
+    for (const en of entities) {
+      if (en.type === "polygon") for (const [x, y] of en.points) (xs.push(x), ys.push(y));
+      else if (en.type === "circle" || en.type === "point") (xs.push(en.x - (en.type === "circle" ? en.radius : 0), en.x + (en.type === "circle" ? en.radius : 0)), ys.push(en.y - (en.type === "circle" ? en.radius : 0), en.y + (en.type === "circle" ? en.radius : 0)));
+      else if (en.type === "ellipse") (xs.push(en.x - en.rx, en.x + en.rx), ys.push(en.y - en.rx, en.y + en.rx));
+      else if (en.type === "line") (xs.push(en.x1, en.x2), ys.push(en.y1, en.y2));
+    }
+    const min = [Infinity, Infinity, Infinity];
+    const max = [-Infinity, -Infinity, -Infinity];
+    for (const x of [Math.min(...xs), Math.max(...xs)])
+      for (const y of [Math.min(...ys), Math.max(...ys)]) {
+        const v = new Vector3(x, y, 0).applyMatrix4(world);
+        for (const [k, c] of [v.x, v.y, v.z].entries()) (min[k] = Math.min(min[k], c)), (max[k] = Math.max(max[k], c));
+      }
+    const pos = new Vector3().setFromMatrixPosition(world);
+    const rot = new Euler().setFromRotationMatrix(world, "ZYX");
+    const deg = (r: number) => Math.round(((r * 180) / Math.PI) * 1e4) / 1e4 + 0;
+    const label = p.get("Label")?.querySelector("String")?.getAttribute("value") || name;
+    const shown = p.get("Visibility")?.querySelector("Bool")?.getAttribute("value");
+    out.push({ name: label, hidden: shown === "false", position: { x: round(pos.x), y: round(pos.y), z: round(pos.z) }, rotation: { x: deg(rot.x), y: deg(rot.y), z: deg(rot.z) }, entities, min, max });
+  }
+  return out;
 }

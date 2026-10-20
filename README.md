@@ -86,7 +86,7 @@
 - Export **STEP** (for other CAD programs), **STL** (for 3D printing) and **3MF** (for slicers, one object per part,
   with colours). **Import** several files at once (or drop them on the window); they land side by side:
   - **STEP**, **FreeCAD (.FCStd)** and **BREP** as exact solids that can be holes, take fillets and be split
-    (FreeCAD files keep each visible object's name, colour and placement);
+    (FreeCAD files keep each visible object's name, colour and placement, and bring their sketches as flat drawings you can edit: lines and arcs as shapes, circles, ellipses and curves, holes inside shapes kept as holes);
   - **STL**, **3MF**, **OBJ** (with its .mtl), **PLY**, **OFF** and **glTF/GLB** meshes (3MF keeps part names, colours and layout).
     Closed meshes up to 200,000 triangles become solids with all the usual options (holes, fillets, chamfers, tapers,
     shells, textures): flat areas become single faces, curves keep their facets but are shaded smooth, and only real

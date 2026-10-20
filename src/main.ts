@@ -61,7 +61,7 @@ import {
 import { Box3, BufferAttribute, BufferGeometry, EdgesGeometry, Matrix4, Quaternion, Vector3 } from "three";
 import { CONSTRAINT_LABEL, constraintFits, measure as measureConstraint, refPoints as refPointsOf, solveSketch } from "./constraints";
 import { autosave, build3mf, loadAutosave, outlinesToEntities, parse3mf, parseStl, svgToEntities, type ImportedPart, type MeshPart } from "./fileFormats";
-import { parseDxf, parseFcstd, parseGltf, parseObj, parseOff, parsePly, stem, type PickedFile } from "./importFormats";
+import { fcstdSketches, parseDxf, parseFcstd, parseGltf, parseObj, parseOff, parsePly, stem, type PickedFile } from "./importFormats";
 import { SketchEditor, type MenuItem, type SketchTool } from "./sketcher";
 import { bounds as sketchBounds, gearOuterRadius, removePoint } from "./sketchGeometry";
 import { HEDRON_FACES, HEDRON_NAMES, type HedronFaces } from "./hedron";
@@ -5034,8 +5034,20 @@ async function importBatch(file: PickedFile, all: PickedFile[]): Promise<ImportB
       return solidBatch(title, file.name, await kernel.importSolids([{ name: title, format: "brep", data: file.data }]));
     case "fcstd": {
       const { sources, skipped } = await parseFcstd(file);
-      if (!sources.length) throw new Error(skipped ? "its shapes are saved in FreeCAD's binary format, which can't be read here. Export it from FreeCAD as STEP instead." : "it has no visible solid objects.");
-      const batch = await solidBatch(title, file.name, await kernel.importSolids(sources));
+      // Its sketches too, as flat drawings to edit (hidden if they were in FreeCAD), placed with the solids.
+      const sketches = (await fcstdSketches(file, newId).catch(() => [])).map((sk): Placed => {
+        const f = createFeature("sketch", doc.features) as SketchFeature;
+        Object.assign(f, { name: sk.name, position: sk.position, rotation: sk.rotation });
+        f.params.entities = sk.entities;
+        if (sk.hidden) f.hidden = true;
+        return { feature: f, min: sk.min, max: sk.max };
+      });
+      if (!sources.length && !sketches.length) throw new Error(skipped ? "its shapes are saved in FreeCAD's binary format, which can't be read here. Export it from FreeCAD as STEP instead." : "it has no visible solid objects.");
+      const parts = sources.length ? await kernel.importSolids(sources) : [];
+      const pieces = [...parts.map((p): Placed => (p.kind === "mesh" ? meshPiece(p, p.name) : solidPiece(p))), ...sketches];
+      const solids = parts.length;
+      const what = [solids && `${solids} solid${solids === 1 ? "" : "s"}`, sketches.length && `${sketches.length} sketch${sketches.length === 1 ? "" : "es"}`].filter(Boolean).join(" and ");
+      const batch = placeBatch(title, pieces, `${file.name}: ${what}${pieces.length > 1 ? " (grouped)" : ""}`, sketches.length ? `${SOLID_TAIL} FreeCAD's sketches come in as flat drawings (hidden if they were hidden there): double-click one to edit it, or extrude it.` : SOLID_TAIL);
       if (skipped) batch.note += ` (${skipped} object${skipped === 1 ? "" : "s"} in FreeCAD's binary format left out)`;
       return batch;
     }
