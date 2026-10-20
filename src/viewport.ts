@@ -387,6 +387,7 @@ export class Viewport {
     this.setupPointer();
     this.setupSculptPointer();
     this.setupSwingPointer();
+    this.setupChiselPointer();
     this.setupBoxSelect();
     new ResizeObserver(() => this.resize()).observe(container);
     this.resize();
@@ -1038,7 +1039,7 @@ export class Viewport {
       this.setLook(o, opacity, see);
     });
 
-    let target = !this.combined && !this.sketch && !this.edgePick && !this.sculpt && !this.placement && !this.measure && this.selectedId ? this.nodes.get(this.selectedId) : undefined;
+    let target = !this.combined && !this.sketch && !this.edgePick && !this.sculpt && !this.placement && !this.measure && !this.chisel && this.selectedId ? this.nodes.get(this.selectedId) : undefined;
     if (target && !isShown(target)) target = undefined; // No gizmo on a hidden object.
     const f = target ? this.features.get(this.selectedId!) : undefined;
     this.jointDrag = null;
@@ -1062,6 +1063,93 @@ export class Viewport {
     this.drawSnapDots();
     this.drawSection();
     this.drawSwing(target && f ? { f, node: target } : null);
+  }
+
+  // ---- Chisel: drag across an object's face to carve a groove -------------------------------------
+
+  private chisel: {
+    id: string;
+    onStroke: (points: Vec3[], normal: Vec3) => void;
+    /** The stroke being drawn: on the plane of the face it started on (world). */
+    stroke: { plane: THREE.Plane; points: THREE.Vector3[]; line: THREE.Line } | null;
+  } | null = null;
+
+  /** Carve object `id`: each drag across its surface hands back the stroke's points and the face's outward normal (world). */
+  startChisel(id: string, onStroke: (points: Vec3[], normal: Vec3) => void) {
+    this.stopChisel();
+    this.chisel = { id, onStroke, stroke: null };
+    this.renderer.domElement.style.cursor = "crosshair";
+    this.applyAppearance();
+  }
+
+  stopChisel() {
+    if (!this.chisel) return;
+    this.chisel.stroke?.line.removeFromParent();
+    if (this.chisel.stroke) disposeTree(this.chisel.stroke.line);
+    this.chisel = null;
+    this.renderer.domElement.style.cursor = "";
+    this.applyAppearance();
+  }
+
+  get chiseling(): string | null {
+    return this.chisel?.id ?? null;
+  }
+
+  private setupChiselPointer() {
+    // Capture phase on the container runs before OrbitControls sees the event: a drag on the object carves, elsewhere it turns the view.
+    const host = this.container;
+    host.addEventListener(
+      "pointerdown",
+      (e) => {
+        const c = this.chisel;
+        const node = c && this.nodes.get(c.id);
+        if (!c || !node || e.button !== 0 || e.target !== this.renderer.domElement) return;
+        this.raycaster.setFromCamera(this.ndc(e), this.camera);
+        const hit = this.raycaster.intersectObject(node, true).find((h) => h.object instanceof THREE.Mesh && h.face && isShown(h.object));
+        if (!hit) return;
+        e.stopPropagation();
+        this.renderer.domElement.setPointerCapture(e.pointerId);
+        const normal = hit.face!.normal.clone().transformDirection(hit.object.matrixWorld);
+        if (normal.dot(this.raycaster.ray.direction) > 0) normal.negate();
+        const line = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0xff8a00, depthTest: false, transparent: true }));
+        line.renderOrder = 34;
+        this.scene.add(line);
+        c.stroke = { plane: new THREE.Plane().setFromNormalAndCoplanarPoint(normal, hit.point), points: [hit.point.clone()], line };
+      },
+      true,
+    );
+    host.addEventListener(
+      "pointermove",
+      (e) => {
+        const st = this.chisel?.stroke;
+        if (!st) return;
+        e.stopPropagation();
+        this.raycaster.setFromCamera(this.ndc(e), this.camera);
+        const p = this.raycaster.ray.intersectPlane(st.plane, new THREE.Vector3());
+        // A point every half millimetre or so is plenty (the stroke is smoothed into a groove).
+        if (!p || p.distanceTo(st.points.at(-1)!) < 0.5) return;
+        st.points.push(p);
+        st.line.geometry.dispose();
+        st.line.geometry = new THREE.BufferGeometry().setFromPoints(st.points);
+        this.needsRender = true;
+      },
+      true,
+    );
+    const finish = (e: PointerEvent) => {
+      const c = this.chisel;
+      const st = c?.stroke;
+      if (!c || !st) return;
+      e.stopPropagation();
+      c.stroke = null;
+      st.line.removeFromParent();
+      disposeTree(st.line);
+      this.needsRender = true;
+      if (st.points.length < 2) return;
+      const v = (p: THREE.Vector3) => ({ x: p.x, y: p.y, z: p.z });
+      c.onStroke(st.points.map(v), v(st.plane.normal));
+    };
+    host.addEventListener("pointerup", finish, true);
+    host.addEventListener("pointercancel", finish, true);
   }
 
   // ---- A swept clearance cut's swing: its arc (or slide), with a handle at each end to drag ----------

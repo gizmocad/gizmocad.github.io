@@ -2,7 +2,7 @@
 
 import opencascade from "replicad-opencascadejs";
 import wasmUrl from "replicad-opencascadejs/wasm?url";
-import { EdgeFinder, type Edge, assembleWire, cast, deserializeShape, draw, drawCircle, drawEllipse, drawText, genericSweep, getOC, importSTEP, loadFont, makeBaseBox, makeBox, makeCircle, makeCompound, makeCylinder, makeHelix, makeLine, makeEllipsoid, makePolygon, makeSolid, makeSphere, setOC, type Drawing, type Shape3D } from "replicad";
+import { measureVolume, EdgeFinder, type Edge, assembleWire, cast, deserializeShape, draw, drawCircle, drawEllipse, drawText, genericSweep, getOC, importSTEP, loadFont, makeBaseBox, makeBox, makeCircle, makeCompound, makeCylinder, makeHelix, makeLine, makeEllipsoid, makePolygon, makeSolid, makeSphere, setOC, type Drawing, type Shape3D } from "replicad";
 import {
   PLANE_ROTATIONS,
   SCREW_SIZES,
@@ -2561,6 +2561,37 @@ function booleanSafe(a: Shape3D, b: Shape3D, op: "fuse" | "cut"): Shape3D {
   }
 }
 
+/** The volume a closed set of triangles holds. */
+function meshVolume(m: { vertices: ArrayLike<number>; triangles: ArrayLike<number> }): number {
+  const { vertices: v, triangles: t } = m;
+  let sum = 0;
+  for (let i = 0; i < t.length; i += 3) {
+    const [a, b, c] = [t[i] * 3, t[i + 1] * 3, t[i + 2] * 3];
+    sum += v[a] * (v[b + 1] * v[c + 2] - v[b + 2] * v[c + 1]) - v[a + 1] * (v[b] * v[c + 2] - v[b + 2] * v[c]) + v[a + 2] * (v[b] * v[c + 1] - v[b + 1] * v[c]);
+  }
+  return sum / 6;
+}
+
+/**
+ * A finished model's triangles for an STL. OpenCascade's meshing can leave
+ * faces out of a tricky solid (a groove rounded along a curve), giving an open
+ * mesh: if its volume doesn't match the solid's, the model is cut as triangles
+ * instead (as the view does).
+ */
+function stlTriangles(shape: Shape3D, features: Feature[], withoutTextured = false): { vertices: ArrayLike<number>; triangles: ArrayLike<number> } {
+  const m = shape.mesh({ tolerance: 0.01, angularTolerance: 0.1 });
+  const exact = measureVolume(shape);
+  if (Math.abs(meshVolume(m) - exact) <= Math.abs(exact) * 0.002 + 0.05) return m;
+  // Textured objects go in as their own meshes (see the export), so they're left out here too.
+  const was = excludeTextured;
+  excludeTextured = withoutTextured;
+  try {
+    return logged("mesh the model as triangles (the exact solid's mesh had gaps)", () => branchTriangles(features, null)) ?? m;
+  } finally {
+    excludeTextured = was;
+  }
+}
+
 /** A quick fingerprint of a long string (a mesh's data), for cache keys. */
 function fingerprint(text: string): string {
   let h = 2166136261;
@@ -2948,7 +2979,7 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
         blob = stlBlob(meshes);
       } else if (roots.length) {
         const meshes: { vertices: ArrayLike<number>; triangles: ArrayLike<number> }[] = [];
-        if (shape) meshes.push(shape.mesh({ tolerance: 0.01, angularTolerance: 0.1 }));
+        if (shape) meshes.push(stlTriangles(shape, req.features, true));
         for (const f of roots) {
           const t = texturedWorld(req.features, f as Feature & { texture: NonNullable<Feature["texture"]> });
           if (t) meshes.push(t);
@@ -2957,7 +2988,7 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
         blob = stlBlob(meshes);
       } else {
         if (!shape) throw new Error("Nothing to export: add at least one solid shape.");
-        blob = req.format === "step" ? shape.blobSTEP() : shape.blobSTL({ binary: true, tolerance: 0.01, angularTolerance: 0.1 });
+        blob = req.format === "step" ? shape.blobSTEP() : stlBlob([stlTriangles(shape, req.features)]);
       }
       // Anything that couldn't be built is missing from the file: say so rather than export it quietly without.
       const missing = Object.entries(failures).map(([id, why]) => `${req.features.find((f) => f.id === id)?.name ?? id} (${why})`);

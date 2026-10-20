@@ -494,6 +494,7 @@ function selectObject(id: string | null, additive = false) {
   if (sculptingId && id !== sculptingId) stopSculpt();
   if (editingSketchId && id !== editingSketchId) stopSketchEdit();
   if (edgePick && id !== edgePick.featureId) stopEdgePick();
+  if (viewport.chiseling && id !== viewport.chiseling) stopChisel();
   selectedId = id;
   renderPanels();
   viewport.select(id, selectedIds);
@@ -2427,6 +2428,119 @@ function sweepClearanceCut(id: string) {
   });
 }
 
+// ---- Chisel ------------------------------------------------------------------------------
+
+type ChiselTip = "flat" | "v" | "round";
+/** The chisel's settings, kept for the next groove. */
+const chisel: { width: number; depth: number; tip: ChiselTip } = { width: 3, depth: 2, tip: "round" };
+
+/** Carve grooves into an object by dragging across it. */
+function chiselSection(f: Feature): HTMLElement[] {
+  const on = viewport.chiseling === f.id;
+  const toggle = button(on ? "Stop chiselling" : "🪓 Chisel", () => (on ? stopChisel() : startChisel(f.id)), on ? "primary wide" : "wide");
+  toggle.title = "Drag across this object to carve a groove into it (each stroke is a hole you can change or delete)";
+  const items: HTMLElement[] = [section("Chisel"), toggle];
+  if (on) {
+    items.push(
+      lengthField("Width", chisel.width, (v) => ((chisel.width = Math.max(0.1, v)), renderProperties())),
+      lengthField("Depth", chisel.depth, (v) => ((chisel.depth = Math.max(0.05, v)), renderProperties())),
+      labeled(
+        "Tip",
+        segmented(
+          [
+            { value: "flat" as const, label: "Flat", title: "Square-bottomed groove" },
+            { value: "v" as const, label: "V", title: "V-shaped groove" },
+            { value: "round" as const, label: "Round", title: "Round-bottomed groove" },
+          ],
+          chisel.tip,
+          (tip) => ((chisel.tip = tip), renderProperties()),
+        ),
+      ),
+      hint("Drag across a face to carve a groove; it follows that face's flat plane. Each stroke is a hole inside this object (its sketch can be edited). Esc to stop."),
+    );
+  }
+  return items;
+}
+
+function startChisel(id: string) {
+  stopSketchEdit();
+  stopEdgePick();
+  viewport.startChisel(id, (points, normal) => carveGroove(id, points, normal));
+  setStatus("Chisel: drag across the object to carve a groove. Esc to stop.");
+  renderPanels();
+}
+
+function stopChisel() {
+  if (!viewport.chiseling) return;
+  viewport.stopChisel();
+  setStatus("");
+  renderPanels();
+}
+
+/** A path with the points that stray under `tol` from the line between their neighbours left out (Ramer–Douglas–Peucker). */
+function simplifyPath(pts: [number, number][], tol: number): [number, number][] {
+  if (pts.length < 3) return pts;
+  const keep = new Uint8Array(pts.length);
+  keep[0] = keep[pts.length - 1] = 1;
+  const stack: [number, number][] = [[0, pts.length - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop()!;
+    const [ax, ay] = pts[a];
+    const [dx, dy] = [pts[b][0] - ax, pts[b][1] - ay];
+    const len = Math.hypot(dx, dy) || 1;
+    let far = -1;
+    let farDist = tol;
+    for (let i = a + 1; i < b; i++) {
+      const d = Math.abs((pts[i][0] - ax) * dy - (pts[i][1] - ay) * dx) / len;
+      if (d > farDist) [far, farDist] = [i, d];
+    }
+    if (far < 0) continue;
+    keep[far] = 1;
+    stack.push([a, far], [far, b]);
+  }
+  return pts.filter((_, i) => keep[i]);
+}
+
+/** A groove along a stroke (world points on a face's plane, and its outward normal): a sketch stroke cut into the object as a hole. */
+function carveGroove(id: string, points: Vec3[], normal: Vec3) {
+  const target = findFeature(id);
+  if (!target) return;
+  const { width, depth, tip } = chisel;
+  // The groove's frame: Z into the object, X along the stroke's start, on the face where the stroke began.
+  const z = new Vector3(-normal.x, -normal.y, -normal.z).normalize();
+  const origin = new Vector3(points[0].x, points[0].y, points[0].z);
+  const along = new Vector3(points.at(-1)!.x, points.at(-1)!.y, points.at(-1)!.z).sub(origin);
+  let x = along.sub(z.clone().multiplyScalar(along.dot(z)));
+  if (x.lengthSq() < 1e-9) x = Math.abs(z.x) < 0.9 ? new Vector3(1, 0, 0) : new Vector3(0, 1, 0);
+  x = x.sub(z.clone().multiplyScalar(x.dot(z))).normalize();
+  const y = z.clone().cross(x);
+  const world = new Matrix4().makeBasis(x, y, z).setPosition(origin);
+  const r2 = (v: number) => Math.round(v * 100) / 100 + 0;
+  // Thinned to the corners that matter (within 0.1 mm of the drag): a point every half millimetre makes
+  // dozens of tiny faces, which a rounded or V tip can't follow cleanly.
+  const uv = simplifyPath(
+    points.map((p) => {
+      const d = new Vector3(p.x, p.y, p.z).sub(origin);
+      return [d.dot(x), d.dot(y)] as [number, number];
+    }),
+    0.1,
+  ).map(([u, v]) => [r2(u), r2(v)] as [number, number]);
+  const groove = createFeature("sketch", doc.features, id) as SketchFeature;
+  const n = doc.features.filter((f) => f.name.startsWith("Groove ")).length + 1;
+  // Starts a little outside the face, so the cut opens cleanly through it.
+  const lip = 0.05;
+  Object.assign(groove, { name: `Groove ${n}`, mode: "hole" as const });
+  groove.params = { ...groove.params, operation: "extrude", offset: -lip, depth: depth + lip, direction: "normal", entities: [{ id: newId(), mode: "add", type: "stroke", points: uv, width }] };
+  // The tip: a V is the floor's edges chamfered to a point, a round one filleted to a half circle.
+  const size = Math.min(width * 0.49, depth * 0.98);
+  if (tip !== "flat") groove.edgeOps = [{ id: newId(), type: tip === "v" ? "chamfer" : "fillet", size, target: "top", points: [] }];
+  commit((features) => {
+    insertFeatures(features, [groove]);
+    setWorldMatrix(features, groove.id, world);
+  });
+  setNotice(`Carved ${groove.name} (${fmt(width)} mm wide, ${fmt(depth)} mm deep) into ${target.name}. Keep dragging for more; Esc to stop.`);
+}
+
 /** Which holes cut this object: untick one and it leaves this object (and everything inside it) alone. */
 function holesSection(f: Feature, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
   const holes = holesReaching(activeFeatures(doc.features), f);
@@ -2802,6 +2916,7 @@ function renderPropertiesPanel() {
     );
     items.push(mode, ...(f.mode === "hole" ? fitSection(f, update) : [...combineSection(f, update), ...fitSection(f, update)]));
   }
+  if (f.mode === "solid" && f.kind !== "plane" && f.kind !== "sculpt" && !(f.kind === "sketch" && f.params.operation === "flat")) items.push(...chiselSection(f));
 
   if (f.kind === "sculpt") {
     const solid = button("◆ Make it a solid", () => void convertToSolid(f.id), "wide");
@@ -4765,7 +4880,8 @@ window.addEventListener("keydown", (e) => {
   } else if (e.key === "Delete" || e.key === "Backspace") {
     deleteSelected();
   } else if (e.key === "Escape") {
-    if (edgePick) stopEdgePick();
+    if (viewport.chiseling) stopChisel();
+    else if (edgePick) stopEdgePick();
     else selectObject(null);
   }
 });

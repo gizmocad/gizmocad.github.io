@@ -91,6 +91,7 @@
 - **Exports** hold just the selected objects (with the holes that reach them still cut) when something is selected, or the whole model when nothing is.
 - **Combine:** select several objects and click **⧉ Combine** to join them into one shape (it shows, rounds and exports as one solid). A group's **Combine into one shape** switch turns this on or off.
 - **Folders:** groups (Group button, Ctrl+G, or drag objects onto each other in the list) fold shut with the ▾ arrow beside them.
+- **Chisel:** on a solid, **Chisel** then drag across a face to carve a groove (set its width, depth and Flat, V or Round tip). Each stroke is a hole inside the object whose sketch can be edited.
 - **Clearance:** a hole can grow by a set amount on every side, so a part the same shape fits into what it cuts.
   On a solid, **Make a clearance cut** adds a copy of it as a hole 0.2 mm bigger all round that cuts what it sits in but not itself.
   On a group (or an object with parts inside it) the cut is one hole around all of it.
