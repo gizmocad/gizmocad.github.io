@@ -738,16 +738,95 @@ function ownTriangles(f: Feature): WorldMesh | null {
 function sweptTriangles(f: Feature, unswept?: Shape3D): WorldMesh {
   const s = sweepOf(f)!;
   const key = JSON.stringify([f.kind, keyParams(f), f.edgeOps, f.clips ?? [], f.shell ?? null, f.tilt ?? null]);
-  let w = sweptCache.get(key);
+  let w = sweptCache.get(key) ?? keptResult<WorldMesh>("sweeps", key);
   if (!w) {
     const base = f.kind === "imported" && plainFaceted(f) ? facetGrown(f) : shapeTriangles(unswept ?? buildOwn(f, false)!);
     w = logged(`sweep the hole through ${fmtRange(s)}`, () => sweepMesh(base, s, clearanceOf(f)));
+    keepResult("sweeps", key, w);
+  }
+  if (!sweptCache.has(key)) {
     sweptCache.set(key, w);
     if (sweptCache.size > 16) sweptCache.delete(sweptCache.keys().next().value!);
   }
   return w;
 }
 const sweptCache = new Map<string, WorldMesh>();
+
+// ---- Results kept between visits --------------------------------------------------------
+//
+// A sweep, or cutting the holes into a big imported part, can take seconds, and
+// reloading the page would redo them. Finished ones are kept in this browser
+// (IndexedDB), by everything that shapes them, and read back when the worker
+// starts. Bump KEPT_VERSION when how they're made changes.
+
+const KEPT_VERSION = 3;
+const KEPT_LIMIT = { sweeps: 12, cuts: 16 } as const;
+type KeptStore = keyof typeof KEPT_LIMIT;
+const kept: Record<KeptStore, Map<string, unknown>> = { sweeps: new Map(), cuts: new Map() };
+/** Each store's full keys, oldest first (to know what to drop without reading the entries back). */
+const keptOrder: Record<KeptStore, string[]> = { sweeps: [], cuts: [] };
+let keptDb: IDBDatabase | null = null;
+
+/** A short name for a long key (53-bit string hash; the full key is kept with each entry). */
+function hashKey(text: string): string {
+  let h1 = 0xdeadbeef ^ text.length;
+  let h2 = 0x41c6ce57 ^ text.length;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 2654435761);
+    h2 = Math.imul(h2 ^ c, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+}
+
+type KeptEntry = { key: string; value: unknown; at: number };
+
+const idb = <T>(r: IDBRequest<T>) => new Promise<T>((resolve, reject) => ((r.onsuccess = () => resolve(r.result)), (r.onerror = () => reject(r.error))));
+
+/** Read what's kept (nothing, quietly, where the browser won't keep it: a private window). */
+const keptLoaded = (async () => {
+  try {
+    const open = indexedDB.open("gizmocad-kept", 1);
+    open.onupgradeneeded = () => {
+      for (const name of Object.keys(KEPT_LIMIT)) open.result.createObjectStore(name);
+    };
+    keptDb = await idb(open);
+    for (const name of Object.keys(KEPT_LIMIT) as KeptStore[]) {
+      const all = (await idb(keptDb.transaction(name).objectStore(name).getAll())) as KeptEntry[];
+      for (const e of all.sort((a, b) => a.at - b.at)) {
+        kept[name].set(e.key, e.value);
+        keptOrder[name].push(e.key);
+      }
+    }
+  } catch {
+    keptDb = null;
+  }
+})();
+
+/** A result kept from an earlier visit. */
+const keptResult = <T>(store: KeptStore, key: string) => kept[store].get(`${KEPT_VERSION}|${key}`) as T | undefined;
+
+/** Keep a finished result for later visits (past the store's limit, the oldest go). */
+function keepResult(store: KeptStore, key: string, value: unknown) {
+  const full = `${KEPT_VERSION}|${key}`;
+  const order = keptOrder[store];
+  const at = order.indexOf(full);
+  if (at >= 0) order.splice(at, 1);
+  order.push(full);
+  kept[store].set(full, value);
+  const gone = order.splice(0, Math.max(0, order.length - KEPT_LIMIT[store]));
+  for (const old of gone) kept[store].delete(old);
+  if (!keptDb) return;
+  try {
+    const os = keptDb.transaction(store, "readwrite").objectStore(store);
+    os.put({ key: full, value, at: Date.now() } satisfies KeptEntry, hashKey(full));
+    for (const old of gone) os.delete(hashKey(old));
+  } catch {
+    // Not kept: it's only a speed-up.
+  }
+}
 
 const fmtRange = (s: Sweep) => `${s.from} to ${s.to}${s.joint.type === "slider" ? " mm" : "°"}`;
 
@@ -1983,11 +2062,14 @@ function groupTriangles(features: Feature[], f: Feature): WorldMesh | null {
   unswept = true;
   try {
     const key = `group|${branchKey(features, f)}`;
-    let w = sweptCache.get(key);
+    let w = sweptCache.get(key) ?? keptResult<WorldMesh>("sweeps", key);
     if (!w) {
       const base = groupTriangles(features, f);
       if (!base) return null;
       w = logged(`${f.name}: sweep the hole through ${fmtRange(s)}`, () => sweepMesh(base, s, clearanceOf(f)));
+      keepResult("sweeps", key, w);
+    }
+    if (!sweptCache.has(key)) {
       sweptCache.set(key, w);
       if (sweptCache.size > 16) sweptCache.delete(sweptCache.keys().next().value!);
     }
@@ -2201,6 +2283,8 @@ function cutMesh(features: Feature[], f: Feature): MeshData | null {
     holes.map((h) => [geometryKey(features, h.id), worldMatrix(features, h.id).elements.map(r6)]),
     isTextured(f) ? f.texture : null,
   ]);
+  const keptCut = cutCache.has(key) ? undefined : keptResult<MeshData>("cuts", key);
+  if (keptCut) cutCache.set(key, { mesh: keptCut });
   if (!cutCache.has(key)) {
     const outerFailures = failures;
     failures = {};
@@ -2269,6 +2353,7 @@ function cutMesh(features: Feature[], f: Feature): MeshData | null {
       failures = outerFailures;
     }
     cutCache.set(key, { mesh, error });
+    if (mesh && !error) keepResult("cuts", key, mesh);
     // Moving a cut object makes a new entry each time, and a big part's mesh is megabytes: keep the recent few.
     if (cutCache.size > 40) cutCache.delete(cutCache.keys().next().value!);
   }
@@ -2651,6 +2736,7 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
   const req = event.data;
   try {
     await ready;
+    await keptLoaded;
     adjusted = {};
     facetMigrations = {};
     excludeTextured = false; // In case an earlier request stopped half way.
@@ -2896,6 +2982,9 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
     post({ type: "error", requestId: req.requestId, message: message(err) });
   }
 };
+
+// The mesh library loads alongside OpenCascade (most models need it on their first build).
+void manifold().then((m) => (manifoldReady ??= m));
 
 ready.then(
   () => post({ type: "ready" }),
