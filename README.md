@@ -52,6 +52,7 @@
 - **Split & dividers:** cut any shape or sketch into pieces along X, Y or Z, tilted at any angle, with as many parallel
   cuts as you like (drag each cut's arrow or type it, or space them evenly; all pieces stay editable),
   or add evenly spaced divider walls (count, thickness, height), e.g. inside a tray.
+  **Alignment pins** on a split: each cut gets dowel holes (placed inside the cut face, as far apart as they fit) in both pieces, and the pins to print go beside the model.
   In sketches, the Trim tool (T) merges shapes where you click an edge inside another shape, trims off the part of a shape sticking out
   of another when you click its outside edge, cuts a shape along a guide line (dropping the side you click), or trims a guide line back
   to its crossings, and "Trim overlaps" merges all selected overlapping shapes. The Split tool (X) cuts a line or brush stroke in two, or adds a corner to a shape's edge.

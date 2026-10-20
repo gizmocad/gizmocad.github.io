@@ -1712,6 +1712,37 @@ export class Viewport {
     this.applyAppearance();
   }
 
+  /** Where object `id` (and what's inside it, as shown) crosses a plane: line segments (world). */
+  crossSection(id: string, point: Vec3, normal: Vec3): [Vec3, Vec3][] {
+    const node = this.nodes.get(id);
+    if (!node) return [];
+    node.updateMatrixWorld(true);
+    const n = new THREE.Vector3(normal.x, normal.y, normal.z).normalize();
+    const d0 = n.dot(new THREE.Vector3(point.x, point.y, point.z));
+    const out: [Vec3, Vec3][] = [];
+    const [a, b, c] = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+    const v = (p: THREE.Vector3) => ({ x: p.x, y: p.y, z: p.z });
+    node.traverse((o) => {
+      if (!(o instanceof THREE.Mesh) || !o.userData.id || this.features.get(o.userData.id)?.mode === "hole") return;
+      const pos = o.geometry.getAttribute("position");
+      const index = o.geometry.getIndex();
+      const count = index ? index.count : pos.count;
+      for (let i = 0; i < count; i += 3) {
+        const at = (k: number, into: THREE.Vector3) => into.fromBufferAttribute(pos, index ? index.getX(i + k) : i + k).applyMatrix4(o.matrixWorld);
+        const corners = [at(0, a), at(1, b), at(2, c)];
+        const side = corners.map((p) => n.dot(p) - d0);
+        const hits: THREE.Vector3[] = [];
+        for (let k = 0; k < 3; k++) {
+          const [p, q] = [corners[k], corners[(k + 1) % 3]];
+          const [sp, sq] = [side[k], side[(k + 1) % 3]];
+          if ((sp < 0) !== (sq < 0)) hits.push(p.clone().lerp(q, sp / (sp - sq)));
+        }
+        if (hits.length === 2) out.push([v(hits[0]), v(hits[1])]);
+      }
+    });
+    return out;
+  }
+
   // ---- Print check: overhangs and thin walls ------------------------------------------
 
   private printCheckOn = false;

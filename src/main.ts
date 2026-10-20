@@ -115,7 +115,9 @@ type Axis = "x" | "y" | "z";
  * `tilt` degrees towards `toward`; `cuts` are positions along the cut normal
  * and `active` is the one the arrow drags.
  */
-let splitDraft: { id: string; axis: Axis; tilt: number; toward: Axis; cuts: number[]; active: number } | null = null;
+let splitDraft: { id: string; axis: Axis; tilt: number; toward: Axis; cuts: number[]; active: number; pins?: number } | null = null;
+/** Dowel pins for splits: diameter, how deep each hole goes into each piece, and the holes' extra width. */
+const dowel = { diameter: 3, depth: 5, play: 0.15 };
 let dividerDraft: { id: string; axis: "x" | "y"; count: number; thickness: number; height: number } | null = null;
 
 /** The sketch currently being edited, if any. */
@@ -2668,6 +2670,16 @@ function cutSection(f: Feature): HTMLElement[] {
       });
       items.push(field);
     });
+    items.push(
+      lengthField("Alignment pins", d.pins ?? 0, (v) => ((d.pins = Math.max(0, Math.min(6, Math.round(v)))), renderProperties()), { plain: true }),
+      ...(d.pins
+        ? [
+            lengthField("Pin diameter", dowel.diameter, (v) => ((dowel.diameter = Math.max(0.5, v)), renderProperties())),
+            lengthField("Pin depth", dowel.depth, (v) => ((dowel.depth = Math.max(0.5, v)), renderProperties())),
+            hint(`Each cut gets ${d.pins} pin hole${d.pins > 1 ? "s" : ""} ${fmt(dowel.diameter + dowel.play)} mm wide, ${fmt(dowel.depth)} mm into each piece, and the pins to print (${fmt(dowel.diameter)} mm × ${fmt(dowel.depth * 2 - 0.5)} mm) go beside the model. 1.75 mm filament or steel dowels work too.`),
+          ]
+        : []),
+    );
     const tools = document.createElement("div");
     tools.className = "actions";
     const add = button("+ Cut", () => {
@@ -2857,17 +2869,120 @@ function splitObject(id: string, d: NonNullable<typeof splitDraft>) {
     root.clips = [...(f.clips ?? []), clip(cuts[i], "above"), ...(i + 1 < cuts.length ? [clip(cuts[i + 1], "below")] : [])];
     return clones;
   });
+  // Pins: where each cut crosses the object (worked out now, while it's whole), holes in the pieces either side.
+  const world = worldMatrix(doc.features, id);
+  const n = new Vector3(normal?.x ?? (d.axis === "x" ? 1 : 0), normal?.y ?? (d.axis === "y" ? 1 : 0), normal?.z ?? (d.axis === "z" ? 1 : 0));
+  const worldN = n.clone().transformDirection(world);
+  const pinSpots = d.pins ? cuts.map((at) => pinPositions(id, n.clone().multiplyScalar(at).applyMatrix4(world), worldN, d.pins!)) : [];
+  const allPieces = [[id], ...pieces.map((c) => [c[0].id])];
   commit((features) => {
     const orig = features.find((x) => x.id === id)!;
     orig.name = `${name} A`;
     orig.clips = [...(orig.clips ?? []), clip(cuts[0], "below")];
     for (const clones of pieces) insertFeatures(features, clones);
+    // A hole through the cut for each pin, in both pieces it joins (each keeps only its own side of it).
+    const holes: Feature[] = [];
+    pinSpots.forEach((spots, k) => {
+      for (const spot of spots)
+        for (const [pieceId] of [allPieces[k], allPieces[k + 1]]) {
+          const h = createFeature("cylinder", features, pieceId);
+          Object.assign(h, { name: "Pin hole", mode: "hole" as const, params: { ...h.params, radius: (dowel.diameter + dowel.play) / 2, radiusY: (dowel.diameter + dowel.play) / 2, height: dowel.depth * 2 } });
+          insertFeatures(features, [h]);
+          setWorldMatrix(features, h.id, alongAxis(spot, worldN).multiply(new Matrix4().makeTranslation(0, 0, -dowel.depth)));
+          holes.push(h);
+        }
+    });
+    // The pins to print: upright beside the model.
+    const count = pinSpots.flat().length;
+    if (count) {
+      const box = viewport.modelBounds(new Set([id]));
+      const group = createFeature("group", features, null);
+      group.name = "Dowel pins";
+      insertFeatures(features, [group]);
+      setWorldMatrix(features, group.id, new Matrix4().makeTranslation((box?.max.x ?? 0) + 10, box?.min.y ?? 0, 0));
+      for (let i = 0; i < count; i++) {
+        const pin = createFeature("cylinder", features, group.id);
+        const r = dowel.diameter / 2;
+        Object.assign(pin, { name: `Pin ${i + 1}`, position: { x: 0, y: i * (dowel.diameter + 4), z: 0 }, params: { ...pin.params, radius: r, radiusY: r, height: dowel.depth * 2 - 0.5 } });
+        // A small chamfer on both ends, so it starts into its holes easily.
+        pin.edgeOps = [{ id: newId(), type: "chamfer", size: Math.min(0.3, r / 3), target: "all", points: [] }];
+        insertFeatures(features, [pin]);
+      }
+    }
   });
   splitDraft = null;
   selectedId = pieces[0][0].id;
   selectedIds = [selectedId];
   renderPanels();
-  setNotice(`Split ${name} into ${cuts.length + 1} pieces (A–${letter(cuts.length)}). Move any piece to pull them apart.`);
+  const pinCount = pinSpots.flat().length;
+  const missing = d.pins ? cuts.length * d.pins - pinCount : 0;
+  setNotice(
+    `Split ${name} into ${cuts.length + 1} pieces (A–${letter(cuts.length)}). Move any piece to pull them apart.` +
+      (pinCount ? ` ${pinCount} pin hole${pinCount > 1 ? "s" : ""} in each joint face, and the pins to print are in “Dowel pins”.` : "") +
+      (missing > 0 ? ` (${missing} pin${missing > 1 ? "s" : ""} didn't fit: the cut face is too narrow there.)` : ""),
+  );
+}
+
+/** A frame at `point` whose Z points along `dir` (world). */
+function alongAxis(point: Vector3, dir: Vector3): Matrix4 {
+  const z = dir.clone().normalize();
+  const x = Math.abs(z.x) < 0.9 ? new Vector3(1, 0, 0) : new Vector3(0, 1, 0);
+  x.sub(z.clone().multiplyScalar(x.dot(z))).normalize();
+  return new Matrix4().makeBasis(x, z.clone().cross(x), z).setPosition(point);
+}
+
+/**
+ * Where to put `count` pins on a cut through an object (world): inside its
+ * cross-section, at least a pin's width plus 1.2 mm from the edge, spread as
+ * far apart as they go (the first where there's most room).
+ */
+function pinPositions(id: string, point: Vector3, normal: Vector3, count: number): Vector3[] {
+  const segs = viewport.crossSection(id, point, normal);
+  if (!segs.length) return [];
+  const frame = alongAxis(point, normal);
+  const toPlane = frame.clone().invert();
+  const flat = segs.map(([a, b]) => [new Vector3(a.x, a.y, a.z).applyMatrix4(toPlane), new Vector3(b.x, b.y, b.z).applyMatrix4(toPlane)] as const);
+  const lo = [Infinity, Infinity];
+  const hi = [-Infinity, -Infinity];
+  for (const s of flat) for (const p of s) (lo[0] = Math.min(lo[0], p.x)), (lo[1] = Math.min(lo[1], p.y)), (hi[0] = Math.max(hi[0], p.x)), (hi[1] = Math.max(hi[1], p.y));
+  const inside = (x: number, y: number) => {
+    let crossings = 0;
+    for (const [a, b] of flat) if ((a.y > y) !== (b.y > y) && x < a.x + ((y - a.y) / (b.y - a.y)) * (b.x - a.x)) crossings++;
+    return crossings % 2 === 1;
+  };
+  const room = (x: number, y: number) => {
+    let best = Infinity;
+    for (const [a, b] of flat) {
+      const [dx, dy] = [b.x - a.x, b.y - a.y];
+      const t = Math.max(0, Math.min(1, ((x - a.x) * dx + (y - a.y) * dy) / (dx * dx + dy * dy || 1)));
+      best = Math.min(best, Math.hypot(x - a.x - t * dx, y - a.y - t * dy));
+    }
+    return best;
+  };
+  const need = dowel.diameter / 2 + dowel.play + 1.2;
+  const step = Math.max(hi[0] - lo[0], hi[1] - lo[1]) / 40;
+  const spots: { x: number; y: number; room: number }[] = [];
+  for (let x = lo[0] + step / 2; x < hi[0]; x += step)
+    for (let y = lo[1] + step / 2; y < hi[1]; y += step) {
+      if (!inside(x, y)) continue;
+      const r = room(x, y);
+      if (r >= need) spots.push({ x, y, room: r });
+    }
+  if (!spots.length) return [];
+  // One pin: where there's most room. More: from the far end, each next as far as it can be from those chosen.
+  const [mx, my] = [spots.reduce((t, s) => t + s.x, 0) / spots.length, spots.reduce((t, s) => t + s.y, 0) / spots.length];
+  const chosen = [count === 1 ? spots.reduce((a, b) => (b.room > a.room ? b : a)) : spots.reduce((a, b) => (Math.hypot(b.x - mx, b.y - my) > Math.hypot(a.x - mx, a.y - my) ? b : a))];
+  while (chosen.length < count) {
+    let far: (typeof spots)[number] | null = null;
+    let farDist = 2 * need;
+    for (const s of spots) {
+      const dist = Math.min(...chosen.map((c) => Math.hypot(c.x - s.x, c.y - s.y)));
+      if (dist > farDist) [far, farDist] = [s, dist];
+    }
+    if (!far) break;
+    chosen.push(far);
+  }
+  return chosen.map((c) => new Vector3(c.x, c.y, 0).applyMatrix4(frame));
 }
 
 /**
