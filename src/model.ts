@@ -695,17 +695,17 @@ export function childrenOf(features: Feature[], parentId: string | null): Featur
 
 /** The ids of `id` and everything below it. */
 export function subtreeIds(features: Feature[], id: string): Set<string> {
-  const ids = new Set([id]);
-  let grew = true;
-  while (grew) {
-    grew = false;
-    for (const f of features) {
-      if (f.parentId && ids.has(f.parentId) && !ids.has(f.id)) {
-        ids.add(f.id);
-        grew = true;
-      }
-    }
+  // One pass to list each object's children, then down the tree from `id`.
+  const kids = new Map<string, string[]>();
+  for (const f of features) {
+    if (!f.parentId) continue;
+    const list = kids.get(f.parentId);
+    if (list) list.push(f.id);
+    else kids.set(f.parentId, [f.id]);
   }
+  const ids = new Set([id]);
+  const stack = [id];
+  while (stack.length) for (const c of kids.get(stack.pop()!) ?? []) if (!ids.has(c)) (ids.add(c), stack.push(c));
   return ids;
 }
 
@@ -1002,11 +1002,8 @@ export function ignoresHole(features: Feature[], f: Feature, holeId: string): bo
 export function colourOf(features: Iterable<Feature>, f: Feature): string | undefined {
   if (f.color || f.kind !== "group") return f.color;
   const all = [...features];
-  const inside = (x: Feature) => {
-    for (let p = x.parentId; p; p = all.find((y) => y.id === p)?.parentId ?? null) if (p === f.id) return true;
-    return false;
-  };
-  const parts = all.filter((x) => x.kind !== "group" && x.mode === "solid" && inside(x));
+  const inside = subtreeIds(all, f.id);
+  const parts = all.filter((x) => x.kind !== "group" && x.mode === "solid" && x.id !== f.id && inside.has(x.id));
   const colours = new Set(parts.map((x) => x.color));
   if (colours.size === 1) return [...colours][0];
   // A combined shape is one solid in one colour: its first part's.

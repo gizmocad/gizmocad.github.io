@@ -955,11 +955,21 @@ function renderObjectList() {
   const upTo = historyMarker === null ? doc.features : doc.features.slice(0, historyMarker);
   const listed = new Set(upTo.map((f) => f.id));
   const shown = upTo.map((f) => (f.parentId && !listed.has(f.parentId) ? { ...f, parentId: null } : f));
+  // Each object's children, listed once (not searched for row by row).
+  const kids = new Map<string | null, Feature[]>();
+  for (const f of shown) {
+    const list = kids.get(f.parentId);
+    if (list) list.push(f);
+    else kids.set(f.parentId, [f]);
+  }
+  /** Everything inside `f`, at any depth. */
+  const insideOf = (f: Feature, into = new Set<string>()) => {
+    for (const c of kids.get(f.id) ?? []) if (!into.has(c.id)) insideOf(c, into.add(c.id));
+    return into;
+  };
   const walk = (parentId: string | null, depth: number) => {
-    for (const f of childrenOf(shown, parentId)) {
-      const inside = subtreeIds(shown, f.id);
-      inside.delete(f.id);
-      rows.push(objectRow(f, depth, inside));
+    for (const f of kids.get(parentId) ?? []) {
+      rows.push(objectRow(f, depth, insideOf(f)));
       if (!folded.has(f.id)) walk(f.id, depth + 1);
     }
   };

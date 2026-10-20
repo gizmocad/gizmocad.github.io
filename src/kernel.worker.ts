@@ -791,10 +791,7 @@ function sweepMesh(w: WorldMesh, s: Sweep, clearance = 0): WorldMesh {
       poses.push(m);
       copies.push(base.transform(m.elements as Parameters<typeof base.transform>[0]));
     }
-    if (s.joint.type === "hinge") {
-      const axis = new Vector3(s.joint.axis.x, s.joint.axis.y, s.joint.axis.z).transformDirection(frame.clone().invert());
-      copies.push(...logged("fill the gaps between the sweep's copies", () => sweepGaps(M, base, poses, axis, tol)));
-    }
+    if (s.joint.type === "hinge") copies.push(...logged("fill the gaps between the sweep's copies", () => sweepGaps(M, base, poses, tol)));
     const joined = M.Manifold.union(copies);
     // The seams between copies leave many tiny facets: merge those that change the shape by under 0.01 mm.
     const simpler = joined.simplify(0.01);
@@ -815,7 +812,7 @@ function sweepMesh(w: WorldMesh, s: Sweep, clearance = 0): WorldMesh {
  * the part really passes through, left standing as shards. Each face moving
  * forward fills the space it moves through between neighbouring copies.
  */
-function sweepGaps(M: ManifoldLib, base: InstanceType<ManifoldLib["Manifold"]>, poses: Matrix4[], axis: Vector3, minGap: number) {
+function sweepGaps(M: ManifoldLib, base: InstanceType<ManifoldLib["Manifold"]>, poses: Matrix4[], minGap: number) {
   const mesh = base.getMesh();
   const stride = mesh.numProp;
   const tris = mesh.triVerts;
@@ -1908,7 +1905,15 @@ function unplace(f: Feature, shape: Shape3D): Shape3D {
 }
 
 /** Whether something inside `f` (not `f` itself) ignores this hole. */
-const insideIgnores = (features: Feature[], f: Feature, holeId: string) => features.some((x) => x.id !== f.id && x.ignoreHoles?.includes(holeId) && subtreeIds(features, f.id).has(x.id));
+const insideIgnores = (features: Feature[], f: Feature, holeId: string) => someInside(features, f, (x) => x.id !== f.id && !!x.ignoreHoles?.includes(holeId));
+
+/** Whether anything in `f`'s subtree (itself included) passes the test; the subtree is only worked out if something does. */
+function someInside(features: Feature[], f: Feature, test: (x: Feature) => boolean): boolean {
+  const hits = features.filter(test);
+  if (!hits.length) return false;
+  const sub = subtreeIds(features, f.id);
+  return hits.some((x) => sub.has(x.id));
+}
 
 /**
  * branch() when some objects ignore some holes: instead of joining
@@ -1987,7 +1992,7 @@ function groupTriangles(features: Feature[], f: Feature): WorldMesh | null {
 
 function branch(features: Feature[], self: Feature | null, inherited: Cutter[] = []): Shape3D | null {
   // A merged group's shape depends only on what's inside it (unless something in it waits for outside holes).
-  if (self && isMergedGroup(self) && !inherited.length && !features.some((x) => subtreeIds(features, self.id).has(x.id) && hasAfterHoles(x))) {
+  if (self && isMergedGroup(self) && !inherited.length && !someInside(features, self, hasAfterHoles)) {
     const key = branchKey(features, self);
     let hit = branchCache.get(key);
     if (!hit) {
@@ -2160,10 +2165,12 @@ function placeInWorld(features: Feature[], f: Feature, shape: Shape3D): Shape3D 
 
 const r6 = (v: number) => Math.round(v * 1e6) / 1e6 + 0;
 /** What a feature's subtree looks like to the kernel (names, colours and visibility don't change geometry). */
-const geometryKey = (features: Feature[], id: string) =>
-  features
-    .filter((x) => subtreeIds(features, id).has(x.id))
+const geometryKey = (features: Feature[], id: string) => {
+  const sub = subtreeIds(features, id);
+  return features
+    .filter((x) => sub.has(x.id))
     .map((x) => [x.id, x.parentId, x.kind, x.mode, keyParams(x), x.position, x.rotation, x.edgeOps, x.clips, x.shell, x.tilt, x.mirrored, x.joint, x.ignoreHoles, x.combined]);
+};
 
 const cutCache = new Map<string, { mesh: MeshData | null; error?: string }>();
 
