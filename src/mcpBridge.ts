@@ -283,8 +283,13 @@ const CHOICES: Record<string, (string | number)[]> = {
   "spring.section": ["round", "square"],
   "spring.bends": ["round", "sharp"],
   "sketch.plane": ["XY", "XZ", "YZ"],
-  "sketch.operation": ["flat", "extrude", "revolve"],
+  "sketch.operation": ["flat", "extrude", "revolve", "sweep", "loft"],
   "sketch.direction": ["normal", "reversed", "both"],
+};
+
+/** Parameters a new object doesn't have until they're set, with their type or choices. */
+const OPTIONAL: Record<string, Record<string, "number" | "boolean" | "string" | string[]>> = {
+  sketch: { pitch: "number", coilLeft: "boolean", sweepProfile: ["round", "square", "sketch"], sweepFrom: "string", loftTo: "string" },
 };
 
 const findIn = (host: BridgeHost, id: string) => host.features().find((f) => f.id === id);
@@ -339,7 +344,12 @@ function applyFields(f: Feature, a: Args) {
   if (a.combined !== undefined) {
     if (f.kind !== "group") throw new Error("combined is for groups (use group_objects with combine: true to join objects).");
     if (a.combined) f.combined = true;
-    else delete f.combined;
+    else (delete f.combined, delete f.overlap);
+  }
+  if (a.overlap !== undefined) {
+    if (f.kind !== "group") throw new Error("overlap is for groups: put the objects in a group first (group_objects).");
+    if (a.overlap) (f.overlap = true), (f.combined = true);
+    else delete f.overlap;
   }
   if (a.clearance !== undefined) {
     const c = Number(a.clearance);
@@ -431,9 +441,17 @@ function applyParams(f: Feature, given: unknown) {
   const params = f.params as unknown as Args;
   const next = { ...params };
   for (const [key, value] of Object.entries(given as Args)) {
-    if (!(key in params) || key === "constraints") {
-      const known = Object.keys(params).filter((k) => k !== "constraints");
+    const optional = OPTIONAL[f.kind]?.[key];
+    if ((!(key in params) && !optional) || key === "constraints") {
+      const known = [...Object.keys(params).filter((k) => k !== "constraints"), ...Object.keys(OPTIONAL[f.kind] ?? {}).filter((k) => !(k in params))];
       throw new Error(known.length ? `A ${f.kind} has no "${key}" parameter. Its parameters: ${known.join(", ")}.` : `A ${f.kind} has no parameters.`);
+    }
+    if (optional) {
+      if (Array.isArray(optional) ? !optional.includes(value as string) : typeof value !== optional || (typeof value === "number" && !Number.isFinite(value))) {
+        throw new Error(`${f.kind} ${key} must be ${Array.isArray(optional) ? `one of: ${optional.join(", ")}` : `a ${optional}`}.`);
+      }
+      next[key] = value;
+      continue;
     }
     if (f.kind === "sketch" && key === "entities") {
       next.entities = sketchEntities(value);
@@ -469,8 +487,8 @@ function sketchEntities(value: unknown): SketchEntity[] {
       if (v <= 0) throw new Error(`${at}.${key} must be above 0.`);
       return v;
     };
-    const points = () => {
-      if (!Array.isArray(e.points) || e.points.length < 3) throw new Error(`${at}.points needs at least 3 [u, v] points.`);
+    const points = (least = 3) => {
+      if (!Array.isArray(e.points) || e.points.length < least) throw new Error(`${at}.points needs at least ${least} [u, v] point${least === 1 ? "" : "s"}.`);
       return e.points.map((p, j) => {
         if (!Array.isArray(p) || p.length !== 2) throw new Error(`${at}.points[${j}] must be [u, v].`);
         return [num(p[0], `${at}.points[${j}][0]`), num(p[1], `${at}.points[${j}][1]`)] as [number, number];
@@ -502,8 +520,10 @@ function sketchEntities(value: unknown): SketchEntity[] {
         return { ...base, type: "line", x1: n("x1"), y1: n("y1"), x2: n("x2"), y2: n("y2") };
       case "point":
         return { ...base, type: "point", x: n("x"), y: n("y") };
+      case "stroke":
+        return { ...base, type: "stroke", points: points(1), width: positive("width") };
       default:
-        throw new Error(`${at}.type must be rect, circle, ellipse, ngon, slot, polygon, spline, line or point.`);
+        throw new Error(`${at}.type must be rect, circle, ellipse, ngon, slot, polygon, spline, stroke, line or point.`);
     }
   });
 }
@@ -557,6 +577,7 @@ function describeModel(host: BridgeHost, sketchGeometry: boolean) {
     if (f.ignoreHoles?.length) o.ignore_holes = f.ignoreHoles;
     if (f.clearance) o.clearance = f.clearance;
     if (f.combined) o.combined = true;
+    if (f.overlap) o.overlap = true;
     if (f.suppressed) o.switched_off = true;
     if (f.joint) o.joint = f.joint.type;
     if (f.clips?.length) o.split_piece = true;

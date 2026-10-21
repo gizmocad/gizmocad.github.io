@@ -9,6 +9,8 @@ import { CONSTRAINT_GLYPH, constraintAnchor, refAt, refGeometry } from "./constr
 import {
   bounds,
   canSplit,
+  cornerAt,
+  roundCorner,
   handles,
   hitTest,
   mergeOverlaps,
@@ -35,7 +37,7 @@ import type { SketchPointer } from "./viewport";
 /** A ruler length: always two decimals, e.g. "20.00". */
 const twoPlaces = (v: number) => (Math.abs(v) < 0.005 ? 0 : v).toFixed(2);
 
-export type SketchTool = "select" | "point" | "line" | "rect" | "circle" | "ellipse" | "ngon" | "slot" | "polygon" | "spline" | "brush" | "split" | "trim" | "constrain";
+export type SketchTool = "select" | "point" | "line" | "rect" | "circle" | "ellipse" | "ngon" | "slot" | "polygon" | "spline" | "brush" | "split" | "trim" | "constrain" | "corner";
 
 export interface MenuItem {
   label: string;
@@ -92,6 +94,9 @@ export class SketchEditor {
   ngonSides = 6;
   /** Brush stroke width in sketch units. */
   brushWidth = 4;
+  /** Corner tool: the radius of a rounded corner, or how far back along each edge a bevel cuts. */
+  cornerSize = 2;
+  cornerBevel = false;
   /** Raw samples of the brush stroke being painted. */
   private brushing: P[] | null = null;
   selected = new Set<string>();
@@ -243,6 +248,10 @@ export class SketchEditor {
         this.render();
         this.host.changed();
       }
+      return;
+    }
+    if (this.tool === "corner") {
+      if (e.kind === "down") this.roundCornerAt(raw, e.pixel);
       return;
     }
     if (this.tool === "trim") {
@@ -521,6 +530,32 @@ export class SketchEditor {
     });
     this.host.changed();
     return true;
+  }
+
+  /** Round (or bevel) the shape's corner nearest the pointer. */
+  private roundCornerAt(raw: P, pixel: number) {
+    let best: { e: SketchEntity; i: number; d: number } | null = null;
+    for (const e of this.host.entities()) {
+      const c = cornerAt(e, raw, 10 * pixel);
+      if (c && (!best || c.d < best.d)) best = { e, i: c.index, d: c.d };
+    }
+    if (!best) return this.host.notify("Click a corner of a polygon, rectangle or N-gon (where two straight edges meet).");
+    const rounded = roundCorner(best.e, best.i, this.cornerSize, this.cornerBevel);
+    if (!rounded) return this.host.notify(`A ${this.cornerBevel ? "bevel" : "radius"} of ${this.cornerSize} mm doesn't fit at that corner: try a smaller one.`);
+    this.selected = new Set([rounded.id]);
+    this.host.commit((entities) => {
+      const i = entities.findIndex((x) => x.id === rounded.id);
+      if (i >= 0) entities[i] = rounded;
+    });
+    this.host.changed();
+  }
+
+  /** Add new shapes (copies, offsets, projected outlines…), selecting them. */
+  addShapes(shapes: SketchEntity[]) {
+    if (!shapes.length) return;
+    this.selected = new Set(shapes.map((x) => x.id));
+    this.host.commit((entities) => entities.push(...shapes));
+    this.host.changed();
   }
 
   private add(entity: SketchEntity) {

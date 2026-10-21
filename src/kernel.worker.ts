@@ -2,7 +2,7 @@
 
 import opencascade from "replicad-opencascadejs";
 import wasmUrl from "replicad-opencascadejs/wasm?url";
-import { measureVolume, Plane, EdgeFinder, type Edge, assembleWire, cast, deserializeShape, draw, drawCircle, drawEllipse, drawText, genericSweep, getOC, importSTEP, loadFont, makeBaseBox, makeBox, makeCircle, makeCompound, makeCylinder, makeHelix, makeLine, makeEllipsoid, makePolygon, makeSolid, makeSphere, setOC, type Drawing, type Shape3D } from "replicad";
+import { measureVolume, Plane, EdgeFinder, FaceFinder, type Face, type Edge, type Wire, type Sketch, type CompoundSketch, type Sketches, type GenericSweepConfig, makeBSplineApproximation, assembleWire, cast, deserializeShape, draw, drawCircle, drawEllipse, drawText, genericSweep, getOC, importSTEP, loadFont, makeBaseBox, makeBox, makeCircle, makeCompound, makeCylinder, makeHelix, makeLine, makeEllipsoid, makePolygon, makeSolid, makeSphere, setOC, type Drawing, type Shape3D } from "replicad";
 import {
   PLANE_ROTATIONS,
   SCREW_SIZES,
@@ -37,7 +37,7 @@ import {
   type SketchParams,
 } from "./model";
 import { entityPath, gearPath, isProfile, outline, prismPoints, starPoints, strokePieces, type Path } from "./sketchGeometry";
-import type { BuildStep, ImportedSolid, ImportSource, KernelRequest, KernelResponse, MeshData, ModelStats } from "./kernel";
+import type { BuildStep, Clash, ImportedSolid, ImportSource, KernelRequest, KernelResponse, MeshData, ModelStats, SketchLoop } from "./kernel";
 import { hedron } from "./hedron";
 import { CUSTOM_FONT, builtInFontUrl, fontFamily, isCustomFont } from "./fonts";
 import { Matrix3, Matrix4, Vector3 } from "three";
@@ -198,6 +198,7 @@ function solidify(d: Drawing, p: SketchParams, lean: Lean = null, taper = 0): Sh
   if (p.operation === "revolve") {
     const [[minU], [maxU]] = d.boundingBox.bounds;
     if (minU < -1e-9 && maxU > 1e-9) throw new Error("A revolved profile must stay on one side of the V axis (the green line).");
+    if (p.pitch && p.pitch > 0) return coilShape(d, p);
     return sketch.revolve([0, 1, 0], { origin: [0, 0, 0], angle: p.angle });
   }
   const depth = Math.abs(p.depth);
@@ -228,7 +229,13 @@ function entitySolid(e: SketchEntity, p: SketchParams, lean: Lean, taper: number
  */
 function buildSketch(p: SketchParams, featureLean: Lean, taper = 0, self?: Feature): Shape3D | null {
   if (p.operation === "flat") return null; // Just a drawing until it's extruded or revolved.
-  if (p.operation === "sweep") throw new Error("A sweep needs a brush stroke to follow: draw one with the Brush tool (B).");
+  if (p.operation === "sweep") {
+    if (p.sweepProfile !== "sketch") throw new Error("A sweep needs a brush stroke to follow: draw one with the Brush tool (B).");
+    let shape = profileSweep(p, self);
+    if (p.offset) shape = shape.translate(0, 0, p.offset);
+    for (const r of PLANE_ROTATIONS[p.plane]) shape = shape.rotate(r.degrees, [0, 0, 0], r.axis);
+    return shape;
+  }
   if (p.operation === "loft") {
     let shape = loftShape(p, self);
     for (const r of PLANE_ROTATIONS[p.plane]) shape = shape.rotate(r.degrees, [0, 0, 0], r.axis);
@@ -655,9 +662,11 @@ function applyShell(shape: Shape3D, s: Shell): Shape3D {
   if (s.thickness <= 0) return shape;
   const [[, , zMin], [, , zMax]] = shape.boundingBox.bounds;
   try {
-    if (s.open !== "none") {
+    const picked = s.open === "picked" ? pickedFaces(shape, s.faces ?? []) : [];
+    if (s.open === "top" || s.open === "bottom" || picked.length) {
       const z = s.open === "top" ? zMax : zMin;
-      const result = shape.shell(s.thickness, (f) => f.inPlane("XY", z)); // Positive: walls go inward, outside size kept.
+      // Positive: walls go inward, outside size kept.
+      const result = picked.length ? shape.shell(s.thickness, (f) => f.inList(picked)) : shape.shell(s.thickness, (f) => f.inPlane("XY", z));
       if (isValidShape(result)) return result;
       throw new Error("invalid");
     }
@@ -676,6 +685,21 @@ function applyShell(shape: Shape3D, s: Shell): Shape3D {
   } catch {
     throw new Error(`Couldn't hollow this shape with ${s.thickness} mm walls: try thinner walls${s.open === "none" ? ", or open it at the top" : ""}.`);
   }
+}
+
+/**
+ * The faces under clicked points (in the shape's frame). A point from the
+ * view's mesh can sit a little off a curved face, so a looser match is tried
+ * when no face passes through it.
+ */
+function pickedFaces(shape: Shape3D, points: [number, number, number][]): Face[] {
+  const out: Face[] = [];
+  for (const p of points) {
+    let hits = new FaceFinder().atDistance(0, p, 1e-3).find(shape);
+    if (!hits.length) hits = new FaceFinder().atDistance(0, p, 0.06).find(shape);
+    out.push(...hits.filter((h) => !out.some((o) => o.isSame(h))));
+  }
+  return out;
 }
 
 /**
@@ -1463,6 +1487,11 @@ function rememberBreps(features: Feature[]) {
 /** An imported solid's parameters for cache keys: its geometry is named by its ref (the data can be megabytes). */
 const keyParams = (f: Feature) => {
   // A loft depends on the sketch it blends into, and where that is.
+  // A sweep of another sketch's shape depends on that shape (not where its sketch sits).
+  if (f.kind === "sketch" && f.params.operation === "sweep" && f.params.sweepProfile === "sketch") {
+    const prof = modelFeatures.find((x) => x.id === f.params.sweepFrom);
+    return { ...f.params, sweepShape: prof?.kind === "sketch" ? prof.params.entities : null };
+  }
   if (f.kind === "sketch" && f.params.operation === "loft") {
     try {
       const { target, rel } = loftTarget(f.params, f);
@@ -1559,6 +1588,281 @@ function loftShape(p: SketchParams, self: Feature | undefined): Shape3D {
   const plane = new Plane(origin.toArray() as [number, number, number], x.toArray() as [number, number, number], z.toArray() as [number, number, number]);
   const to = firstShape(target.params, target.name).sketchOnPlane(plane);
   return from.loftWith(to, { ruled: false });
+}
+
+/** A drawing's closed outlines as wires on a plane, each outer one with the holes inside it. */
+function drawingWires(d: Drawing, plane: Plane | "XY" | "XZ"): { outer: Wire; holes: Wire[] }[] {
+  const s = (typeof plane === "string" ? d.sketchOnPlane(plane) : d.sketchOnPlane(plane)) as unknown as Sketch | CompoundSketch | Sketches;
+  const list: (Sketch | CompoundSketch)[] = "sketches" in s && !("outerSketch" in s) ? s.sketches : [s as Sketch | CompoundSketch];
+  return list.map((k) => ("outerSketch" in k ? { outer: k.outerSketch.wire, holes: k.innerSketches.map((h) => h.wire) } : { outer: k.wire, holes: [] }));
+}
+
+/** Outlines swept along a spine into solids (their holes swept too, and cut out). */
+function sweepWires(wires: { outer: Wire; holes: Wire[] }[], spine: Wire, config: GenericSweepConfig): Shape3D {
+  let result: Shape3D | null = null;
+  for (const { outer, holes } of wires) {
+    let s = genericSweep(outer, spine, config, false);
+    for (const h of holes) s = s.cut(genericSweep(h, spine, config, false));
+    result = result ? result.fuse(s) : s;
+  }
+  if (!result) throw new Error("There's no closed shape to sweep.");
+  return result;
+}
+
+/**
+ * A revolve that rises by the pitch every turn: a coil, or a thread of any
+ * profile. The profile is swept along a helix round the V axis; built round Z
+ * (profile in XZ), then stood up so V is the axis, as a revolve's is.
+ */
+function coilShape(d: Drawing, p: SketchParams): Shape3D {
+  const pitch = p.pitch ?? 0;
+  const turns = p.angle / 360;
+  if (turns <= 0) throw new Error("A coil needs an angle above 0 (360° for each turn).");
+  const [[minU, minV], [maxU, maxV]] = d.boundingBox.bounds;
+  const tall = maxV - minV;
+  if (turns > 1 && tall >= pitch - 1e-6) throw new Error(`The shape is ${Math.round(tall * 100) / 100} mm tall, so turns ${pitch} mm apart would run into each other: make the rise per turn bigger than that.`);
+  // Any radius works (the profile rides along rigidly); one near the profile keeps the sweep accurate.
+  const r = Math.max(Math.abs((minU + maxU) / 2), 1);
+  const helix = makeHelix(pitch, pitch * turns, r, [0, 0, 0], [0, 0, 1], !!p.coilLeft);
+  return sweepWires(drawingWires(d, "XZ"), helix, { frenet: true }).rotate(-90, [0, 0, 0], [1, 0, 0]);
+}
+
+/** The sketch whose shape a sweep carries along its paths (its cross-section). */
+function sweepProfileSketch(p: SketchParams, self: Feature | undefined): Feature & { kind: "sketch" } {
+  const prof = modelFeatures.find((x) => x.id === p.sweepFrom);
+  if (!prof || prof.kind !== "sketch" || prof.id === self?.id) throw new Error("Pick the sketch whose shape to sweep (in Shape). It can stay a flat drawing.");
+  return prof;
+}
+
+/** All of a sketch's shapes as one drawing: what it adds, less what it cuts. */
+function profileDrawing(p: SketchParams, what: string): Drawing {
+  let d: Drawing | null = null;
+  for (const e of p.entities.filter((e) => isProfile(e) && e.mode === "add")) {
+    const x = entityDrawing(e);
+    if (x) d = d ? d.fuse(x) : x;
+  }
+  if (!d) throw new Error(`${what} has no closed shape to sweep (draw a rectangle, circle, polygon… in it).`);
+  for (const e of p.entities.filter((e) => isProfile(e) && e.mode === "subtract")) {
+    const x = entityDrawing(e);
+    if (x) d = d.cut(x);
+  }
+  return d;
+}
+
+/** Twice the signed area inside a loop of points (positive: counter-clockwise). */
+const loopArea = (pts: [number, number][]) => pts.reduce((a, p, i) => a + p[0] * pts[(i + 1) % pts.length][1] - pts[(i + 1) % pts.length][0] * p[1], 0);
+
+/**
+ * A sweep's paths in its drawing frame: each brush stroke (a smooth curve
+ * through its points) and each closed shape's outline, with which side of it
+ * is outside (a closed outline run clockwise has its outside on the left).
+ */
+function sweepPaths(p: SketchParams): { spine: Wire; left: boolean }[] {
+  const out: { spine: Wire; left: boolean }[] = [];
+  for (const e of p.entities) {
+    if (e.mode !== "add") continue;
+    if (e.type === "stroke") {
+      const pts = e.points.filter((q, i) => i === 0 || Math.hypot(q[0] - e.points[i - 1][0], q[1] - e.points[i - 1][1]) > 1e-6).map(([x, y]) => [x, y, 0] as [number, number, number]);
+      if (pts.length >= 2) out.push({ spine: assembleWire([pts.length === 2 ? makeLine(pts[0], pts[1]) : makeBSplineApproximation(pts, { tolerance: 1e-3 })]), left: false });
+    } else if (isProfile(e)) {
+      const d = entityDrawing(e);
+      const left = loopArea(outline(e)) < 0;
+      if (d) for (const w of drawingWires(d, "XY")) out.push({ spine: w.outer, left });
+    }
+  }
+  return out;
+}
+
+/**
+ * Another sketch's shape (the profile) swept along this sketch's paths, in
+ * its drawing frame. The profile's origin rides on the path, with its V axis
+ * pointing up out of this sketch's plane and its U axis to the right of the
+ * path (outwards, round a closed shape).
+ */
+function profileSweep(p: SketchParams, self: Feature | undefined): Shape3D {
+  const prof = sweepProfileSketch(p, self);
+  const d = profileDrawing(prof.params, prof.name);
+  const paths = sweepPaths(p);
+  if (!paths.length) throw new Error("Draw the path in this sketch: a brush stroke (B), or a closed shape whose outline to follow.");
+  let result: Shape3D | null = null;
+  for (const { spine, left } of paths) {
+    const o = spine.startPoint;
+    const t = spine.tangentAt(0);
+    const len = Math.hypot(t.x, t.y) || 1;
+    const [tx, ty] = [t.x / len, t.y / len];
+    // U to the right of the path and V up (Z): the plane faces back along the path. Flipped, U goes left.
+    const plane = left ? new Plane([o.x, o.y, o.z], [-ty, tx, 0], [tx, ty, 0]) : new Plane([o.x, o.y, o.z], [ty, -tx, 0], [-tx, -ty, 0]);
+    const s = sweepWires(drawingWires(d, plane), spine, { transitionMode: "right" });
+    result = result ? result.fuse(s) : s;
+  }
+  return result!;
+}
+
+// ---- Outlines for sketches (project, offset) ---------------------------------------------------
+
+type P2 = [number, number];
+/** An edge of an outline in sketch coordinates: from a to b, straight, an arc, or another curve (`at` runs along it, 0 to 1). */
+type OutlineEdge = { a: P2; b: P2; kind: "line" | "arc" | "curve"; at: (t: number) => P2 };
+
+const dist2 = (p: P2, q: P2) => Math.hypot(p[0] - q[0], p[1] - q[1]);
+const r4 = (v: number) => Math.round(v * 1e4) / 1e4 + 0;
+
+/** Edges chained end to end (either way round) into the closed loops they make; ends that don't close are dropped. */
+function chainEdges(edges: OutlineEdge[], tol = 1e-3): OutlineEdge[][] {
+  const left = edges.filter((e) => e.kind !== "line" || dist2(e.a, e.b) > tol);
+  const loops: OutlineEdge[][] = [];
+  while (left.length) {
+    const loop = [left.shift()!];
+    let end = loop[0].b;
+    while (dist2(end, loop[0].a) > tol) {
+      const i = left.findIndex((e) => dist2(e.a, end) <= tol || dist2(e.b, end) <= tol);
+      if (i < 0) break;
+      let e = left.splice(i, 1)[0];
+      if (dist2(e.a, end) > tol) e = { a: e.b, b: e.a, kind: e.kind, at: ((f) => (t: number) => f(1 - t))(e.at) };
+      loop.push(e);
+      end = e.b;
+    }
+    if (dist2(end, loop[0].a) <= tol) loops.push(loop);
+  }
+  return loops;
+}
+
+/** A loop of edges as a sketch outline: a circle, or a polygon (arcs bend its edges; other curves become short straight steps). */
+function edgeLoop(loop: OutlineEdge[], split = false): SketchLoop {
+  if (loop.length === 1 && loop[0].kind === "arc") {
+    const [p, q] = [loop[0].a, loop[0].at(0.5)];
+    return { circle: [r4((p[0] + q[0]) / 2), r4((p[1] + q[1]) / 2), r4(dist2(p, q) / 2)] };
+  }
+  const points: P2[] = [];
+  const bends: number[] = [];
+  const arc = (a: P2, via: P2, b: P2) => {
+    const d = [b[0] - a[0], b[1] - a[1]];
+    const l = Math.hypot(d[0], d[1]) || 1;
+    points.push([r4(a[0]), r4(a[1])]);
+    bends.push(r4((via[0] - (a[0] + b[0]) / 2) * (-d[1] / l) + (via[1] - (a[1] + b[1]) / 2) * (d[0] / l)));
+  };
+  for (const e of loop) {
+    if (e.kind === "line") {
+      points.push([r4(e.a[0]), r4(e.a[1])]);
+      bends.push(0);
+    } else if (e.kind === "arc" && !split) arc(e.a, e.at(0.5), e.b);
+    else if (e.kind === "arc") {
+      arc(e.a, e.at(0.25), e.at(0.5));
+      arc(e.at(0.5), e.at(0.75), e.b);
+    } else {
+      // Steps short enough to stay within about 0.02 mm of the curve.
+      const n = Math.max(4, Math.min(64, Math.ceil(dist2(e.a, e.at(0.5)) + dist2(e.at(0.5), e.b))));
+      for (let k = 0; k < n; k++) {
+        const p = e.at(k / n);
+        points.push([r4(p[0]), r4(p[1])]);
+        bends.push(0);
+      }
+    }
+  }
+  // Straight edges in line with each other are one edge (an offset splits them where the old corners were).
+  for (let i = 0; points.length > 3 && i < points.length; ) {
+    const n = points.length;
+    const prev = (i - 1 + n) % n;
+    const [a, p, b] = [points[prev], points[i], points[(i + 1) % n]];
+    const cross = (p[0] - a[0]) * (b[1] - a[1]) - (p[1] - a[1]) * (b[0] - a[0]);
+    const ahead = (p[0] - a[0]) * (b[0] - p[0]) + (p[1] - a[1]) * (b[1] - p[1]) >= 0;
+    if (!bends[prev] && !bends[i] && ahead && Math.abs(cross) <= 1e-6 * (dist2(a, b) || 1)) {
+      points.splice(i, 1);
+      bends.splice(i, 1);
+    } else i++;
+  }
+  // A polygon needs three corners: halve the arcs of a two-edge loop (e.g. a slot's ends meeting).
+  if (points.length < 3 && !split) return edgeLoop(loop, true);
+  return { points, bends };
+}
+
+/** A replicad 1D shape (an edge) as an outline edge, its points taken through `map`. */
+function outlineEdge(e: Edge, map: (x: number, y: number, z: number) => P2): OutlineEdge {
+  const at = (t: number) => {
+    const p = e.pointAt(t);
+    return map(p.x, p.y, p.z);
+  };
+  const kind = e.geomType === "LINE" ? "line" : e.geomType === "CIRCLE" ? "arc" : "curve";
+  return { a: at(0), b: at(1), kind, at };
+}
+
+/** The faces of `shape` in the sketch's plane as outlines (outer ones, and holes). */
+function faceLoops(shape: Shape3D, map: (x: number, y: number, z: number) => P2): SketchLoop[] {
+  const loops: SketchLoop[] = [];
+  for (const face of shape.faces) {
+    // (Both use up the face they're asked of.)
+    const wires = [face.clone().outerWire(), ...face.innerWires()];
+    wires.forEach((w, i) => {
+      for (const loop of chainEdges(w.edges.map((e) => outlineEdge(e, map)))) loops.push({ ...edgeLoop(loop), ...(i ? { hole: true } : {}) });
+    });
+  }
+  return loops;
+}
+
+/**
+ * Where the rest of the model crosses sketch `id`'s plane: the model is cut
+ * with a big flat face on that plane, and what's left of the face comes back
+ * as outlines in the sketch. A plane lying on a face of the model gets that face.
+ */
+function sectionLoops(features: Feature[], id: string): SketchLoop[] {
+  const self = features.find((f) => f.id === id);
+  if (!self || self.kind !== "sketch") return [];
+  const sub = subtreeIds(features, id);
+  failures = {};
+  const model = branch(features.filter((f) => !sub.has(f.id)), null);
+  if (!model) throw new Error("There's nothing solid in the model to project.");
+  const frame = sketchWorld(self);
+  const back = frame.clone().invert();
+  const o = new Vector3().setFromMatrixPosition(frame);
+  const x = new Vector3(1, 0, 0).transformDirection(frame);
+  const y = new Vector3(0, 1, 0).transformDirection(frame);
+  const [lo, hi] = model.boundingBox.bounds;
+  const size = 2 * Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) + o.distanceTo(new Vector3(...lo)) + 10;
+  const corner = (u: number, v: number) => o.clone().addScaledVector(x, u * size).addScaledVector(y, v * size).toArray() as [number, number, number];
+  const sheet = makePolygon([corner(-1, -1), corner(1, -1), corner(1, 1), corner(-1, 1)]);
+  const v = new Vector3();
+  const map = (px: number, py: number, pz: number): P2 => {
+    v.set(px, py, pz).applyMatrix4(back);
+    return [v.x, v.y];
+  };
+  const loops = faceLoops(model.intersect(sheet), map);
+  if (!loops.length) throw new Error("The model doesn't cross this sketch's plane: move the sketch so its plane cuts through (or lies on a face of) what to project.");
+  return loops;
+}
+
+/** A sketch shape's outline offset outwards by `distance` (inwards below 0), corners kept sharp. */
+function offsetLoops(e: SketchEntity, distance: number): SketchLoop[] {
+  const d = entityDrawing(e);
+  if (!d) return [];
+  let out: Drawing;
+  try {
+    out = d.offset(distance, { lineJoinType: "miter" });
+  } catch {
+    throw new Error(`Couldn't offset it by ${distance} mm: ${distance < 0 ? "it may be too thin to go in that far" : "try a smaller distance"}.`);
+  }
+  // A drawing is one outline (a blueprint), or several, each maybe with holes: all of them, in order.
+  type Blue = { curves?: { geomType: string; firstParameter: number; lastParameter: number; value(t: number): [number, number] }[]; blueprints?: Blue[] };
+  const flat: Blue[] = [];
+  const walk = (b: Blue) => (b.blueprints ? b.blueprints.forEach(walk) : flat.push(b));
+  walk((out as unknown as { innerShape: Blue }).innerShape);
+  const loops = flat.flatMap((b) =>
+    chainEdges(
+      (b.curves ?? []).map((c): OutlineEdge => {
+        const at = (t: number) => c.value(c.firstParameter + t * (c.lastParameter - c.firstParameter)) as P2;
+        return { a: at(0), b: at(1), kind: c.geomType === "LINE" ? "line" : c.geomType === "CIRCLE" ? "arc" : "curve", at };
+      }),
+    ),
+  );
+  // Holes are the loops inside an odd number of others.
+  const rings = loops.map((l) => l.flatMap((e) => [0, 0.25, 0.5, 0.75].map((t) => e.at(t))));
+  const inside = (p: P2, ring: P2[]) => ring.reduce((c, a, k) => {
+    const b = ring[(k + 1) % ring.length];
+    return (a[1] > p[1]) !== (b[1] > p[1]) && p[0] < ((b[0] - a[0]) * (p[1] - a[1])) / (b[1] - a[1]) + a[0] ? !c : c;
+  }, false);
+  return loops.map((l, k) => {
+    const depth = rings.filter((r, m) => m !== k && inside(l[0].at(0.5), r)).length;
+    return { ...edgeLoop(l), ...(depth % 2 ? { hole: true } : {}) };
+  });
 }
 
 /** A groove's or sweep's triangles in its own frame. */
@@ -2307,7 +2611,7 @@ function branchIgnoring(features: Feature[], self: Feature | null, inherited: Cu
     const s = branch(features, k, deep.map((c) => ({ id: c.id, shape: unplace(k, copyShape(c.shape)) })));
     if (!s) continue;
     const placed = cutBy(place(k, s), direct);
-    result = result ? booleanSafe(result, placed, "fuse") : placed;
+    result = result ? booleanSafe(result, placed, self?.overlap ? "intersect" : "fuse") : placed;
   }
   return result;
 }
@@ -2400,7 +2704,7 @@ function branchNow(features: Feature[], self: Feature | null, inherited: Cutter[
     const s = branch(features, c);
     if (s) {
       const placed = place(c, s);
-      result = result ? booleanSafe(result, placed, "fuse") : placed;
+      result = result ? booleanSafe(result, placed, self?.overlap ? "intersect" : "fuse") : placed;
     }
   }
   if (!result) return null;
@@ -2538,7 +2842,7 @@ const geometryKey = (features: Feature[], id: string) => {
   const sub = subtreeIds(features, id);
   return features
     .filter((x) => sub.has(x.id))
-    .map((x) => [x.id, x.parentId, x.kind, x.mode, keyParams(x), x.position, x.rotation, x.edgeOps, x.clips, x.shell, x.tilt, x.mirrored, x.joint, x.ignoreHoles, x.combined]);
+    .map((x) => [x.id, x.parentId, x.kind, x.mode, keyParams(x), x.position, x.rotation, x.edgeOps, x.clips, x.shell, x.tilt, x.mirrored, x.joint, x.ignoreHoles, x.combined, x.overlap]);
 };
 
 const cutCache = new Map<string, { mesh: MeshData | null; error?: string }>();
@@ -2805,17 +3109,19 @@ function shapeTriangles(shape: Shape3D): WorldMesh {
 }
 
 /** Joined or cut as meshes, with Manifold. */
-function meshBoolean(a: WorldMesh, b: WorldMesh, op: "fuse" | "cut"): WorldMesh {
+type BooleanOp = "fuse" | "cut" | "intersect";
+
+function meshBoolean(a: WorldMesh, b: WorldMesh, op: BooleanOp): WorldMesh {
   return logged(`mesh ${op} (${(a.triangles.length / 3).toLocaleString()} + ${(b.triangles.length / 3).toLocaleString()} triangles)`, () => meshBooleanNow(a, b, op));
 }
 
-function meshBooleanNow(a: WorldMesh, b: WorldMesh, op: "fuse" | "cut"): WorldMesh {
+function meshBooleanNow(a: WorldMesh, b: WorldMesh, op: BooleanOp): WorldMesh {
   const M = manifoldReady;
   if (!M) throw new Error("The mesh library isn't loaded.");
   const gaps = "a shape has gaps or crossing faces";
   const ma = toManifold(M, a, gaps);
   const mb = toManifold(M, b, gaps);
-  const raw = op === "cut" ? ma.subtract(mb) : ma.add(mb);
+  const raw = op === "cut" ? ma.subtract(mb) : op === "intersect" ? ma.intersect(mb) : ma.add(mb);
   // Booleans leave slivers where faces nearly meet; they shade and outline as stray lines. Under 5 µm: gone.
   const r = raw.simplify(0.005);
   try {
@@ -2830,10 +3136,10 @@ function meshBooleanNow(a: WorldMesh, b: WorldMesh, op: "fuse" | "cut"): WorldMe
  * made of thousands of facets, such as ones made from meshes; then it's done
  * as a mesh boolean instead and made back into a solid.
  */
-function booleanSafe(a: Shape3D, b: Shape3D, op: "fuse" | "cut"): Shape3D {
+function booleanSafe(a: Shape3D, b: Shape3D, op: BooleanOp): Shape3D {
   const viaMeshes = () => {
     const mesh = meshBoolean(shapeTriangles(a), shapeTriangles(b), op);
-    if (!mesh.triangles.length) throw new Error(op === "cut" ? "the hole cuts away the whole object." : "nothing is left.");
+    if (!mesh.triangles.length) throw new Error(op === "cut" ? "the hole cuts away the whole object." : op === "intersect" ? "its shapes don't overlap anywhere." : "nothing is left.");
     const solid = solidFromTriangles(mesh.vertices, mesh.triangles, [1, 1, 1], "bodies");
     knownTriangles.set(solid, mesh);
     return solid;
@@ -2841,7 +3147,12 @@ function booleanSafe(a: Shape3D, b: Shape3D, op: "fuse" | "cut"): Shape3D {
   // A faceted solid: OpenCascade would take many seconds (or fail), so straight to meshes.
   if (knownTriangles.has(a) || knownTriangles.has(b)) return logged(`${op} (as meshes: a solid made from a mesh)`, viaMeshes);
   try {
-    return logged(`${op} (exact)`, () => (op === "cut" ? a.cut(b) : a.fuse(b)));
+    return logged(`${op} (exact)`, () => {
+      if (op !== "intersect") return op === "cut" ? a.cut(b) : a.fuse(b);
+      const r = a.intersect(b);
+      if (measureVolume(r) < 1e-9) throw new Error("its shapes don't overlap anywhere, so nothing is left.");
+      return r;
+    });
   } catch (err) {
     try {
       return logged(`${op} (as meshes, after the exact one failed)`, viaMeshes);
@@ -2849,6 +3160,61 @@ function booleanSafe(a: Shape3D, b: Shape3D, op: "fuse" | "cut"): Shape3D {
       throw err;
     }
   }
+}
+
+/** The centre of mass of a closed set of triangles (even density): each triangle's cone to the origin, weighted by its volume. */
+function meshCentre(m: WorldMesh): [number, number, number] {
+  const v = m.vertices;
+  const t = m.triangles;
+  let total = 0;
+  const c = [0, 0, 0];
+  for (let i = 0; i < t.length; i += 3) {
+    const [a, b, d] = [3 * t[i], 3 * t[i + 1], 3 * t[i + 2]];
+    const vol = (v[a] * (v[b + 1] * v[d + 2] - v[b + 2] * v[d + 1]) - v[a + 1] * (v[b] * v[d + 2] - v[b + 2] * v[d]) + v[a + 2] * (v[b] * v[d + 1] - v[b + 1] * v[d])) / 6;
+    total += vol;
+    for (let k = 0; k < 3; k++) c[k] += (vol * (v[a + k] + v[b + k] + v[d + k])) / 4;
+  }
+  return total ? (c.map((x) => x / total) as [number, number, number]) : [0, 0, 0];
+}
+
+/**
+ * Each moving part (hinged, sliding or orbiting, as it sits now) against the
+ * rest of the model: where they overlap, and how close they come. Printed in
+ * place, an overlap fuses it, and a gap much under 0.3 mm usually does too.
+ */
+function movingClashes(features: Feature[]): Clash[] {
+  const M = manifoldReady;
+  if (!M) throw new Error("The mesh library isn't loaded.");
+  failures = {};
+  const out: Clash[] = [];
+  for (const f of features) {
+    if (!f.joint || f.mode !== "solid" || insideMergedGroup(features, f.id)) continue;
+    const sub = subtreeIds(features, f.id);
+    const own = branchTriangles(features, f);
+    const rest = branchTriangles(features.filter((x) => !sub.has(x.id)), null);
+    if (!own || !rest) continue;
+    let a, b, common;
+    try {
+      a = toManifold(M, transformMesh(own, worldMatrix(features, f.id)), "");
+      b = toManifold(M, rest, "");
+      common = a.intersect(b);
+      const overlap = common.volume();
+      if (overlap > 1e-3) {
+        const w = fromManifold(common);
+        const mesh = new Float32Array(w.triangles.length * 3);
+        for (let i = 0; i < w.triangles.length; i++) mesh.set(w.vertices.subarray(3 * w.triangles[i], 3 * w.triangles[i] + 3), 3 * i);
+        out.push({ id: f.id, overlap, gap: -1, mesh });
+      } else {
+        const gap = a.minGap(b, 1);
+        out.push({ id: f.id, overlap: 0, gap: gap < 1 ? gap : -1 });
+      }
+    } catch {
+      // A shape with gaps can't be checked; leave it out.
+    } finally {
+      for (const m of [a, b, common]) m?.delete();
+    }
+  }
+  return out;
 }
 
 /** The area of a set of triangles' surface. */
@@ -3303,9 +3669,16 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
       let stats: ModelStats | null = null;
       if (w && w.triangles.length) {
         const [lo, hi] = meshBounds(w);
-        stats = { volume: Math.abs(meshVolume(w)), area: meshArea(w), size: [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]] };
+        stats = { volume: Math.abs(meshVolume(w)), area: meshArea(w), size: [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]], centre: meshCentre(w) };
       }
       post({ type: "stats", requestId: req.requestId, stats });
+    } else if (req.type === "clashes") {
+      const clashes = movingClashes(req.features);
+      post({ type: "clashes", requestId: req.requestId, clashes }, clashes.flatMap((c) => (c.mesh ? [c.mesh.buffer] : [])));
+    } else if (req.type === "section") {
+      post({ type: "loops", requestId: req.requestId, loops: sectionLoops(req.features, req.id) });
+    } else if (req.type === "offset") {
+      post({ type: "loops", requestId: req.requestId, loops: req.entities.flatMap((e) => offsetLoops(e, req.distance)) });
     } else if (req.type === "cutMeshes") {
       // Mesh objects with holes through them, as world triangles (for STL and 3MF exports).
       const out: Record<string, Float32Array> = {};

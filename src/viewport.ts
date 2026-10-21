@@ -1071,11 +1071,15 @@ export class Viewport {
 
   // ---- Picking one face of an object (lay flat) --------------------------------------------------
 
-  private facePick: { id: string; onPick: (normal: Vec3, point: Vec3) => void } | null = null;
+  private facePick: { id: string; onPick: (normal: Vec3, point: Vec3, local: Vec3) => void; own: boolean } | null = null;
 
-  /** Wait for a click on object `id`: hands back the clicked face's outward normal and the point (world). */
-  startFacePick(id: string, onPick: (normal: Vec3, point: Vec3) => void) {
-    this.facePick = { id, onPick };
+  /**
+   * Wait for a click on object `id`: hands back the clicked face's outward
+   * normal and the point (world), and the point in the frame of the mesh hit.
+   * `own`: only the object's own shape counts, not what's inside it.
+   */
+  startFacePick(id: string, onPick: (normal: Vec3, point: Vec3, local: Vec3) => void, own = false) {
+    this.facePick = { id, onPick, own };
     this.renderer.domElement.style.cursor = "crosshair";
   }
 
@@ -1115,14 +1119,15 @@ export class Viewport {
         const node = fp && this.nodes.get(fp.id);
         if (!fp || !node || e.button !== 0 || e.target !== this.renderer.domElement) return;
         this.raycaster.setFromCamera(this.ndc(e), this.camera);
-        const hit = this.raycaster.intersectObject(node, true).find((h) => h.object instanceof THREE.Mesh && h.face && isShown(h.object));
+        const hit = this.raycaster.intersectObject(node, true).find((h) => h.object instanceof THREE.Mesh && h.face && isShown(h.object) && (!fp.own || h.object.userData.id === fp.id));
         if (!hit) return;
         e.stopPropagation();
         // The triangle's own normal (not the smoothed one): the face as it is.
         const normal = hit.face!.normal.clone().transformDirection(hit.object.matrixWorld);
         if (normal.dot(this.raycaster.ray.direction) > 0) normal.negate();
+        const local = hit.object.worldToLocal(hit.point.clone());
         this.stopFacePick();
-        fp.onPick({ x: normal.x, y: normal.y, z: normal.z }, { x: hit.point.x, y: hit.point.y, z: hit.point.z });
+        fp.onPick({ x: normal.x, y: normal.y, z: normal.z }, { x: hit.point.x, y: hit.point.y, z: hit.point.z }, { x: local.x, y: local.y, z: local.z });
       },
       true,
     );
@@ -1770,6 +1775,26 @@ export class Viewport {
   setPrintCheck(on: boolean) {
     this.printCheckOn = on;
     this.drawPrintCheck();
+    if (!on) this.setClashes([]);
+  }
+
+  private clashGroup = new THREE.Group();
+
+  /** Where moving parts overlap what they move against (triangles, world): drawn in purple, through everything. */
+  setClashes(meshes: Float32Array[]) {
+    this.clashGroup.removeFromParent();
+    disposeTree(this.clashGroup);
+    this.clashGroup = new THREE.Group();
+    for (const pts of meshes) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
+      const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: 0xb04cff, transparent: true, opacity: 0.8, side: THREE.DoubleSide, depthTest: false, depthWrite: false }));
+      m.renderOrder = 30;
+      m.raycast = () => {};
+      this.clashGroup.add(m);
+    }
+    if (meshes.length) this.scene.add(this.clashGroup);
+    this.invalidate();
   }
 
   private drawPrintCheck(angle = 45, wall = 0.8) {

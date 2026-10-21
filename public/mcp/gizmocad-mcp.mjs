@@ -240,6 +240,7 @@ const objectFields = {
   hidden: { type: "boolean", description: "Hide it in the view (still part of the model)." },
   ghost: { type: "boolean", description: "Ghost it: see-through in the view, and clicks and placing go through it (still part of the model and exports)." },
   combined: { type: "boolean", description: "Groups only: join the group's parts into one shape (true) or keep them separate parts that move together (false). Edge finishes, hollowing or a texture on a group keep it joined." },
+  overlap: { type: "boolean", description: "Groups only: keep just where all its solids overlap (an intersection, e.g. a box and a sphere make a rounded cube) instead of joining them. Turns combined on." },
   clearance: { type: "number", description: "Holes only: grow the hole by this many mm on every side, so a part the same shape fits into what it cuts (0.2 snug, 0.3-0.5 loose). To fit a peg into a socket: add a copy of the peg as a hole with clearance, and set the peg to ignore_holes that copy. 0 removes it." },
   ignore_holes: { type: "array", items: { type: "string" }, description: "Ids of holes that must not cut this object (or anything inside it), though they'd otherwise reach it; they still cut everything else. [] lets every hole cut it again." },
 };
@@ -380,8 +381,12 @@ plane     size: a reference plane (display only); sketches inside it are drawn o
 imported  (made by import_files from STEP/FreeCAD/BREP, and from closed meshes up to 200,000 triangles) a solid; its only param is scale: a number (1 = as imported) or [x, y, z]. Uneven scales make curves faceted. Can be a hole and take fillets.
 sketch    a 2D drawing made 3D:
           plane "XY"|"XZ"|"YZ" (U,V axes: XY→U=X,V=Y; XZ→U=X,V=Z; YZ→U=Y,V=Z), offset (shift along the plane's normal),
-          operation "extrude"|"revolve"|"flat" (flat = drawing only), depth (extrude distance), direction "normal"|"reversed"|"both",
+          operation "extrude"|"revolve"|"sweep"|"loft"|"flat" (flat = drawing only), depth (extrude distance), direction "normal"|"reversed"|"both",
           angle (revolve degrees, around the sketch's V axis; keep revolve profiles on the +U side), entities: [...].
+          Optional: pitch (revolve: rise per turn in mm, making a coil or custom thread; then angle can go past 360, 360 per turn), coilLeft (true: left-handed),
+          sweepProfile "round"|"square"|"sketch" (sweep: brush strokes {type:"stroke", points, width} become tubes; "sketch" sweeps the closed shape of the
+          sketch named in sweepFrom (an id) along each stroke and round each closed shape's outline, its origin on the path, V up, U to the right/outwards),
+          loftTo (loft: the id of a sketch whose first closed shape this one's blends into).
           Each entity has "type" and an optional "mode": "add" (default), "subtract" (cuts a hole in the sketch) or "construction" (guide only):
             {type:"rect", x, y (centre), width, height, angle?, radius? (corner rounding)}
             {type:"circle", x, y, radius}
@@ -391,6 +396,7 @@ sketch    a 2D drawing made 3D:
             {type:"polygon", points:[[u,v],...], bends?:[...] (per edge: arc bulge in mm, 0 = straight)}
             {type:"spline", points:[[u,v],...]}   (smooth closed curve through the points)
             {type:"line", x1, y1, x2, y2}         (construction/reference; not a closed profile)
+            {type:"stroke", points:[[u,v],...], width}  (a brush stroke: the area within width/2 of the path; a sweep's path)
           Example: a 40×20 plate with two 4 mm holes, 3 mm thick:
             {plane:"XY", operation:"extrude", depth:3, entities:[{type:"rect",x:0,y:0,width:40,height:20,radius:3},
               {type:"circle",x:-14,y:0,radius:2,mode:"subtract"},{type:"circle",x:14,y:0,radius:2,mode:"subtract"}]}

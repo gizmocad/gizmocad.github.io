@@ -383,15 +383,21 @@ export interface SketchParams {
   constraints?: SketchConstraint[];
   /** A chisel groove: its strokes are carved to the depth with this tip (see isGroove). */
   groove?: { tip: GrooveTip };
-  /** Sweep: the tubes' cross-section (default round). */
-  sweepProfile?: "round" | "square";
+  /** Revolve: how far it rises per turn, making a coil (or a custom thread) rather than a ring. 0 or unset: a plain revolve. */
+  pitch?: number;
+  /** A coil turns the other way (a left-hand thread). */
+  coilLeft?: boolean;
+  /** Sweep: the tubes' cross-section (default round), or "sketch": another sketch's shape (see sweepFrom). */
+  sweepProfile?: "round" | "square" | "sketch";
+  /** Sweep with a "sketch" profile: the sketch (by id) whose shape is carried along this one's paths. */
+  sweepFrom?: string;
   /** Loft: the sketch (by id) whose first shape this one's blends into. */
   loftTo?: string;
 }
 
 /** A sweep: an extruded sketch's brush strokes become tubes. */
 export function isSweepSketch(f: Feature): f is Feature & { kind: "sketch" } {
-  return f.kind === "sketch" && f.params.operation === "sweep" && f.params.entities.some((e) => e.type === "stroke" && e.mode === "add");
+  return f.kind === "sketch" && f.params.operation === "sweep" && f.params.sweepProfile !== "sketch" && f.params.entities.some((e) => e.type === "stroke" && e.mode === "add");
 }
 
 export type GrooveTip = "flat" | "v" | "round";
@@ -441,10 +447,12 @@ export interface EdgeOp {
 /** Kinds that can have fillets/chamfers. A group's apply to its merged result. */
 export const FINISHABLE: ShapeKind[] = ["box", "cylinder", "sphere", "cone", "tube", "torus", "wedge", "pyramid", "prism", "hedron", "gear", "star", "text", "sketch", "group", "imported"];
 
-/** Hollow it out: walls `thickness` thick, optionally open at the top or bottom. */
+/** Hollow it out: walls `thickness` thick, optionally open at the top or bottom, or where faces were clicked. */
 export interface Shell {
   thickness: number;
-  open: "none" | "top" | "bottom";
+  open: "none" | "top" | "bottom" | "picked";
+  /** "picked": a point on each face left open, in the object's own frame. */
+  faces?: [number, number, number][];
 }
 
 // ---- Features ------------------------------------------------------------
@@ -493,6 +501,8 @@ interface FeatureBase {
   clearance?: number;
   /** Groups only: shown, and exported, as one joined shape rather than separate parts that move together. */
   combined?: boolean;
+  /** Combined groups only: keep just where all its solids overlap (an intersection), rather than all of them joined. */
+  overlap?: boolean;
   /** Holes only: swept through a hinge's swing (or a slider's travel), so a moving part clears all of it. */
   sweep?: Sweep;
   /** A clearance cut with a copy of its object's hinge or slider: moving either joint moves the other (the object's id). */
@@ -731,7 +741,7 @@ export const PARAM_FIELDS: Partial<Record<ShapeKind, { key: string; label: strin
 
 /** A group with fillets/chamfers (or a hollow, or a texture), or a hole group, is shown and picked as one merged shape. */
 export function isMergedGroup(f: Feature): boolean {
-  return f.kind === "group" && (!!f.combined || f.mode === "hole" || f.edgeOps.length > 0 || !!f.shell || !!f.texture);
+  return f.kind === "group" && (!!f.combined || !!f.overlap || f.mode === "hole" || f.edgeOps.length > 0 || !!f.shell || !!f.texture);
 }
 
 /** Is `id` inside a merged group (so its own mesh isn't shown)? */

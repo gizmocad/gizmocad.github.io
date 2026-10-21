@@ -1,6 +1,9 @@
 // Main-thread side of the kernel: a small promise-based API over the worker.
 
-import type { Feature } from "./model";
+import type { Feature, Point2, SketchEntity } from "./model";
+
+/** A closed outline worked out for a sketch: a circle, or corners with each edge's bend (as a polygon's). `hole`: it's a hole in the outline around it. */
+export type SketchLoop = ({ circle: [number, number, number] } | { points: Point2[]; bends: number[] }) & { hole?: boolean };
 
 export interface MeshData {
   id: string;
@@ -45,13 +48,33 @@ export type KernelRequest =
   /** Mesh objects that holes cut, as world triangles. */
   | { type: "cutMeshes"; requestId: number; features: Feature[] }
   /** How much material the finished model holds: its volume, surface area and size. */
-  | { type: "stats"; requestId: number; features: Feature[] };
+  | { type: "stats"; requestId: number; features: Feature[] }
+  /** Where the model (other than sketch `id`) crosses that sketch's plane, as outlines in the sketch. */
+  | { type: "section"; requestId: number; features: Feature[]; id: string }
+  /** Sketch shapes' outlines moved out (or in, below 0) by a distance. */
+  | { type: "offset"; requestId: number; entities: SketchEntity[]; distance: number }
+  /** Whether each moving part (hinged, sliding…) overlaps, or nearly touches, the rest of the model. */
+  | { type: "clashes"; requestId: number; features: Feature[] };
+
+/**
+ * A moving part against the rest of the model: how much they overlap (mm³,
+ * with the overlap's triangles in world coordinates) and the gap between them
+ * (mm; -1 when it's more than a millimetre, or they overlap).
+ */
+export interface Clash {
+  id: string;
+  overlap: number;
+  gap: number;
+  mesh?: Float32Array;
+}
 
 /** A finished model's volume (mm³), surface area (mm²) and size along X, Y and Z (mm). */
 export interface ModelStats {
   volume: number;
   area: number;
   size: [number, number, number];
+  /** Centre of mass (world), for a solid of even density. */
+  centre: [number, number, number];
 }
 
 /** What each kind of request is, for the progress bar. */
@@ -64,6 +87,9 @@ const WORKING: Record<KernelRequest["type"], string> = {
   font: "Loading the font",
   cutMeshes: "Exporting",
   stats: "Working out the print estimate",
+  section: "Projecting the model",
+  clashes: "Checking the moving parts",
+  offset: "Offsetting",
 };
 
 export type KernelResponse =
@@ -77,6 +103,8 @@ export type KernelResponse =
   | { type: "fontLoaded"; requestId: number; name: string }
   | { type: "cutMeshes"; requestId: number; meshes: Record<string, Float32Array> }
   | { type: "stats"; requestId: number; stats: ModelStats | null }
+  | { type: "loops"; requestId: number; loops: SketchLoop[] }
+  | { type: "clashes"; requestId: number; clashes: Clash[] }
   | { type: "error"; requestId: number; message: string };
 
 /** One step of a build, for Debug info: what was done (for which object), how long it took, and any error. */
@@ -125,6 +153,8 @@ export class Kernel {
         else if (msg.type === "fontLoaded") p.resolve(msg.name as never);
         else if (msg.type === "cutMeshes") p.resolve(msg.meshes as never);
         else if (msg.type === "stats") p.resolve(msg.stats as never);
+        else if (msg.type === "loops") p.resolve(msg.loops as never);
+        else if (msg.type === "clashes") p.resolve(msg.clashes as never);
         else {
           this.exportWarning = msg.warning ?? "";
           p.resolve(msg.blob as never);
@@ -217,6 +247,21 @@ export class Kernel {
   /** The finished model's volume, surface area and size (null if there's nothing solid). */
   stats(features: Feature[]): Promise<ModelStats | null> {
     return this.request({ type: "stats", features });
+  }
+
+  /** Where the rest of the model crosses sketch `id`'s plane, as outlines in that sketch. */
+  section(features: Feature[], id: string): Promise<SketchLoop[]> {
+    return this.request({ type: "section", features, id });
+  }
+
+  /** The shapes' outlines offset outwards by `distance` (inwards if it's below 0). */
+  offset(entities: SketchEntity[], distance: number): Promise<SketchLoop[]> {
+    return this.request({ type: "offset", entities, distance });
+  }
+
+  /** How each moving part sits against the rest of the model (overlaps, tight gaps). */
+  clashes(features: Feature[]): Promise<Clash[]> {
+    return this.request({ type: "clashes", features });
   }
 
   export(features: Feature[], format: "stl" | "step"): Promise<Blob> {

@@ -975,3 +975,109 @@ export function splinePieces(points: P[]): P[][] {
     return piece;
   });
 }
+
+// ---- Mirror, pattern and corners -------------------------------------------
+
+/**
+ * Move every point of an entity (and what it was trimmed against) with `f`, a
+ * turn or a mirror: `angle` maps its own angle (rectangles, ellipses, N-gons),
+ * and a mirror (`flip`) bows polygon edges the other way.
+ */
+function mapEntity(e: SketchEntity, f: (p: P) => P, angle: (a: number) => number, flip: boolean) {
+  const t = (p: P): P => {
+    const q = f(p);
+    return [round(q[0]), round(q[1])];
+  };
+  if ("x" in e && "y" in e) [e.x, e.y] = t([e.x, e.y]);
+  if (e.type === "slot" || e.type === "line") {
+    [e.x1, e.y1] = t([e.x1, e.y1]);
+    [e.x2, e.y2] = t([e.x2, e.y2]);
+  }
+  if (e.type === "polygon" || e.type === "spline" || e.type === "stroke") e.points = e.points.map(t);
+  if (e.type === "polygon" && flip) e.bends = e.bends.map((b) => -b);
+  if (e.type === "rect" || e.type === "ellipse" || e.type === "ngon") e.angle = round(((angle(e.angle) % 360) + 540) % 360 - 180);
+  for (const trim of e.trims ?? []) for (const s of trim.shapes) mapEntity(s, f, angle, flip);
+}
+
+/** A copy of an entity mirrored across the line through a and b. */
+export function mirroredEntity(e: SketchEntity, a: P, b: P, id: string): SketchEntity {
+  const c = { ...structuredClone(e), id };
+  const d = sub(b, a);
+  const l = len(d) || 1;
+  const u: P = [d[0] / l, d[1] / l];
+  const deg = (Math.atan2(u[1], u[0]) * 180) / Math.PI;
+  mapEntity(
+    c,
+    (p) => {
+      const q = sub(p, a);
+      const along = q[0] * u[0] + q[1] * u[1];
+      return [a[0] + 2 * along * u[0] - q[0], a[1] + 2 * along * u[1] - q[1]];
+    },
+    (x) => 2 * deg - x,
+    true,
+  );
+  return c;
+}
+
+/** A copy of an entity turned by `deg` degrees (counter-clockwise) about `centre`. */
+export function turnedEntity(e: SketchEntity, centre: P, deg: number, id: string): SketchEntity {
+  const c = { ...structuredClone(e), id };
+  mapEntity(c, (p) => add(centre, rot(sub(p, centre), deg)), (x) => x + deg, false);
+  return c;
+}
+
+/** A copy of an entity moved by (du, dv). */
+export function movedEntity(e: SketchEntity, by: P, id: string): SketchEntity {
+  const c = { ...structuredClone(e), id };
+  translateEntity(c, by);
+  return c;
+}
+
+/** A shape's corners, if it has sharp ones to round: a polygon's, a square-cornered rectangle's or an N-gon's. */
+function corners(e: SketchEntity): P[] {
+  if (e.trims?.length) return [];
+  if (e.type === "polygon") return e.points;
+  if (e.type === "rect" && !e.radius) return rectCorners(e);
+  if (e.type === "ngon") return ngonPoints(e);
+  return [];
+}
+
+/** The corner of a shape nearest `p`, within `tolerance`: its index, and how far it is. */
+export function cornerAt(e: SketchEntity, p: P, tolerance: number): { index: number; d: number } | null {
+  let best: { index: number; d: number } | null = null;
+  corners(e).forEach((c, index) => {
+    const d = dist(c, p);
+    if (d <= tolerance && (!best || d < best.d)) best = { index, d };
+  });
+  return best;
+}
+
+/**
+ * The shape with corner `i` rounded to radius `size` (or cut off `size` along
+ * each edge, for a bevel), as a polygon whose new edge is an exact arc.
+ * Only between two straight edges. Null if it doesn't fit there.
+ */
+export function roundCorner(e: SketchEntity, i: number, size: number, bevel: boolean): SketchEntity | null {
+  const pts = corners(e).map(([x, y]) => [round(x), round(y)] as P);
+  if (pts.length < 3 || size <= 0) return null;
+  const bends = e.type === "polygon" ? e.bends.slice() : pts.map(() => 0);
+  const n = pts.length;
+  const prev = (i - 1 + n) % n;
+  if (bends[prev] || bends[i]) return null;
+  const [P0, A, B] = [pts[i], pts[prev], pts[(i + 1) % n]];
+  const [la, lb] = [dist(A, P0), dist(B, P0)];
+  const u = scale(sub(A, P0), 1 / la);
+  const v = scale(sub(B, P0), 1 / lb);
+  const half = Math.acos(Math.max(-1, Math.min(1, u[0] * v[0] + u[1] * v[1]))) / 2;
+  if (half < 1e-3 || half > Math.PI / 2 - 1e-3) return null; // Doubled back, or no corner at all.
+  const d = bevel ? size : size / Math.tan(half);
+  if (d >= la - 1e-6 || d >= lb - 1e-6) return null;
+  const t1: P = [round(P0[0] + u[0] * d), round(P0[1] + u[1] * d)];
+  const t2: P = [round(P0[0] + v[0] * d), round(P0[1] + v[1] * d)];
+  // The arc bows towards the old corner by its sagitta.
+  const sag = bevel ? 0 : size * (1 - Math.sin(half));
+  const toward = (P0[0] - (t1[0] + t2[0]) / 2) * leftNormal(t1, t2)[0] + (P0[1] - (t1[1] + t2[1]) / 2) * leftNormal(t1, t2)[1];
+  pts.splice(i, 1, t1, t2);
+  bends.splice(i, 1, round(Math.sign(toward) * sag), bends[i]);
+  return { id: e.id, mode: e.mode, type: "polygon", points: pts, bends };
+}

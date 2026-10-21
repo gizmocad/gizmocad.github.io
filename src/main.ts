@@ -1,4 +1,4 @@
-import { Kernel, type BuildStep, type ImportedSolid, type ModelStats } from "./kernel";
+import { Kernel, type BuildStep, type Clash, type ImportedSolid, type ModelStats, type SketchLoop } from "./kernel";
 import { featureExtents, resizeFeature, sizeReadout } from "./resize";
 import {
   childrenOf,
@@ -63,7 +63,7 @@ import { CONSTRAINT_LABEL, constraintFits, measure as measureConstraint, refPoin
 import { autosave, build3mf, loadAutosave, outlinesToEntities, parse3mf, parseStl, svgToEntities, type ImportedPart, type MeshPart } from "./fileFormats";
 import { fcstdSketches, parseDxf, parseFcstd, parseGltf, parseObj, parseOff, parsePly, stem, type PickedFile } from "./importFormats";
 import { SketchEditor, type MenuItem, type SketchTool } from "./sketcher";
-import { bounds as sketchBounds, gearOuterRadius, removePoint } from "./sketchGeometry";
+import { bounds as sketchBounds, gearOuterRadius, isClosed, mirroredEntity, movedEntity, removePoint, turnedEntity } from "./sketchGeometry";
 import { HEDRON_FACES, HEDRON_NAMES, type HedronFaces } from "./hedron";
 import { BUILT_IN_FONTS, CUSTOM_FONT, builtInFont, builtInFontUrl, fontFamily, isCustomFont } from "./fonts";
 import { addDetail, appendToStl, baseMesh, decodeFloats, decodeIndices, encodeFloats, encodeIndices, importedMesh, meshToSculpt, scaleSculpt, sculptTriangles, vertexCount, type BrushKind, type BrushSettings, type SculptBase } from "./sculpt";
@@ -516,6 +516,7 @@ function selectObject(id: string | null, additive = false) {
   if (editingSketchId && id !== editingSketchId) stopSketchEdit();
   if (edgePick && id !== edgePick.featureId) stopEdgePick();
   if (viewport.chiseling && id !== viewport.chiseling) stopChisel();
+  if (shellPick && id !== shellPick) stopShellPick();
   selectedId = id;
   renderPanels();
   viewport.select(id, selectedIds);
@@ -1910,21 +1911,65 @@ function shellSection(f: Feature, update: (mutate: (f: Feature) => void) => void
   if (sh) {
     items.push(
       lengthField("Wall thickness", sh.thickness, (v) => update((t) => t.shell && (t.shell.thickness = v)), { min: 0 }),
-      labeled(
+      stacked(
         "Open",
         segmented(
           [
             { value: "top", label: "Top", title: "No top: a cup or open box" },
             { value: "bottom", label: "Bottom", title: "No bottom: a cover or lid" },
+            { value: "picked", label: "Faces…", title: "Leave open the faces you click (any side, or several)" },
             { value: "none", label: "Closed", title: "Sealed, with an empty pocket inside" },
           ],
           sh.open,
-          (v) => update((t) => t.shell && (t.shell.open = v)),
+          (v) => {
+            update((t) => t.shell && (t.shell.open = v));
+            if (v === "picked" && !sh.faces?.length) startShellPick(f.id);
+            else if (v !== "picked" && shellPick) stopShellPick();
+          },
         ),
       ),
     );
+    if (sh.open === "picked") {
+      const n = sh.faces?.length ?? 0;
+      const row = document.createElement("div");
+      row.className = "actions";
+      const pick = button(shellPick === f.id ? "✓ Done" : "Click faces to open", () => (shellPick === f.id ? stopShellPick() : startShellPick(f.id)), shellPick === f.id ? "primary" : "");
+      row.append(pick);
+      if (n) row.append(button("Close them all", () => update((t) => t.shell && delete t.shell.faces)));
+      items.push(row, hint(n ? `${n} face${n === 1 ? "" : "s"} left open. ${shellPick === f.id ? "Click more faces to open them too." : ""}` : "Click the faces to leave open, e.g. the end of a pipe or the side of a box."));
+    }
   }
   return items;
+}
+
+/** Hollow, open where faces are clicked: the object whose faces are being picked. */
+let shellPick: string | null = null;
+
+function startShellPick(id: string) {
+  shellPick = id;
+  const next = () =>
+    viewport.startFacePick(
+      id,
+      (_normal, _point, local) => {
+        commit((features) => {
+          const t = features.find((x) => x.id === id);
+          if (t?.shell) (t.shell.faces ??= []).push([local.x, local.y, local.z].map((v) => Math.round(v * 1e5) / 1e5) as [number, number, number]);
+        });
+        if (shellPick === id) next();
+      },
+      true,
+    );
+  next();
+  setNotice(`Click the faces of ${findFeature(id)?.name ?? "it"} to leave open. Esc or Done when finished.`);
+  renderProperties();
+}
+
+function stopShellPick() {
+  if (!shellPick) return;
+  shellPick = null;
+  viewport.stopFacePick();
+  setNotice("");
+  renderProperties();
 }
 
 /** The middle of some objects' combined bounds (world), e.g. to mirror them in place. */
@@ -1943,7 +1988,44 @@ function mirrorSection(ids: string[]): HTMLElement[] {
     b.title = `Flip ${ids.length > 1 ? "them" : "it"} along ${axis.toUpperCase()}, in place`;
     row.append(b);
   }
-  return [section("Mirror"), row];
+  const copies = document.createElement("div");
+  copies.className = "actions mirror-copies";
+  const SIDE_NAME = { x: ["left", "right"], y: ["front", "back"], z: ["bottom", "top"] } as const;
+  for (const axis of ["x", "y", "z"] as const)
+    for (const side of [1, -1] as const) {
+      const b = button(`${axis.toUpperCase()}${side > 0 ? "+" : "−"}`, () => mirrorCopy(ids, axis, side));
+      b.title = `A mirrored copy across ${ids.length > 1 ? "their" : "its"} ${SIDE_NAME[axis][side > 0 ? 1 : 0]} side (${axis.toUpperCase()}${side > 0 ? "+" : "−"}), meeting ${ids.length > 1 ? "them" : "it"} there: model half a symmetric part, mirror the rest`;
+      copies.append(b);
+    }
+  return [section("Mirror"), row, stacked("Mirrored copy across a side", copies)];
+}
+
+/**
+ * A mirrored copy of the objects across one side of their bounds, so it
+ * meets them there: half of a symmetric part makes the whole.
+ */
+function mirrorCopy(ids: string[], axis: "x" | "y" | "z", side: 1 | -1) {
+  const box = viewport.modelBounds(new Set(ids));
+  if (!box) return;
+  const c = box.getCenter(new Vector3());
+  const plane = { x: c.x, y: c.y, z: c.z };
+  plane[axis] = side > 0 ? box.max[axis] : box.min[axis];
+  const roots = (ids.length > 1 ? topSelected() : ids).map((id) => findFeature(id)).filter((f): f is Feature => !!f);
+  const all = roots.map((f) => {
+    const clones = cloneSubtree(f);
+    clones[0].name = `${f.name} mirrored`;
+    return clones;
+  });
+  commit((features) => {
+    for (const clones of all) {
+      insertFeatures(features, clones);
+      mirrorFeature(features, clones[0].id, axis, plane);
+    }
+  });
+  selectedIds = all.map((c) => c[0].id);
+  selectedId = selectedIds[0];
+  renderPanels();
+  setNotice(`Mirrored ${all.length > 1 ? `copies of ${all.length} objects` : "a copy"} across the ${axis.toUpperCase()}${side > 0 ? "+" : "−"} side.`);
 }
 
 function mirrorObjects(ids: string[], axis: "x" | "y" | "z") {
@@ -2119,7 +2201,9 @@ function multiPanel(): HTMLElement[] {
   group.title = "Put them in a new group (Ctrl+G): they move together but stay separate parts";
   const combine = button("⧉ Combine", combineSelected);
   combine.title = "Join them into one shape: it moves, rounds and exports as one (you can split it back up)";
-  actions.append(group, combine, button("Duplicate", duplicateSelected), button(`Delete ${selectedIds.length}`, deleteSelected, "danger"));
+  const overlap = button("◩ Intersect", () => combineSelected(true));
+  overlap.title = "Keep only where they all overlap (e.g. a box and a sphere make a rounded cube)";
+  actions.append(group, combine, overlap, button("Duplicate", duplicateSelected), button(`Delete ${selectedIds.length}`, deleteSelected, "danger"));
   items.push(...estimateSection());
   items.push(section("Selection"), actions, hint("Drag the gizmo to move them all together. Shift-click adds or removes one; Esc clears the selection."));
   return items;
@@ -2175,20 +2259,24 @@ function groupSelected() {
 }
 
 /** Join the selected objects into one shape (a combined group), which moves, rounds and exports as one. */
-function combineSelected() {
+function combineSelected(overlap = false) {
   const ids = topSelected();
   // A selected object inside another selected one (e.g. a part and its parent) joins in too.
   const inner = selectedIds.filter((id) => !ids.includes(id) && findFeature(id));
   if (ids.length + inner.length < 2) return;
-  groupIds(ids, true, inner);
-  setNotice(`Combined ${ids.length + inner.length} objects into one. Untick "Combine into one shape" on the group to keep them as separate parts.`);
+  groupIds(ids, overlap ? "overlap" : true, inner);
+  setNotice(
+    overlap
+      ? `Kept only where the ${ids.length + inner.length} objects overlap. Move them inside the group to change the shape; switch the group to "All of them" to join them instead.`
+      : `Combined ${ids.length + inner.length} objects into one. Untick "Combine into one shape" on the group to keep them as separate parts.`,
+  );
 }
 
 /**
  * Put objects (none inside another) into a new group around them; returns the
  * group's id. `inner` (objects inside those) are lifted out into the group too.
  */
-function groupIds(ids: string[], combined = false, inner: string[] = []): string {
+function groupIds(ids: string[], combined: boolean | "overlap" = false, inner: string[] = []): string {
   const parents = new Set(ids.map((id) => findFeature(id)?.parentId ?? null));
   const parentId = parents.size === 1 ? [...parents][0] : null;
   const group = createFeature("group", doc.features, parentId);
@@ -2203,6 +2291,7 @@ function groupIds(ids: string[], combined = false, inner: string[] = []): string
     if (combined) {
       const g = features.find((x) => x.id === group.id);
       if (g) g.combined = true;
+      if (g && combined === "overlap") g.overlap = true;
     }
   });
   selectedIds = [group.id];
@@ -2367,18 +2456,36 @@ function holesReaching(features: Feature[], f: Feature): Feature[] {
 function combineSection(f: Feature, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
   // Rounding, hollowing or texturing a group works on its joined shape, so those keep it combined.
   const needed = f.edgeOps.length > 0 || !!f.shell || !!f.texture;
-  const row = checkToggle("Combine into one shape", isMergedGroup(f), (on) => update((t) => (on ? (t.combined = true) : delete t.combined)));
+  const row = checkToggle("Combine into one shape", isMergedGroup(f), (on) => update((t) => (on ? (t.combined = true) : (delete t.combined, delete t.overlap))));
   if (needed) {
     (row.querySelector("input") as HTMLInputElement).disabled = true;
     row.title = "Its edge finishes, hollowing or texture work on the joined shape, so it stays combined";
   }
+  const keep = isMergedGroup(f)
+    ? [
+        labeled(
+          "Keep",
+          segmented(
+            [
+              { value: "all", label: "All of them", title: "Join its solids into one shape" },
+              { value: "overlap", label: "Only the overlap", title: "Keep just where all its solids overlap (an intersection)" },
+            ],
+            f.overlap ? "overlap" : "all",
+            (v) => update((t) => (v === "overlap" ? ((t.overlap = true), (t.combined = true)) : delete t.overlap)),
+          ),
+        ),
+      ]
+    : [];
   return [
     section("Combine"),
     row,
+    ...keep,
     hint(
-      isMergedGroup(f)
-        ? "Its parts are joined into one shape: it shows, rounds and exports as one solid. Holes inside the group cut it."
-        : "Its parts move together but stay separate shapes. Tick to join them into one solid (where they touch or overlap becomes one).",
+      f.overlap
+        ? "Only the space all its solids share is kept (an intersection): e.g. a box and a sphere make a rounded cube. Holes inside the group still cut it."
+        : isMergedGroup(f)
+          ? "Its parts are joined into one shape: it shows, rounds and exports as one solid. Holes inside the group cut it."
+          : "Its parts move together but stay separate shapes. Tick to join them into one solid (where they touch or overlap becomes one).",
     ),
   ];
 }
@@ -3457,24 +3564,61 @@ const otherSketches = (s: SketchFeature) => doc.features.filter((x): x is Sketch
 
 function sweepFields(s: SketchFeature, set: (mutate: (p: SketchFeature["params"]) => void) => void): HTMLElement[] {
   const strokes = s.params.entities.filter((e) => e.type === "stroke" && e.mode === "add").length;
-  return [
+  const custom = s.params.sweepProfile === "sketch";
+  const items: HTMLElement[] = [
     labeled(
       "Profile",
       segmented(
         [
           { value: "round" as const, label: "Round", title: "Round tubes" },
           { value: "square" as const, label: "Square", title: "Square tubes" },
+          { value: "sketch" as const, label: "Sketch", title: "Another sketch's shape: any cross-section (an I-beam, a lip, a moulding…)" },
         ],
         s.params.sweepProfile ?? "round",
-        (v) => set((p) => (p.sweepProfile = v)),
+        (v) => set((p) => ((p.sweepProfile = v), v === "sketch" && (p.sweepFrom ??= otherSketches(s)[0]?.id))),
       ),
     ),
-    hint(
-      strokes
-        ? `Each brush stroke (${strokes}) becomes a tube as thick as the stroke, centred on the sketch's plane. Change a stroke's width in the sketch to change the tube's.`
-        : "Draw the path with the Brush tool (B) in this sketch: each stroke becomes a tube as thick as the stroke.",
-    ),
   ];
+  if (!custom) {
+    items.push(
+      hint(
+        strokes
+          ? `Each brush stroke (${strokes}) becomes a tube as thick as the stroke, centred on the sketch's plane. Change a stroke's width in the sketch to change the tube's.`
+          : "Draw the path with the Brush tool (B) in this sketch: each stroke becomes a tube as thick as the stroke.",
+      ),
+    );
+    return items;
+  }
+  const others = otherSketches(s);
+  if (!others.length) return [...items, hint("Add a second sketch and draw the cross-section in it, centred on its origin (where its red and green axes cross). It can stay flat, anywhere in the model.")];
+  const from = document.createElement("select");
+  for (const o of others) from.add(new Option(o.name, o.id));
+  from.value = s.params.sweepFrom ?? "";
+  from.onchange = () => set((p) => (p.sweepFrom = from.value));
+  items.push(
+    labeled("Shape", from),
+    hint(
+      "The shape in the sketch picked is carried along each brush stroke in this sketch, and round each closed shape's outline (a rim, a seal, a picture frame). " +
+        "Its origin rides on the path, its V axis (green) points up from this sketch and its U axis (red) to the right of the path, or outwards round a closed shape.",
+    ),
+  );
+  return items;
+}
+
+/** A revolve's angle, and its rise per turn when it's a coil. */
+function revolveFields(s: SketchFeature, set: (mutate: (p: SketchFeature["params"]) => void) => void): HTMLElement[] {
+  const pitch = s.params.pitch ?? 0;
+  const items: HTMLElement[] = [
+    lengthField("Angle", s.params.angle, (v) => set((p) => (p.angle = Math.min(pitch > 0 ? 360 * 500 : 360, v))), { min: 0, unit: "°" }),
+    lengthField("Rise per turn", pitch, (v) => set((p) => (v > 0 ? (p.pitch = v) : delete p.pitch, v <= 0 && (p.angle = Math.min(360, p.angle)))), { min: 0 }),
+  ];
+  if (pitch > 0) {
+    items.push(
+      checkToggle("Left-handed", !!s.params.coilLeft, (on) => set((p) => (on ? (p.coilLeft = true) : delete p.coilLeft))),
+      hint(`A coil: the shape climbs ${pitch} mm along the V axis (green) every turn, ${Math.round((s.params.angle / 360) * 100) / 100} turns (360° each). Use it for springs of any wire shape, or threads of your own profile.`),
+    );
+  } else items.push(hint("Give it a rise per turn to make a coil instead: a spring or thread of this shape (set the angle to 360° × the turns)."));
+  return items;
 }
 
 function loftFields(s: SketchFeature, set: (mutate: (p: SketchFeature["params"]) => void) => void): HTMLElement[] {
@@ -3576,7 +3720,9 @@ function sketchSettings(s: SketchFeature, update: (mutate: (f: Feature) => void)
             ),
           ),
         ]
-      : [lengthField("Angle", s.params.angle, (v) => set((p) => (p.angle = Math.min(360, v))), { min: 0, unit: "°" })]),
+      : s.params.operation === "revolve"
+        ? revolveFields(s, set)
+        : []),
     ...placement,
   ];
 }
@@ -3595,6 +3741,7 @@ const TOOLS: { value: SketchTool; label: string; key: string; title: string }[] 
   { value: "brush", label: "≋ Brush", key: "B", title: "Paint freehand: hold and drag. The stroke becomes a shape as wide as the brush." },
   { value: "trim", label: "✂ Trim", key: "T", title: "Click a guide line to cut it back to where it crosses. Click a shape's edge where it runs inside another shape to merge them (or trim it back, if one adds and one cuts); click the part sticking out to trim that off; click a shape's edge on one side of a guide line crossing it to cut that side away." },
   { value: "constrain", label: "📐 Constrain", key: "K", title: "Click points, edges or circles (one or two), then pick a rule or dimension in the panel: horizontal, parallel, equal, tangent, a length…" },
+  { value: "corner", label: "◜ Corner", key: "F", title: "Round or bevel a corner: click where two straight edges meet (a polygon's, rectangle's or N-gon's). Set the size in the panel." },
   { value: "split", label: "⫽ Split", key: "X", title: "Click a line or brush stroke to cut it in two there; click a shape's edge to add a corner there (rectangles and N-gons become editable polygons)" },
 ];
 
@@ -3654,7 +3801,23 @@ function renderSketchPanel(panel: HTMLElement, s: SketchFeature, ed: SketchEdito
     const setSides = (v: number) => ((ed.ngonSides = clampSides(v)), renderProperties());
     items.push(lengthField("Sides", ed.ngonSides, setSides, { min: 3, plain: true }), sidePresets(ed.ngonSides, setSides));
   }
-  if (!["select", "point", "line"].includes(ed.tool)) {
+  if (ed.tool === "corner") {
+    items.push(
+      labeled(
+        "Corner",
+        segmented(
+          [
+            { value: "round", label: "Round", title: "An arc touching both edges" },
+            { value: "bevel", label: "Bevel", title: "A straight cut across the corner" },
+          ],
+          ed.cornerBevel ? "bevel" : "round",
+          (v) => ((ed.cornerBevel = v === "bevel"), renderProperties()),
+        ),
+      ),
+      lengthField(ed.cornerBevel ? "Cut back" : "Radius", ed.cornerSize, (v) => ((ed.cornerSize = v), renderProperties()), { min: 0 }),
+    );
+  }
+  if (!["select", "point", "line", "corner", "trim", "split", "constrain"].includes(ed.tool)) {
     items.push(labeled("New shapes", segmented(MODE_OPTIONS, ed.newMode, (m) => ((ed.newMode = m), sketchStateChanged(), ed.render()), "entity")));
   }
   items.push(cursor);
@@ -3718,14 +3881,156 @@ function renderSketchPanel(panel: HTMLElement, s: SketchFeature, ed: SketchEdito
       trim.title = "Merge the selected shapes where they overlap, removing the lines inside";
       actions.append(trim);
     }
-    items.push(actions);
+    items.push(actions, ...shapeTools(ed, sel));
   }
 
-  items.push(section("Sketch settings"), ...sketchSettings(s, updateSketch, true));
+  const project = button("⤓ Project the model", () => void projectModel(s, ed));
+  project.title = "Bring in the outline of the model where it crosses this sketch's plane (or the face the sketch lies on), to build on or snap to";
+  items.push(section("Sketch settings"), ...sketchSettings(s, updateSketch, true), project);
   items.push(button("✓ Finish sketch", stopSketchEdit, "primary wide"));
   items.push(hint("Right-click a shape for options, or empty space to select all. Drag dots to reshape; orange dots bend polygon edges into arcs. Right-drag pans, scroll zooms. Esc cancels."));
   panel.replaceChildren(...items);
   sketchStateChanged();
+}
+
+// ---- Mirror, repeat, offset and project in sketches -----------------------------------------
+
+/** Settings for the selection's mirror, repeat and offset tools (kept while sketching). */
+const shapeTool = { copies: 6, around: true, step: [10, 0] as [number, number], offset: 2 };
+
+/** Mirrored copies, repeats and offsets of the selected shapes. */
+function shapeTools(ed: SketchEditor, sel: SketchEntity[]): HTMLElement[] {
+  // A guide line picked with them is what they mirror across; a point, what they repeat around.
+  const guide = sel.length > 1 && sel.filter((e) => e.type === "line").length === 1 ? sel.find((e) => e.type === "line") : undefined;
+  const centre = sel.length > 1 && sel.filter((e) => e.type === "point").length === 1 ? sel.find((e) => e.type === "point") : undefined;
+  const shapes = sel.filter((e) => e !== guide && e !== centre);
+  if (!shapes.length) return [];
+  const items: HTMLElement[] = [section("Mirror, repeat & offset")];
+
+  const across = (a: Point2, b: Point2) => ed.addShapes(shapes.map((e) => mirroredEntity(e, a, b, newId())));
+  const mirror = document.createElement("div");
+  mirror.className = "actions";
+  const v = button("⇋ Across V", () => across([0, 0], [0, 1]));
+  v.title = "A mirrored copy on the other side of the V axis (green line)";
+  const u = button("⇵ Across U", () => across([0, 0], [1, 0]));
+  u.title = "A mirrored copy on the other side of the U axis (red line)";
+  mirror.append(v, u);
+  if (guide?.type === "line") {
+    const l = button("Across the line", () => across([guide.x1, guide.y1], [guide.x2, guide.y2]));
+    l.title = "A mirrored copy on the other side of the selected guide line";
+    mirror.append(l);
+  }
+  items.push(stacked("Mirrored copy", mirror));
+
+  items.push(
+    labeled(
+      "Repeat",
+      segmented(
+        [
+          { value: "around", label: "Around", title: centre ? "Spaced evenly around the selected point" : "Spaced evenly around the sketch's origin (select a point with them to go around that)" },
+          { value: "row", label: "In a row", title: "Each copy a step further along" },
+        ],
+        shapeTool.around ? "around" : "row",
+        (m) => ((shapeTool.around = m === "around"), renderProperties()),
+      ),
+    ),
+    lengthField("Count", shapeTool.copies, (n) => ((shapeTool.copies = Math.max(2, Math.min(360, Math.round(n)))), renderProperties()), { min: 2, plain: true }),
+  );
+  if (!shapeTool.around) {
+    items.push(
+      lengthField("Step U", shapeTool.step[0], (d) => ((shapeTool.step[0] = d), renderProperties())),
+      lengthField("Step V", shapeTool.step[1], (d) => ((shapeTool.step[1] = d), renderProperties())),
+    );
+  }
+  const repeat = button(`Repeat ×${shapeTool.copies}`, () => {
+    const n = shapeTool.copies;
+    const c: Point2 = centre?.type === "point" ? [centre.x, centre.y] : [0, 0];
+    const copies = Array.from({ length: n - 1 }, (_, i) =>
+      shapes.map((e) => (shapeTool.around ? turnedEntity(e, c, ((i + 1) * 360) / n, newId()) : movedEntity(e, [shapeTool.step[0] * (i + 1), shapeTool.step[1] * (i + 1)], newId()))),
+    ).flat();
+    ed.addShapes(copies);
+  });
+  repeat.className = "wide";
+  repeat.title = shapeTool.around ? `${shapeTool.copies} in all, evenly around ${centre ? "the selected point" : "the origin"} (e.g. a bolt circle)` : `${shapeTool.copies} in all, each a step further along`;
+  items.push(repeat);
+
+  if (shapes.some(isClosed)) {
+    const row = document.createElement("div");
+    row.className = "actions";
+    const out = button("Outward", () => void offsetShapes(ed, shapes, shapeTool.offset));
+    out.title = "A new shape this far outside each selected one";
+    const inward = button("Inward", () => void offsetShapes(ed, shapes, -shapeTool.offset));
+    inward.title = "A new shape this far inside each selected one (e.g. a wall's inside)";
+    row.append(out, inward);
+    items.push(lengthField("Offset by", shapeTool.offset, (d) => ((shapeTool.offset = Math.abs(d)), renderProperties()), { min: 0 }), row);
+  }
+  return items;
+}
+
+/** A shape offset by `d` that stays its own kind (a circle stays a circle…); undefined if it vanishes, null if the kernel has to work it out. */
+function exactOffset(e: SketchEntity, d: number): SketchEntity | undefined | null {
+  if (e.trims?.length) return null;
+  const id = newId();
+  const r = (v: number) => Math.round(v * 1e4) / 1e4;
+  switch (e.type) {
+    case "circle":
+      return e.radius + d > 0 ? { ...e, id, radius: r(e.radius + d) } : undefined;
+    case "slot":
+      return e.radius + d > 0 ? { ...e, id, radius: r(e.radius + d) } : undefined;
+    case "rect":
+      return e.width + 2 * d > 0 && e.height + 2 * d > 0 ? { ...e, id, width: r(e.width + 2 * d), height: r(e.height + 2 * d), radius: e.radius > 0 ? r(Math.max(0, e.radius + d)) : 0 } : undefined;
+    case "ngon": {
+      // Sharp corners: the sides move out by d, so the corners by d / cos(half the angle between them).
+      const out = e.radius + d / Math.cos(Math.PI / Math.max(3, Math.round(e.sides)));
+      return out > 0 ? { ...e, id, radius: r(out) } : undefined;
+    }
+    default:
+      return null;
+  }
+}
+
+/** A closed outline from the kernel as a sketch shape. */
+function loopEntity(l: SketchLoop, mode: EntityMode): SketchEntity {
+  if ("circle" in l) return { id: newId(), mode, type: "circle", x: l.circle[0], y: l.circle[1], radius: l.circle[2] };
+  return { id: newId(), mode, type: "polygon", points: l.points, bends: l.bends };
+}
+
+/** Offset copies of the closed shapes: holes in what comes back cut (or add, round a cut). */
+async function offsetShapes(ed: SketchEditor, shapes: SketchEntity[], d: number) {
+  if (!d) return;
+  const made: SketchEntity[] = [];
+  let lost = 0;
+  try {
+    for (const e of shapes.filter(isClosed)) {
+      const exact = exactOffset(e, d);
+      if (exact) made.push(exact);
+      else if (exact === undefined) lost++;
+      else {
+        const loops = await kernel.offset([e], d);
+        if (!loops.length) lost++;
+        const flip: EntityMode = e.mode === "add" ? "subtract" : e.mode === "subtract" ? "add" : e.mode;
+        made.push(...loops.map((l) => loopEntity(l, l.hole ? flip : e.mode)));
+      }
+    }
+  } catch (err) {
+    return setNotice((err as Error).message);
+  }
+  if (sketchEditor !== ed) return; // The sketch was closed meanwhile.
+  ed.addShapes(made);
+  if (lost) setNotice(`${lost === 1 ? "One shape is" : `${lost} shapes are`} too small to go ${-d} mm inwards.`);
+}
+
+/** Bring the model's outline where it crosses the sketch's plane into the sketch. */
+async function projectModel(s: SketchFeature, ed: SketchEditor) {
+  let loops: SketchLoop[];
+  try {
+    loops = await kernel.section(kernel.snapshot(activeFeatures(doc.features)), s.id);
+  } catch (err) {
+    return setNotice(`Couldn't project the model: ${(err as Error).message}`);
+  }
+  if (sketchEditor !== ed) return;
+  ed.addShapes(loops.map((l) => loopEntity(l, l.hole ? "subtract" : "add")));
+  setNotice(`Brought in ${loops.length} outline${loops.length === 1 ? "" : "s"} of the model (holes in it as cuts). They're shapes like any other: right-click ▸ Make Construction to keep them as guides only.`);
 }
 
 // ---- Sketch constraints ---------------------------------------------------------
@@ -3985,7 +4290,8 @@ function layFlat() {
     if (!f) setNotice("Select an object first, then click Lay flat.");
     return;
   }
-  if (viewport.pickingFace) {
+  if (shellPick) stopShellPick();
+  else if (viewport.pickingFace) {
     viewport.stopFacePick();
     $("#lay-flat").classList.remove("on");
     setStatus("");
@@ -4303,7 +4609,7 @@ function estimateSection(): HTMLElement[] {
   else {
     const { grams, metres, cost } = printEstimate(s);
     const solid = (s.volume / 1000) * (MATERIALS[printSettings.material] ?? 1.24);
-    out.innerHTML = `<b>${grams < 10 ? grams.toFixed(1) : Math.round(grams)} g</b> · ${metres.toFixed(metres < 10 ? 1 : 0)} m of filament · about <b>${cost.toFixed(2)}</b><br><span class="muted">${(s.volume / 1000).toFixed(2)} cm³ (${solid.toFixed(1)} g if solid) · ${s.size.map((v) => v.toFixed(1)).join(" × ")} mm</span>`;
+    out.innerHTML = `<b>${grams < 10 ? grams.toFixed(1) : Math.round(grams)} g</b> · ${metres.toFixed(metres < 10 ? 1 : 0)} m of filament · about <b>${cost.toFixed(2)}</b><br><span class="muted">${(s.volume / 1000).toFixed(2)} cm³ (${solid.toFixed(1)} g if solid) · ${s.size.map((v) => v.toFixed(1)).join(" × ")} mm<br>Centre of mass at ${s.centre.map((v) => (Math.round(v * 10) / 10 + 0).toFixed(1)).join(", ")} · surface ${(s.area / 100).toFixed(1)} cm²</span>`;
   }
   return [
     section("Print estimate"),
@@ -4826,15 +5132,60 @@ function reportPrintCheck() {
   if (!printCheckOn || !r) return;
   const cm2 = (mm2: number) => (mm2 / 100).toFixed(mm2 < 1000 ? 2 : 1);
   setNotice(
-    !r.overhang && !r.thin
+    (!r.overhang && !r.thin
       ? "Print check: no overhangs past 45° and no walls under 0.8 mm."
-      : `Print check: ${r.overhang ? `overhangs past 45° (orange, ${cm2(r.overhang)} cm²) need supports or a different orientation (try Lay flat)` : "no overhangs past 45°"}; ${r.thin ? `walls under 0.8 mm (red, ${cm2(r.thin)} cm²) may print badly or not at all` : "no walls under 0.8 mm"}.`,
+      : `Print check: ${r.overhang ? `overhangs past 45° (orange, ${cm2(r.overhang)} cm²) need supports or a different orientation (try Lay flat)` : "no overhangs past 45°"}; ${r.thin ? `walls under 0.8 mm (red, ${cm2(r.thin)} cm²) may print badly or not at all` : "no walls under 0.8 mm"}.`) +
+      (clashReport ? ` ${clashReport}` : ""),
   );
+  void checkMovingParts();
+}
+
+/** What the print check found about moving parts (print-in-place gaps), and for which revision of the model. */
+let clashReport = "";
+let clashRevision = -1;
+
+/** Gap a part printed in place needs to come free (FDM), mm. */
+const PRINT_IN_PLACE_GAP = 0.3;
+
+/**
+ * With the print check on, check each moving part against the rest: an
+ * overlap (shown purple) or a gap under PRINT_IN_PLACE_GAP would fuse it if
+ * it's printed in place.
+ */
+async function checkMovingParts() {
+  const movers = activeFeatures(doc.features).filter((f) => f.joint && f.mode === "solid");
+  if (!printCheckOn || !movers.length) {
+    clashReport = "";
+    clashRevision = modelRevision;
+    viewport.setClashes([]);
+    return;
+  }
+  if (clashRevision === modelRevision) return;
+  const rev = (clashRevision = modelRevision);
+  let clashes: Clash[];
+  try {
+    clashes = await kernel.clashes(kernel.snapshot(activeFeatures(doc.features)));
+  } catch {
+    return;
+  }
+  if (rev !== modelRevision || !printCheckOn) return;
+  viewport.setClashes(clashes.flatMap((c) => (c.mesh ? [c.mesh] : [])));
+  const name = (id: string) => findFeature(id)?.name ?? "A part";
+  const stuck = clashes.filter((c) => c.overlap > 0);
+  const tight = clashes.filter((c) => !c.overlap && c.gap >= 0 && c.gap < PRINT_IN_PLACE_GAP);
+  const fine = clashes.length - stuck.length - tight.length;
+  const parts = [
+    ...stuck.map((c) => `${name(c.id)} overlaps what it moves against by ${c.overlap < 10 ? c.overlap.toFixed(2) : Math.round(c.overlap)} mm³ (purple): printed in place it would be stuck`),
+    ...tight.map((c) => `${name(c.id)} is only ${c.gap.toFixed(2)} mm from the rest: printed in place it needs about ${PRINT_IN_PLACE_GAP} mm`),
+  ];
+  clashReport = parts.length ? `Moving parts: ${parts.join("; ")}.` : `Moving parts: ${fine === 1 ? "it clears" : `all ${fine} clear`} the rest by ${PRINT_IN_PLACE_GAP} mm or more.`;
+  reportPrintCheck();
 }
 $("#print-check").onclick = () => {
   printCheckOn = !printCheckOn;
   $("#print-check").classList.toggle("on", printCheckOn);
   viewport.setPrintCheck(printCheckOn);
+  clashRevision = -1;
   if (printCheckOn) reportPrintCheck();
   else setNotice("");
 };
@@ -5437,7 +5788,8 @@ window.addEventListener("keydown", (e) => {
   } else if (e.key === "Delete" || e.key === "Backspace") {
     deleteSelected();
   } else if (e.key === "Escape") {
-    if (viewport.pickingFace) layFlat();
+    if (shellPick) stopShellPick();
+    else if (viewport.pickingFace) layFlat();
     else if (viewport.chiseling) stopChisel();
     else if (edgePick) stopEdgePick();
     else selectObject(null);

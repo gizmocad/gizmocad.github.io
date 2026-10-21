@@ -27,23 +27,26 @@
   turn them together with the gizmo, **align** their sides or centres, **space them evenly**, colour, mirror, duplicate,
   delete, or **group** them (Ctrl+G).
 - **Copy and paste** (Ctrl+C / Ctrl+X / Ctrl+V), also between GizmoCAD windows.
-- **Mirror** any object (or several) along X, Y or Z, in place.
+- **Mirror** any object (or several) along X, Y or Z, in place, or make a **mirrored copy across one of its sides** (X+, X−, Y+…) so the copy meets it there: model half a symmetric part and mirror the rest.
 - **Ghost** an object (G, or the ghost button in the list): it turns see-through and clicks, placing and snapping go
   through it, so you can put things inside or behind it. It's still part of the model and exports.
 - **Repeat:** copies in a row, a grid, or around a circle (e.g. holes round a flange), previewed before they're added.
-- **Hollow:** turn a solid into walls of a set thickness, open at the top or bottom, or closed.
+- **Hollow:** turn a solid into walls of a set thickness, open at the top or bottom, closed, or open at the **faces you click** (the ends of a pipe, a side of a box).
 - **Textures:** real, printable surface patterns on any solid: diamond knurl, ribs, rings, bumps, honeycomb, square grid,
   bricks, waves, wood grain or rough (fuzzy skin), pressed in or raised, on its sides, top or all faces, wrapped around round
   shapes or laid flat. Shown as you work and in STL/3MF exports (STEP keeps the plain exact shape).
 - **Tilt:** taper an object's sides in or out by an angle (the base keeps its size), or lean the whole shape over along X or Y.
 - **Colours** per object (new objects take turns through green, orange, purple, yellow and pink), shown in the view and saved into 3MF exports.
 - **Measure** (M): click two points (corners and edges snap) for the distance and its X/Y/Z parts; two faces also give their angle.
-- **Print estimate:** a selected object (or several) shows roughly what printing it takes: weight in grams for the chosen material and infill, metres of 1.75 mm filament, and cost at your price per kg. GizmoCAD menu ▸ Print estimate does the whole model.
+- **Print estimate:** a selected object (or several) shows roughly what printing it takes: weight in grams for the chosen material and infill, metres of 1.75 mm filament, and cost at your price per kg, plus its volume, surface area and centre of mass. GizmoCAD menu ▸ Print estimate does the whole model.
 - **Print check** (⚠ in the view's corner): overhangs steeper than 45° that don't sit on the bed show orange, walls thinner than 0.8 mm (two nozzle widths) red, with how much of each.
+  Moving parts (hinged, sliding, orbiting) are checked against the rest: where one overlaps shows purple, and a gap under 0.3 mm is flagged, since printed in place either would fuse it.
 - Mark any shape as a **hole**: what it cuts is shown cut as you work, with the hole itself see-through so you can still move it.
   Holes cut imported meshes (STL, OBJ, 3MF…) too, using the Manifold mesh library, as long as the mesh is closed.
   **Show result** shows only the finished boolean result (parts merged), computed by the OpenCascade kernel.
 - **Sweep & loft:** a sketch can become a **sweep** (each brush stroke turns into a round or square tube as thick as the stroke: pipes, handles, rails) or a **loft** (its first shape blends into another sketch's, e.g. square at the bottom to round at the top; place that sketch where the loft should end).
+  A sweep's profile can also be **another sketch's shape** (an I-beam, a lip, a moulding): it's carried along each brush stroke, and round each closed shape's outline (a rim, a seal groove, a picture frame).
+- **Coils:** give a revolve a **rise per turn** and it climbs as it turns (angle 360° × the turns, left- or right-handed): springs of any wire shape, or threads of your own profile.
 - **Sketches:** points, guide lines, rectangles (rounded corners, any angle), circles, ellipses,
   regular polygons, slots, polygons with arc edges, smooth curves (closer points make tighter bends), and freehand brush strokes, on the XY/XZ/YZ plane or any
   tilted Plane object. Shapes can add to the profile, cut it, or just act as guides. Snap to existing
@@ -56,6 +59,10 @@
   In sketches, the Trim tool (T) merges shapes where you click an edge inside another shape, trims off the part of a shape sticking out
   of another when you click its outside edge, cuts a shape along a guide line (dropping the side you click), or trims a guide line back
   to its crossings, and "Trim overlaps" merges all selected overlapping shapes. The Split tool (X) cuts a line or brush stroke in two, or adds a corner to a shape's edge.
+- **More sketch tools:** the **Corner** tool (F) rounds or bevels a corner where two straight edges meet (an exact arc). With shapes selected:
+  a **mirrored copy** across the V or U axis (or a selected guide line), **repeat** them around the origin (or a selected point; a bolt circle) or in a row,
+  and **offset** them outward or inward by a distance (circles, rectangles, slots and N-gons stay themselves; other shapes become exact lines and arcs).
+  **⤓ Project the model** brings in the model's outline where it crosses the sketch's plane (or the face the sketch lies on), holes as cuts, to build on or snap to.
 - **Sketch constraints:** with the Constrain tool (K), click one or two points, edges or circles and pick horizontal,
   vertical, parallel, perpendicular, equal, tangent, coincident or fixed, or a length, distance, diameter or angle
   dimension. The drawing then keeps to them as you edit it, and the values can be changed in the panel.
@@ -95,6 +102,7 @@
   - another **GizmoCAD** model, brought into this one.
 - **Exports** hold just the selected objects (with the holes that reach them still cut) when something is selected, or the whole model when nothing is.
 - **Combine:** select several objects and click **⧉ Combine** to join them into one shape (it shows, rounds and exports as one solid). A group's **Combine into one shape** switch turns this on or off.
+  **◩ Intersect** keeps only where they all overlap (a box and a sphere make a rounded cube); a combined group can switch between All of them and Only the overlap.
 - **Folders:** groups (Group button, Ctrl+G, or drag objects onto each other in the list) fold shut with the ▾ arrow beside them.
 - **Chisel:** on a solid, **Chisel** then drag across a face to carve a groove (set its width, depth and Flat, V or Round tip). Each stroke is a hole inside the object whose sketch can be edited.
 - **Clearance:** a hole can grow by a set amount on every side, so a part the same shape fits into what it cuts.
