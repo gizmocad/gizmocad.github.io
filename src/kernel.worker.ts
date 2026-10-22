@@ -1396,23 +1396,40 @@ function halfSpace(c: Clip, lo: number[], hi: number[]): Shape3D {
 /** Keep one side of each cut (a split piece): intersect with a box covering that side. */
 function applyClips(shape: Shape3D, clips: Clip[]): Shape3D {
   for (const c of clips) {
-    const [lo, hi] = shape.boundingBox.bounds.map((p) => [...p]) as [number[], number[]];
-    for (let i = 0; i < 3; i++) {
-      lo[i] -= 1;
-      hi[i] += 1;
-    }
-    if (c.normal) {
-      shape = shape.intersect(halfSpace(c, lo, hi));
-      continue;
-    }
-    const i = { x: 0, y: 1, z: 2 }[c.axis];
-    if (c.keep === "below") hi[i] = c.at;
-    else lo[i] = c.at;
-    if (hi[i] - lo[i] < 1e-6) throw new Error("This piece's split is outside the object, so nothing is left of it.");
-    shape = shape.intersect(makeBox(lo as [number, number, number], hi as [number, number, number]));
+    const region = clipRegion(c, ...shape.boundingBox.bounds);
+    if (!region) throw new Error("This piece's split is outside the object, so nothing is left of it.");
+    shape = shape.intersect(region);
   }
   return shape;
 }
+
+/** The side of a split a piece keeps, as a solid covering a shape within `lo`..`hi` (null: none of it's on that side). */
+function clipRegion(c: Clip, lo0: ArrayLike<number>, hi0: ArrayLike<number>): Shape3D | null {
+  const lo = [0, 1, 2].map((i) => lo0[i] - 1);
+  const hi = [0, 1, 2].map((i) => hi0[i] + 1);
+  if (c.normal) return halfSpace(c, lo, hi);
+  const i = { x: 0, y: 1, z: 2 }[c.axis];
+  if (c.keep === "below") hi[i] = c.at;
+  else lo[i] = c.at;
+  if (hi[i] - lo[i] < 1e-6) return null;
+  return makeBox(lo as [number, number, number], hi as [number, number, number]);
+}
+
+/** A split piece's side, as triangles: what's inside it, cut to its side (see clipsKid). */
+function clipMesh(w: WorldMesh, clips: Clip[]): WorldMesh | null {
+  for (const c of clips) {
+    const region = clipRegion(c, ...meshBounds(w));
+    if (!region) return null;
+    w = meshBoolean(w, shapeTriangles(region), "intersect");
+  }
+  return w;
+}
+
+/**
+ * Whether a split piece cuts something inside it to its side too: what was copied with it when it was split
+ * does, but another split piece put inside it keeps its own side (the other half, say, to go with it).
+ */
+const clipsKid = (self: Feature | null, kid: Feature): self is Feature & { clips: Clip[] } => !!self && self.kind !== "group" && !!self.clips?.length && !kid.clips?.length;
 
 /**
  * A threaded rod: a core cylinder plus a 60° thread ridge swept along a helix,
@@ -2395,8 +2412,8 @@ function branchTriangles(features: Feature[], f: Feature | null, inherited: Mesh
       return joinMeshes(w, placed);
     }
   };
-  // Fillets on a merged group, or a split, need the exact result.
-  if (f && ((f.kind === "group" && isMergedGroup(f)) || f.clips?.length)) {
+  // Fillets on a merged group, or a split group, need the exact result.
+  if (f && f.kind === "group" && (isMergedGroup(f) || f.clips?.length)) {
     // A merged group's triangles are kept with its shape (triangulating a big rounded one takes a while).
     let tris: WorldMesh | null;
     if (f.kind === "group") tris = groupTriangles(features, f);
@@ -2407,8 +2424,9 @@ function branchTriangles(features: Feature[], f: Feature | null, inherited: Mesh
     }
     return tris && cutAll(tris, reaching(inherited, f), f);
   }
-  if (inherited.length || anyIgnoredHoles(features)) {
+  if (inherited.length || anyIgnoredHoles(features) || f?.clips?.length) {
     // Some objects ignore some holes: each piece is cut by the holes that reach it (as branchIgnoring does).
+    // (And a split object's pieces: what's inside it is cut to its side as it's added, see clipsKid.)
     const kids = childrenOf(features, f?.id ?? null);
     const own: MeshCutter[] = [];
     for (const c of kids.filter((c) => c.mode === "hole")) {
@@ -2428,7 +2446,9 @@ function branchTriangles(features: Feature[], f: Feature | null, inherited: Mesh
       const direct = toK.filter((c) => !deep.includes(c));
       const back = localMatrix(k).invert();
       const kk = branchTriangles(features, k, deep.map((c) => ({ ...c, mesh: transformMesh(c.mesh, back) })));
-      if (kk) w = join(w, cutAll(transformMesh(kk, localMatrix(k)), direct, k));
+      const placed = kk && cutAll(transformMesh(kk, localMatrix(k)), direct, k);
+      const kept = placed && clipsKid(f, k) ? clipMesh(placed, f.clips) : placed;
+      if (kept) w = join(w, kept);
     }
     return w;
   }
@@ -2932,7 +2952,7 @@ function branchIgnoring(features: Feature[], self: Feature | null, inherited: Cu
     const direct = reaching.filter((c) => !deep.includes(c));
     const s = branch(features, k, deep.map((c) => ({ id: c.id, shape: unplace(k, copyShape(c.shape)) })));
     if (!s) continue;
-    const placed = cutBy(place(k, s), direct);
+    const placed = cutBy(clipsKid(self, k) ? applyClips(place(k, s), self.clips) : place(k, s), direct);
     result = result ? booleanSafe(result, placed, self?.overlap ? "intersect" : "fuse") : placed;
   }
   return result;
@@ -3025,7 +3045,7 @@ function branchNow(features: Feature[], self: Feature | null, inherited: Cutter[
     if (excludeTextured && isTextured(c) && c.kind === "group") continue;
     const s = branch(features, c);
     if (s) {
-      const placed = place(c, s);
+      const placed = clipsKid(self, c) ? applyClips(place(c, s), self.clips) : place(c, s);
       result = result ? booleanSafe(result, placed, self?.overlap ? "intersect" : "fuse") : placed;
     }
   }
@@ -3061,8 +3081,9 @@ function finishBranch(self: Feature, result: Shape3D, hasKids: boolean): Shape3D
       failures[self.id] = message(err);
     }
   }
-  // A split piece keeps only its side, children included.
-  if (self.clips?.length && hasKids) {
+  // A split group keeps only its side, everything in it included (a split object's own shape is already
+  // cut to its side, and what's inside it is as it's added: see clipsKid).
+  if (self.kind === "group" && self.clips?.length && hasKids) {
     try {
       result = applyClips(result, self.clips);
     } catch (err) {
