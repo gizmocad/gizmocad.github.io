@@ -2,7 +2,7 @@
 // X/Y/Z; instead of storing a stretch, we bake them into the object's real
 // dimensions so every size stays exact and editable.
 
-import { SCREW_SIZES, snapLayout, subtreeIds, syncSnapPair, type Feature, type SketchEntity, type SketchPlane, type Vec3 } from "./model";
+import { SCREW_SIZES, snapHeadroom, snapLayout, subtreeIds, syncSnapPair, type Feature, type SketchEntity, type SketchPlane, type Vec3 } from "./model";
 import { decodeFloats, encodeFloats } from "./sculpt";
 import { hedronBox } from "./hedron";
 import { gearOuterRadius, prismPoints, round, starPoints } from "./sketchGeometry";
@@ -392,7 +392,7 @@ function baseExtents(f: Feature): [Vec3, Vec3] | null {
       const { r, embed } = snapLayout(p);
       const socket = p.part === "socket";
       const R = r + p.catch + (socket ? p.clearance : 0);
-      return [{ x: -R, y: -R, z: socket ? -0.5 : -embed }, { x: R, y: R, z: socket ? p.depth + p.clearance + 0.3 : p.depth }];
+      return [{ x: -R, y: -R, z: socket ? -0.5 : -embed }, { x: R, y: R, z: socket ? p.depth + snapHeadroom(p) : p.depth }];
     }
     case "screw": {
       const size = SCREW_SIZES[f.params.size];

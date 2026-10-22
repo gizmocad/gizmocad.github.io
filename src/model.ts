@@ -165,6 +165,8 @@ export interface SnapParams {
   catch: number;
   /** How much bigger than the peg the socket is, all round. */
   clearance: number;
+  /** The gap left past the peg's tip in the socket (unset: the clearance + 0.3 mm). */
+  headroom?: number;
   /** A sloped catch, so the parts pull apart again; otherwise it stays shut. */
   release: boolean;
   pair?: string;
@@ -180,6 +182,9 @@ export function snapLayout(p: SnapParams) {
   const widest = p.depth - lead;
   return { r, widest, land, back, catchAt: widest - land - back, embed: Math.min(1, r) };
 }
+
+/** The gap past a snap peg's tip at the bottom of its socket. */
+export const snapHeadroom = (p: SnapParams) => p.headroom ?? p.clearance + 0.3;
 
 /** Give a snap joint's other half the same sizes (they only fit together that way). */
 export function syncSnapPair(features: Feature[], f: Feature) {

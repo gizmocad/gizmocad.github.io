@@ -43,6 +43,7 @@ import {
   type SketchOperation,
   type ScrewParams,
   type SnapParams,
+  snapHeadroom,
   snapLayout,
   syncSnapPair,
   type GrooveTip,
@@ -1659,6 +1660,7 @@ function snapFields(f: Extract<Feature, { kind: "snap" }>): HTMLElement[] {
     lengthField("Depth", p.depth, (v) => set((t) => (t.depth = v)), { min: 0 }),
     lengthField("Catch", p.catch, (v) => set((t) => (t.catch = v)), { min: 0 }),
     lengthField("Clearance", p.clearance, (v) => set((t) => (t.clearance = v)), { min: 0 }),
+    lengthField("Headroom", snapHeadroom(p), (v) => set((t) => (t.headroom = v)), { min: 0 }),
     labeled(
       "Holds",
       segmented(
@@ -1686,7 +1688,7 @@ function snapFields(f: Extract<Feature, { kind: "snap" }>): HTMLElement[] {
     items.push(
       hint(
         peg
-          ? `Clicks into ${escapeHtml(other.name)}${otherPart ? ` in <b>${escapeHtml(otherPart.name)}</b>` : ""}. <b>Depth</b> is how far it goes in; <b>Catch</b> how far the catch sticks out round it (more holds tighter but takes more force); <b>Clearance</b> how much bigger the socket is. Print with the peg pointing up, and push the parts together until it clicks.`
+          ? `Clicks into ${escapeHtml(other.name)}${otherPart ? ` in <b>${escapeHtml(otherPart.name)}</b>` : ""}. <b>Depth</b> is how far it goes in; <b>Catch</b> how far the catch sticks out round it (more holds tighter but takes more force); <b>Clearance</b> how much bigger the socket is round it; <b>Headroom</b> the gap left past its tip at the bottom of the socket. Print with the peg pointing up, and push the parts together until it clicks.`
           : `The socket for ${escapeHtml(other.name)}${otherPart ? ` on <b>${escapeHtml(otherPart.name)}</b>` : ""}: a bore, and past it a wider pocket the catch clicks into.`,
       ),
       go,

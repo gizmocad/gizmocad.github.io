@@ -26,6 +26,7 @@ import {
   clipNormal,
   type ScrewParams,
   type SnapParams,
+  snapHeadroom,
   snapLayout,
   type Shell,
   type SpringParams,
@@ -1595,7 +1596,7 @@ function buildSnap(p: SnapParams): Shape3D {
   if (catchAt < 0.5) throw new Error(`A snap joint this size needs a depth of at least ${(p.depth - catchAt + 0.5).toFixed(1)} mm for its catch.`);
   if (p.part === "socket") {
     // The bore, then a wider pocket from just before where the catch ends up (so it clicks home even if the print's a little off).
-    const [bore, pocket, ledge, end] = [r + p.clearance, r + c + p.clearance, catchAt - 0.1, p.depth + p.clearance + 0.3];
+    const [bore, pocket, ledge, end] = [r + p.clearance, r + c + p.clearance, catchAt - 0.1, p.depth + snapHeadroom(p)];
     return revolveUpright(polygonDrawing([[0, -0.5], [bore, -0.5], [bore, ledge], [pocket, ledge], [pocket, end], [0, end]]));
   }
   // Sunk into its own part a little, so the two print as one.

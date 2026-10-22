@@ -119,7 +119,7 @@
   peg goes (on the face where they meet, or straight through the other part: it finds where they meet along that line) and the
   part it goes into. That part gets a socket (a bore, and a wider pocket the catch springs out into); this one a peg with a slot
   down its tip and a catch round it. Into a thin part the peg goes right through and catches on the far side. Diameter, depth,
-  catch, clearance and Stays shut / Pulls apart (a flat or a 45° back to the catch) change both halves together.
+  catch, clearance, headroom (the gap past the peg's tip at the bottom of the socket) and Stays shut / Pulls apart (a flat or a 45° back to the catch) change both halves together.
 - **Clearance:** a hole can grow by a set amount on every side, so a part the same shape fits into what it cuts.
   On a solid, **Make a clearance cut** adds a copy of it as a hole 0.2 mm bigger all round that cuts what it sits in but not itself.
   It's a copy of the object as it was: after changing the object (or what's inside it), **↻ Update clearance cut** makes it again
