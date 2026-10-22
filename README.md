@@ -123,7 +123,7 @@
   catch, clearance, headroom (the gap past the peg's tip at the bottom of the socket), whether the socket stays lined up with the peg when it moves and Stays shut / Pulls apart (a flat or a 45° back to the catch) change both halves together.
 - **Holes in a part:** a hole cuts the part it's in. **Cut everything it overlaps** in its panel makes it cut like a clearance cut
   instead: every object it reaches, each with a tick box there (and in that object's Cut by holes) to leave it alone. Snap sockets
-  do this unless it's unticked.
+  always do: an object's Cut by holes says whether it's cut by one.
 - **Clearance:** a hole can grow by a set amount on every side, so a part the same shape fits into what it cuts.
   On a solid, **Make a clearance cut** adds a copy of it as a hole 0.2 mm bigger all round that cuts what it sits in but not itself.
   It's a copy of the object as it was: after changing the object (or what's inside it), **↻ Update clearance cut** makes it again

@@ -194,7 +194,8 @@ export function canCutAround(features: Feature[], h: Feature): boolean {
   return h.mode === "hole" && !h.joint && !!p && p.mode === "solid";
 }
 
-export const cutsAround = (h: Feature) => h.mode === "hole" && (h.cutsAround ?? h.kind === "snap");
+/** Does a hole cut everything it reaches? A snap socket always does (each object's Cut by holes says whether it's cut); others when set to. */
+export const cutsAround = (h: Feature) => h.mode === "hole" && (h.kind === "snap" || !!h.cutsAround);
 
 /**
  * The model as the kernel builds it: holes set to cut around them moved to the top level (staying where

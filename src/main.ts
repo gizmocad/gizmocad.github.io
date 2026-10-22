@@ -1697,7 +1697,7 @@ function snapFields(f: Extract<Feature, { kind: "snap" }>): HTMLElement[] {
       hint(
         peg
           ? `Clicks into ${escapeHtml(other.name)}${otherPart ? ` in <b>${escapeHtml(otherPart.name)}</b>` : ""}. <b>Depth</b> is how far it goes in; <b>Catch</b> how far the catch sticks out round it (more holds tighter but takes more force); <b>Clearance</b> how much bigger the socket is round it; <b>Headroom</b> the gap left past its tip at the bottom of the socket. Print with the peg pointing up, and push the parts together until it clicks.`
-          : `The socket for ${escapeHtml(other.name)}${otherPart ? ` on <b>${escapeHtml(otherPart.name)}</b>` : ""}: a bore, and past it a wider pocket the catch clicks into.`,
+          : `The socket for ${escapeHtml(other.name)}${otherPart ? ` on <b>${escapeHtml(otherPart.name)}</b>` : ""}: a bore, and past it a wider pocket the catch clicks into. It cuts whatever it overlaps (but not the peg's part): to leave something uncut, untick it under that object's <b>Cut by holes</b>.`,
       ),
       go,
     );
@@ -2741,8 +2741,9 @@ function combineSection(f: Feature, update: (mutate: (f: Feature) => void) => vo
 function fitSection(f: Feature, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
   if (f.kind === "sketch" && f.params.operation === "flat") return [];
   if (f.mode === "hole") {
+    // A snap socket cuts whatever it overlaps, like any hole there: each object's Cut by holes says whether it's cut.
+    if (f.kind === "snap") return [];
     const reach = canCutAround(doc.features, f) ? holeReachSection(f, update) : [];
-    if (f.kind === "snap") return reach.length ? [section("Cuts"), ...reach] : [];
     const items: HTMLElement[] = [
       ...(reach.length ? [section("Cuts"), ...reach] : []),
       section("Clearance"),
