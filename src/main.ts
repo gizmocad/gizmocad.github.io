@@ -43,8 +43,9 @@ import {
   type SketchOperation,
   type ScrewParams,
   type SnapParams,
+  canCutAround,
   cutsAround,
-  holeSurroundings,
+  withHolesCuttingAround,
   snapHeadroom,
   snapLayout,
   syncSnapPair,
@@ -62,6 +63,7 @@ import {
   type SketchRef,
   type ConstraintType,
   colourOf,
+  insideMergedGroup,
   isMergedGroup,
 } from "./model";
 import { Box3, BufferAttribute, BufferGeometry, EdgesGeometry, Euler, MathUtils, Matrix4, Quaternion, Vector3 } from "three";
@@ -2678,6 +2680,8 @@ function holesFromOutside(f: Feature): Feature[] {
 
 function holesReaching(features: Feature[], f: Feature): Feature[] {
   if (f.mode === "hole") return [];
+  // Holes that cut everything they reach count as being at the top level.
+  features = withHolesCuttingAround(features);
   const holes = childrenOf(features, f.id).filter((c) => c.mode === "hole");
   let node = f;
   while (node.parentId) {
@@ -2733,14 +2737,7 @@ function combineSection(f: Feature, update: (mutate: (f: Feature) => void) => vo
 function fitSection(f: Feature, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
   if (f.kind === "sketch" && f.params.operation === "flat") return [];
   if (f.mode === "hole") {
-    // Its part is inside another object: cut that too (else that one fills the hole back in where they overlap).
-    const around = holeSurroundings(doc.features, f);
-    const reach = around.length
-      ? [
-          checkToggle(`Cut ${around.map((x) => x.name).join(", ")} too`, cutsAround(f), (on) => update((t) => (t.cutsAround = on))),
-          hint(`${escapeHtml(findFeature(f.parentId)?.name ?? "")} is inside ${escapeHtml(around[0].name)}: ticked, this hole cuts that as well, so it isn't filled back in where they overlap.`),
-        ]
-      : [];
+    const reach = canCutAround(doc.features, f) ? holeReachSection(f, update) : [];
     if (f.kind === "snap") return reach.length ? [section("Cuts"), ...reach] : [];
     const items: HTMLElement[] = [
       ...(reach.length ? [section("Cuts"), ...reach] : []),
@@ -3047,6 +3044,49 @@ function carveGroove(id: string, points: Vec3[], normal: Vec3) {
     setWorldMatrix(features, groove.id, world);
   });
   setNotice(`Carved ${groove.name} (${fmt(width)} mm wide, ${fmt(depth)} mm deep) into ${target.name}. Keep dragging for more; Esc to stop.`);
+}
+
+/**
+ * A hole inside a part: just that part, or (like a clearance cut) everything it reaches, with a tick box
+ * for each object it overlaps (the same as that object's Cut by holes).
+ */
+function holeReachSection(f: Feature, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
+  const part = findFeature(f.parentId);
+  const on = cutsAround(f);
+  const items: HTMLElement[] = [checkToggle("Cut everything it overlaps", on, (want) => update((t) => (t.cutsAround = want)))];
+  if (!on) {
+    items.push(hint(`Cuts only ${escapeHtml(part?.name ?? "its part")} (and what's inside it). Tick to cut everything it overlaps, like a clearance cut: another object over the same spot would otherwise fill it back in.`));
+    return items;
+  }
+  const features = activeFeatures(doc.features);
+  const lifted = withHolesCuttingAround(features);
+  const mine = viewport.modelBounds(new Set([f.id]));
+  const overlaps = (x: Feature) => {
+    const box = viewport.modelBounds(new Set([x.id]), true);
+    return !mine || !box || box.intersectsBox(mine);
+  };
+  const objects = features.filter(
+    (x) => x.mode === "solid" && x.kind !== "plane" && (x.kind !== "group" || isMergedGroup(x)) && !insideMergedGroup(features, x.id) && holesReaching(lifted, x).some((h) => h.id === f.id) && overlaps(x),
+  );
+  for (const x of objects) {
+    const inherited = !x.ignoreHoles?.includes(f.id) && ignoresHole(doc.features, x, f.id);
+    const row = checkToggle(x.name, !ignoresHole(doc.features, x, f.id), (cut) =>
+      commit((all) => {
+        const t = all.find((y) => y.id === x.id);
+        if (!t) return;
+        const list = (t.ignoreHoles ?? []).filter((id) => id !== f.id);
+        if (!cut) list.push(f.id);
+        t.ignoreHoles = list.length ? list : undefined;
+      }),
+    );
+    if (inherited) {
+      (row.querySelector("input") as HTMLInputElement).disabled = true;
+      row.title = "An object this is inside ignores this hole";
+    }
+    items.push(row);
+  }
+  items.push(hint(objects.length ? "Ticked objects are cut where it overlaps them; untick one to leave it alone (the same as its Cut by holes)." : "It doesn't overlap anything yet."));
+  return items;
 }
 
 /** Which holes cut this object: untick one and it leaves this object (and everything inside it) alone. */

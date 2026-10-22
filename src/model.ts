@@ -186,34 +186,26 @@ export function snapLayout(p: SnapParams) {
 /** The gap past a snap peg's tip at the bottom of its socket. */
 export const snapHeadroom = (p: SnapParams) => p.headroom ?? p.clearance + 0.3;
 
-/**
- * The objects a hole's part is inside, up to the first group (outermost last): a hole cuts just its own
- * part's branch, so a part inside another (a copy of it, say) would fill the hole back in.
- */
-export function holeSurroundings(features: Feature[], h: Feature): Feature[] {
-  const out: Feature[] = [];
-  let p = features.find((x) => x.id === h.parentId);
-  if (h.mode !== "hole" || !p || p.mode !== "solid" || p.kind === "group") return out;
-  for (let q = features.find((x) => x.id === p!.parentId); q && q.mode === "solid" && q.kind !== "group"; q = features.find((x) => x.id === q!.parentId)) out.push((p = q));
-  return out;
+/** A hole inside a solid object, which could cut everything it reaches instead (its parent's other parts too). */
+export function canCutAround(features: Feature[], h: Feature): boolean {
+  const p = features.find((x) => x.id === h.parentId);
+  return h.mode === "hole" && !h.joint && !!p && p.mode === "solid";
 }
 
 export const cutsAround = (h: Feature) => h.mode === "hole" && (h.cutsAround ?? h.kind === "snap");
 
 /**
- * The model as the kernel builds it: holes set to cut around them moved up (staying where they are) to
- * the outermost object their part is inside, so they cut that and everything in it.
+ * The model as the kernel builds it: holes set to cut around them moved to the top level (staying where
+ * they are), so like a clearance cut they cut everything they reach that doesn't ignore them.
  */
 export function withHolesCuttingAround(features: Feature[]): Feature[] {
-  const lift = features.filter((h) => cutsAround(h) && !h.joint && holeSurroundings(features, h).length);
+  const lift = features.filter((h) => cutsAround(h) && canCutAround(features, h));
   if (!lift.length) return features;
   const out = features.map((f) => (lift.includes(f) ? structuredClone(f) : f));
   for (const h of lift) {
     const world = worldMatrix(out, h.id);
-    const to = holeSurroundings(out, h).at(-1)!;
-    const copy = out.find((x) => x.id === h.id)!;
-    copy.parentId = to.id;
-    setWorldMatrix(out, copy.id, world);
+    out.find((x) => x.id === h.id)!.parentId = null;
+    setWorldMatrix(out, h.id, world);
   }
   return out;
 }
@@ -574,7 +566,7 @@ interface FeatureBase {
   suppressed?: boolean;
   /** Holes (by id) that don't cut it, or anything inside it, though they'd otherwise reach it. */
   ignoreHoles?: string[];
-  /** Holes only: also cut the objects its part is inside (unset: snap sockets do, other holes don't). */
+  /** Holes only: cut everything it reaches, like a clearance cut, not just its own part (unset: snap sockets do, other holes don't). */
   cutsAround?: boolean;
   /** Holes only: grown by this much (mm) on every side, so a part the same shape fits into what it cuts. */
   clearance?: number;
