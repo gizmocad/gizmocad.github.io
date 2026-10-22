@@ -122,6 +122,8 @@
   catch, clearance and Stays shut / Pulls apart (a flat or a 45° back to the catch) change both halves together.
 - **Clearance:** a hole can grow by a set amount on every side, so a part the same shape fits into what it cuts.
   On a solid, **Make a clearance cut** adds a copy of it as a hole 0.2 mm bigger all round that cuts what it sits in but not itself.
+  It's a copy of the object as it was: after changing the object (or what's inside it), **↻ Update clearance cut** makes it again
+  (replacing the old one, keeping its clearance and swing), and the panel says when it's out of date.
   On a group (or an object with parts inside it) the cut is one hole around all of it.
   A cut made from a hinged or sliding object (without clearing the full swing) gets a copy of its joint, and the two move together.
   On something with a hinge or slider, **Clear the full swing** sweeps the cut where the part moves: it starts at 0 to 0, and dragging its orange ends stretches it (turning the part itself leaves it alone).

@@ -2671,11 +2671,21 @@ function combineSection(f: Feature, update: (mutate: (f: Feature) => void) => vo
 function fitSection(f: Feature, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
   if (f.kind === "sketch" && f.params.operation === "flat") return [];
   if (f.mode === "hole") {
+    if (f.kind === "snap") return [];
     const items: HTMLElement[] = [
       section("Clearance"),
       lengthField("Clearance", f.clearance ?? 0, (v) => update((t) => (v > 0 ? (t.clearance = v) : delete t.clearance))),
       hint("Grows this hole by this much on every side, so a part the same shape fits into what it cuts. About 0.2 mm is a snug fit on most printers; 0.3–0.5 mm slides freely."),
     ];
+    // Made from an object: it can be made again from it as it is now.
+    const from = findFeature(f.cutFrom ?? null) ?? doc.features.find((x) => clearanceCutsOf(x).some((h) => h.id === f.id)) ?? null;
+    if (from) {
+      const stale = !!f.cutKey && f.cutKey !== clearanceKey(from);
+      items.push(
+        button(`↻ Update from ${from.name}`, () => makeClearanceCut(from.id, false, f), stale ? "primary wide" : "wide"),
+        hint(stale ? `<b>Out of date:</b> ${escapeHtml(from.name)} has changed since this was made.` : `A copy of ${escapeHtml(from.name)} as it was when made: update it after changing ${escapeHtml(from.name)}.`),
+      );
+    }
     const s = f.sweep;
     // What it can sweep with: its own earlier sweep, or the moving part it was made from.
     const src = s?.source ? findFeature(s.source) : f.follows ? findFeature(f.follows) : doc.features.find((x) => x.joint && x.ignoreHoles?.includes(f.id));
@@ -2697,9 +2707,27 @@ function fitSection(f: Feature, update: (mutate: (f: Feature) => void) => void):
     } else items.push(hint(`Tick to sweep it through ${src?.name ?? "its part"}'s ${slider ? "travel" : "swing"}, so the moving part clears all of it.`));
     return items;
   }
+  // A snap joint's socket is its clearance already.
+  if (f.kind === "snap") return [];
+  const items: HTMLElement[] = [section("Clearance cut")];
+  // Made already: it's made again from this as it is now, rather than another added.
+  const made = clearanceCutsOf(f)[0];
+  if (made) {
+    const stale = !!made.cutKey && made.cutKey !== clearanceKey(f);
+    const redo = button("↻ Update clearance cut", () => makeClearanceCut(f.id, false, made), stale ? "primary wide" : "wide");
+    redo.title = `Make ${made.name} again from ${f.name} as it is now (the old one goes)`;
+    items.push(
+      redo,
+      hint(
+        stale
+          ? `<b>${escapeHtml(made.name)} is out of date:</b> ${escapeHtml(f.name)} has changed since it was made. Update it so it fits again.`
+          : `${escapeHtml(made.name)} is a copy of ${escapeHtml(f.name)} as it was when made: after changing ${escapeHtml(f.name)} (or what's inside it), update it.`,
+      ),
+    );
+    return items;
+  }
   const make = button("Make a clearance cut", () => makeClearanceCut(f.id, !!f.joint && sweepNext), "wide");
   make.title = "Add a copy of this as a hole 0.2 mm bigger all round, which cuts what this overlaps but not this object";
-  const items: HTMLElement[] = [section("Clearance cut")];
   if (f.joint) {
     const j = f.joint;
     const row = checkToggle(j.type === "slider" ? "Clear the full slide" : "Clear the full swing", sweepNext, (on) => {
@@ -2721,10 +2749,49 @@ function sweepRange(_j: NonNullable<Feature["joint"]>): [number, number] {
   return [0, 0];
 }
 
-/** A copy of an object as a hole with clearance, which the object itself ignores (so only what it sits in is cut). */
-function makeClearanceCut(id: string, sweep = false) {
+/** The clearance cuts made from an object (also ones from before they noted it: named after it, and ignored by it). */
+function clearanceCutsOf(f: Feature): Feature[] {
+  return doc.features.filter(
+    (h) =>
+      h.mode === "hole" &&
+      (h.cutFrom === f.id ||
+        (!h.cutFrom && !!f.ignoreHoles?.includes(h.id) && (h.clearance ?? 0) > 0 && (h.name === `${f.name} clearance` || h.follows === f.id || h.sweep?.source === f.id))),
+  );
+}
+
+/** What a clearance cut copies of an object: its shape and everything inside it (not where it's turned to on its hinge). */
+function clearanceKey(f: Feature): string {
+  const ids = subtreeIds(doc.features, f.id);
+  const parts = doc.features
+    .filter((x) => ids.has(x.id))
+    .map((x) => [
+      x.kind,
+      x.mode,
+      x.kind === "imported" ? { ...x.params, brep: undefined, mesh: undefined } : x.params,
+      x.edgeOps,
+      x.tilt,
+      x.clips,
+      x.shell,
+      x.mirrored,
+      x.position,
+      x.rotation,
+      x.joint && { ...x.joint, value: undefined },
+    ]);
+  const text = JSON.stringify(parts);
+  let hash = 5381;
+  for (let i = 0; i < text.length; i++) hash = ((hash << 5) + hash + text.charCodeAt(i)) | 0;
+  return (hash >>> 0).toString(36);
+}
+
+/**
+ * A copy of an object as a hole with clearance, which the object itself ignores (so only what it
+ * sits in is cut). With `replace` (an earlier clearance cut of it), that one is made again from the
+ * object as it is now, keeping its name, clearance, sweep and whether it's shown.
+ */
+function makeClearanceCut(id: string, sweep = false, replace?: Feature) {
   const f = findFeature(id);
   if (!f) return;
+  if (replace) sweep = !!replace.sweep;
   // A group, or an object with things inside it: a hole group around a copy of all of it, grown as one shape.
   const whole = f.kind === "group" || childrenOf(doc.features, f.id).length > 0;
   const copies = whole ? cloneSubtree(f) : [];
@@ -2737,18 +2804,31 @@ function makeClearanceCut(id: string, sweep = false) {
     Object.assign(copies[0], { parentId: hole.id, position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 } });
     for (const k of ["joint", "ignoreHoles", "mirrored"] as const) delete copies[0][k];
   }
-  for (const k of ["shell", "texture", "joint", "ignoreHoles", "color", "combined"] as const) delete hole[k];
+  for (const k of ["shell", "texture", "joint", "ignoreHoles", "color", "combined", "hidden"] as const) delete hole[k];
+  Object.assign(hole, { cutFrom: f.id, cutKey: clearanceKey(f) });
+  if (replace) {
+    hole.name = replace.name;
+    hole.clearance = replace.clearance ?? 0.2;
+    if (replace.hidden) hole.hidden = true;
+  }
+  const gone = replace ? subtreeIds(doc.features, replace.id) : new Set<string>();
   commit((features) => {
     const t = features.find((x) => x.id === id);
     if (!t) return;
-    t.ignoreHoles = [...(t.ignoreHoles ?? []), hole.id];
+    if (replace) {
+      // The old cut goes; whatever was set to ignore it ignores the new one.
+      features.splice(0, features.length, ...features.filter((x) => !gone.has(x.id)));
+      for (const x of features) if (x.ignoreHoles?.includes(replace.id)) x.ignoreHoles = x.ignoreHoles.map((h) => (h === replace.id ? hole.id : h));
+    }
+    if (!t.ignoreHoles?.includes(hole.id)) t.ignoreHoles = [...(t.ignoreHoles ?? []), hole.id];
     insertFeatures(features, [hole, ...copies]);
     // Where the object is now: a hinge or slider may have moved it from its own position (unless the hole gets the joint too).
     setWorldMatrix(features, hole.id, worldMatrix(features, id));
     const h = features.find((x) => x.id === hole.id);
     if (sweep && t.joint && h) {
-      const [from, to] = sweepRange(t.joint);
+      const [from, to] = replace?.sweep ? [replace.sweep.from, replace.sweep.to] : sweepRange(t.joint);
       h.sweep = { joint: structuredClone(t.joint), position: { ...t.position }, frame: localMatrix(h).toArray(), from, to, source: t.id };
+      if (replace?.sweep?.off) h.sweep.off = true;
     } else if (t.joint && h) {
       // Its own copy of the hinge or slider (beside the object, so in the same frame), moving with the object's.
       Object.assign(h, { position: { ...t.position }, rotation: { ...t.rotation }, joint: structuredClone(t.joint), follows: t.id });
@@ -2756,6 +2836,11 @@ function makeClearanceCut(id: string, sweep = false) {
       else delete h.mirrored;
     }
   });
+  if (replace) {
+    renderPanels();
+    setNotice(`${hole.name} is made again from ${f.name} as it is now (the old one is gone).`);
+    return;
+  }
   selectedIds = [hole.id];
   selectedId = hole.id;
   renderPanels();
@@ -4621,6 +4706,8 @@ function cloneSubtree(f: Feature): Feature[] {
   const clones = doc.features
     .filter((x) => ids.has(x.id))
     .map((x) => ({ ...structuredClone(x), id: idMap.get(x.id)!, parentId: x.id === f.id ? x.parentId : idMap.get(x.parentId!)! }) as Feature);
+  // A snap joint's half copied with its other half pairs with that copy; on its own, with nothing.
+  for (const c of clones) if (c.kind === "snap") c.params.pair = c.params.pair && idMap.get(c.params.pair);
   return clones.sort((a, b) => Number(b.id === idMap.get(f.id)) - Number(a.id === idMap.get(f.id)));
 }
 

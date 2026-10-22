@@ -547,6 +547,9 @@ interface FeatureBase {
   sweep?: Sweep;
   /** A clearance cut with a copy of its object's hinge or slider: moving either joint moves the other (the object's id). */
   follows?: string;
+  /** A clearance cut: the object it's a copy of, and that object's shape when it was made (to tell when it's out of date). */
+  cutFrom?: string;
+  cutKey?: string;
   /** Fields set from parameters: the expression typed, by the field's label in the object's panel. */
   exprs?: Record<string, string>;
 }
