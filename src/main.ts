@@ -2220,7 +2220,7 @@ function multiPanel(): HTMLElement[] {
   actions.className = "actions";
   const group = button("▤ Group", groupSelected);
   group.title = "Put them in a new group (Ctrl+G): they move together but stay separate parts";
-  const combine = button("⧉ Combine", combineSelected);
+  const combine = button("⧉ Combine", () => combineSelected());
   combine.title = "Join them into one shape: it moves, rounds and exports as one (you can split it back up)";
   const overlap = button("◩ Intersect", () => combineSelected(true));
   overlap.title = "Keep only where they all overlap (e.g. a box and a sphere make a rounded cube)";
