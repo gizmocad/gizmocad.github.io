@@ -43,6 +43,7 @@ import {
   type SketchOperation,
   type ScrewParams,
   type SnapParams,
+  alignSnapSockets,
   canCutAround,
   cutsAround,
   withHolesCuttingAround,
@@ -143,6 +144,7 @@ function commit(mutate: (features: Feature[]) => void) {
   // Part of a larger change (parameters re-applied): one undo step and one update for all of it.
   if (batching) {
     mutate(doc.features);
+    alignSnapSockets(doc.features);
     keepPendingExpr();
     return;
   }
@@ -158,6 +160,7 @@ function commit(mutate: (features: Feature[]) => void) {
   mutate(doc.features);
   keepPendingExpr();
   followJoints(jointsBefore);
+  alignSnapSockets(doc.features);
   for (const f of doc.features) {
     if (f.kind !== "sketch" || !f.params.constraints?.length) continue;
     // A new rule between two shapes moves the first one picked to the second (e.g. an edge onto a circle), which stays put.
@@ -1676,6 +1679,7 @@ function snapFields(f: Extract<Feature, { kind: "snap" }>): HTMLElement[] {
         (v) => set((t) => (t.release = v === "release")),
       ),
     ),
+    checkToggle("Socket stays lined up with the peg", p.follow !== false, (on) => set((t) => (on ? delete t.follow : (t.follow = false)))),
   ];
   if (peg) {
     // Moved since (into another part, say), or its socket deleted: made again where it now points.

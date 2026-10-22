@@ -120,7 +120,7 @@
   peg goes (on the face where they meet, or straight through the other part: it finds where they meet along that line) and the
   part it goes into. That part gets a socket (a bore, and a wider pocket the catch springs out into); this one a peg with a slot
   down its tip and a catch round it. Into a thin part the peg goes right through and catches on the far side. Diameter, depth,
-  catch, clearance, headroom (the gap past the peg's tip at the bottom of the socket) and Stays shut / Pulls apart (a flat or a 45° back to the catch) change both halves together.
+  catch, clearance, headroom (the gap past the peg's tip at the bottom of the socket), whether the socket stays lined up with the peg when it moves and Stays shut / Pulls apart (a flat or a 45° back to the catch) change both halves together.
 - **Holes in a part:** a hole cuts the part it's in. **Cut everything it overlaps** in its panel makes it cut like a clearance cut
   instead: every object it reaches, each with a tick box there (and in that object's Cut by holes) to leave it alone. Snap sockets
   do this unless it's unticked.

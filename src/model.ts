@@ -165,6 +165,8 @@ export interface SnapParams {
   catch: number;
   /** How much bigger than the peg the socket is, all round. */
   clearance: number;
+  /** The socket moves to stay lined up with its peg (unset: it does). */
+  follow?: boolean;
   /** The gap left past the peg's tip in the socket (unset: the clearance + 0.3 mm). */
   headroom?: number;
   /** A sloped catch, so the parts pull apart again; otherwise it stays shut. */
@@ -208,6 +210,17 @@ export function withHolesCuttingAround(features: Feature[]): Feature[] {
     setWorldMatrix(out, h.id, world);
   }
   return out;
+}
+
+/** Snap sockets set to follow their pegs, put back in line with them (after the pegs or their parts move). */
+export function alignSnapSockets(features: Feature[]) {
+  for (const s of features) {
+    if (s.kind !== "snap" || s.params.part !== "socket" || s.params.follow === false) continue;
+    const peg = features.find((x) => x.id === s.params.pair);
+    if (peg?.kind !== "snap" || subtreeIds(features, s.id).has(peg.id) || subtreeIds(features, peg.id).has(s.id)) continue;
+    const want = worldMatrix(features, peg.id);
+    if (!worldMatrix(features, s.id).equals(want)) setWorldMatrix(features, s.id, want);
+  }
 }
 
 /** Give a snap joint's other half the same sizes (they only fit together that way). */
