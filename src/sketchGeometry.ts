@@ -701,18 +701,85 @@ export function splitAt(e: SketchEntity, p: P, newId: string): SketchEntity[] | 
     poly = { id: e.id, mode: e.mode, type: "polygon", points: pts, bends: pts.map(() => 0) };
   } else if (e.type === "polygon" || e.type === "spline") poly = structuredClone(e);
   else return null;
-  const edge = nearestEdge(poly, p);
-  const a = poly.points[edge];
-  const b = poly.points[(edge + 1) % poly.points.length];
-  if (poly.type === "polygon" && poly.bends[edge]) {
-    insertPoint(poly, edge); // A curved edge splits at its middle, keeping the curve.
+  if (poly.type === "polygon") {
+    const { edge, at, t, bends } = polygonEdgePoint(poly, p);
+    if (t < 0.01 || t > 0.99) return null;
+    poly.points.splice(edge + 1, 0, at);
+    poly.bends.splice(edge, 1, ...bends);
     return [poly];
   }
-  const { at, t } = project(p, a, b);
+  const edge = nearestEdge(poly, p);
+  const { at, t } = project(p, poly.points[edge], poly.points[(edge + 1) % poly.points.length]);
   if (t < 0.01 || t > 0.99) return null;
   poly.points.splice(edge + 1, 0, at);
-  if (poly.type === "polygon") poly.bends.splice(edge, 1, 0, 0);
   return [poly];
+}
+
+/**
+ * The point on a polygon's outline nearest `p`: its edge, how far along it is (0..1) and,
+ * to put a corner there, the bends of the edge's two halves (a curved edge keeps its curve).
+ */
+function polygonEdgePoint(poly: Extract<SketchEntity, { type: "polygon" }>, p: P): { edge: number; at: P; t: number; bends: [number, number]; d: number } {
+  let best: { edge: number; at: P; t: number; bends: [number, number]; d: number } | null = null;
+  poly.points.forEach((a, edge) => {
+    const b = poly.points[(edge + 1) % poly.points.length];
+    const bend = poly.bends[edge] ?? 0;
+    const arc = bend ? arcThrough(a, bendPoint(a, b, bend), b) : null;
+    let found: NonNullable<typeof best>;
+    if (arc) {
+      const norm = (x: number) => ((x % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+      const turn = norm(Math.atan2(p[1] - arc.c[1], p[0] - arc.c[0]) - arc.a0);
+      let t = (arc.sweep > 0 ? turn : norm(-turn)) / Math.abs(arc.sweep);
+      if (t > 1) t = dist(p, a) < dist(p, b) ? 0 : 1; // Off the arc's ends: the nearer end.
+      const on = (u: number): P => [arc.c[0] + arc.r * Math.cos(arc.a0 + u * arc.sweep), arc.c[1] + arc.r * Math.sin(arc.a0 + u * arc.sweep)];
+      const at = on(t);
+      const sag = (x: P, y: P, m: P) => (dist(x, y) < 1e-9 ? 0 : round(dotP(sub(m, mid(x, y)), leftNormal(x, y))));
+      found = { edge, at: [round(at[0]), round(at[1])], t, bends: [sag(a, at, on(t / 2)), sag(at, b, on((1 + t) / 2))], d: dist(p, at) };
+    } else {
+      const { at, t } = project(p, a, b);
+      found = { edge, at, t, bends: [0, 0], d: dist(p, at) };
+    }
+    if (!best || found.d < best.d) best = found;
+  });
+  return best!;
+}
+
+/** A shape's parts that can take a new corner (its own outline, and shapes merged or wrapped into it), with the trims leading to each. */
+function cornerParts(e: SketchEntity, path: [number, number][] = []): { shape: SketchEntity; path: [number, number][] }[] {
+  const own = e.type === "polygon" || e.type === "spline" || e.type === "ngon" || (e.type === "rect" && !e.radius) ? [{ shape: e, path }] : [];
+  const inner = (e.trims ?? []).flatMap((t, k) => (t.op === "merge" || t.op === "hull" ? t.shapes.flatMap((m, j) => cornerParts(m, [...path, [k, j] as [number, number]])) : []));
+  return [...own, ...inner];
+}
+
+/** `e` with the part at `path` (see cornerParts) swapped for `part`. */
+function withPart(e: SketchEntity, path: [number, number][], part: SketchEntity): SketchEntity {
+  if (!path.length) return part;
+  const out = structuredClone(e);
+  const [[k, j], ...rest] = path;
+  const t = out.trims![k];
+  t.shapes[j] = withPart(t.shapes[j], rest, part);
+  return out;
+}
+
+/**
+ * Add a corner to `e` on the edge nearest `p` (within `tolerance`): on its own outline or on a
+ * shape merged into it, which keeps its own points. Rectangles and N-gons become polygons for it.
+ * The changed shape and how far away the edge was, or null.
+ */
+export function addCorner(e: SketchEntity, p: P, tolerance = Infinity): { shape: SketchEntity; d: number } | null {
+  const bare = (x: SketchEntity) => {
+    const { trims: _trims, ...rest } = x;
+    return rest as SketchEntity;
+  };
+  let best: { shape: SketchEntity; path: [number, number][]; d: number } | null = null;
+  for (const part of cornerParts(e)) {
+    const d = distToOutline(bare(part.shape), p);
+    if (d <= tolerance && (!best || d < best.d)) best = { ...part, d };
+  }
+  const found = best && splitAt(bare(structuredClone(best.shape)), p, "");
+  if (!best || !found) return null;
+  const trims = best.shape.trims;
+  return { shape: withPart(e, best.path, trims ? { ...found[0], trims: structuredClone(trims) } : found[0]), d: best.d };
 }
 
 // ---- Trimming overlaps ----------------------------------------------------

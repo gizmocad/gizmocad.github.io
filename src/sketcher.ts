@@ -7,6 +7,7 @@ import * as THREE from "three";
 import { newId, type EntityMode, type Point2, type SketchConstraint, type SketchEntity, type SketchRef } from "./model";
 import { CONSTRAINT_GLYPH, constraintAnchor, refAt, refGeometry } from "./constraints";
 import {
+  addCorner,
   bounds,
   canSplit,
   cornerAt,
@@ -18,7 +19,6 @@ import {
   insertPoint,
   isClosed,
   moveHandle,
-  nearestEdge,
   outline,
   rectCorners,
   removePoint,
@@ -265,7 +265,8 @@ export class SketchEditor {
       return;
     }
     if (this.tool === "point") {
-      if (e.kind === "down") this.add({ id: newId(), mode: "construction", type: "point", x: p[0], y: p[1] });
+      // On a shape's edge it becomes one of that shape's points; elsewhere, a point of its own.
+      if (e.kind === "down" && !this.addPointNear(raw, 8 * e.pixel)) this.add({ id: newId(), mode: "construction", type: "point", x: p[0], y: p[1] });
       return;
     }
 
@@ -471,14 +472,10 @@ export class SketchEditor {
       const many = this.selected.size > 1;
       if (!many) {
         items.push({ label: "Edit…", action: () => this.host.changed() });
-        if (canSplit(hit)) {
-          const two = hit.type === "line" || hit.type === "stroke";
-          items.push({ label: two ? "Split here" : "Add corner here", action: () => this.splitEntity(hit, raw) });
-        }
-        if ((hit.type === "polygon" || hit.type === "spline") && !h) {
-          const edge = nearestEdge(hit, raw);
-          items.push({ label: "Add point on edge", action: () => commitOn(hit.id, (x) => insertPoint(x, edge)) });
-        }
+        if ((hit.type === "line" || hit.type === "stroke") && canSplit(hit)) items.push({ label: "Split here", action: () => this.splitEntity(hit, raw) });
+        // On the edge nearest the click: its own, or a shape's merged into it. (An edge's dot has its own.)
+        const corner = h?.handle.kind === "edge" ? null : addCorner(hit, raw, 8 * e.pixel);
+        if (corner) items.push({ label: "Add point here", action: () => this.replaceShape(corner.shape) });
       }
       items.push({ label: many ? `Duplicate ${this.selected.size} shapes` : "Duplicate", action: () => this.duplicateSelected() });
       if (isClosed(hit)) {
@@ -545,7 +542,32 @@ export class SketchEditor {
   private splitUnder(raw: P, pixel: number): boolean {
     const id = hitTest(this.host.entities(), raw, 6 * pixel);
     const target = this.host.entities().find((x) => x.id === id);
-    return !!target && this.splitEntity(target, raw);
+    if (!target) return false;
+    if (target.type === "line" || target.type === "stroke") return this.splitEntity(target, raw);
+    const corner = addCorner(target, raw, 8 * pixel);
+    if (corner) this.replaceShape(corner.shape);
+    return !!corner;
+  }
+
+  /** Add a point to the shape whose edge (or a merged-in shape's) is within `tolerance` of `raw`. */
+  private addPointNear(raw: P, tolerance: number): boolean {
+    let best: { shape: SketchEntity; d: number } | null = null;
+    for (const e of this.host.entities()) {
+      const corner = addCorner(e, raw, tolerance);
+      if (corner && (!best || corner.d < best.d)) best = corner;
+    }
+    if (best) this.replaceShape(best.shape);
+    return !!best;
+  }
+
+  /** Put a changed shape back in place of the one with its id, selected. */
+  private replaceShape(shape: SketchEntity) {
+    this.selected = new Set([shape.id]);
+    this.host.commit((entities) => {
+      const i = entities.findIndex((x) => x.id === shape.id);
+      if (i >= 0) entities[i] = shape;
+    });
+    this.host.changed();
   }
 
   private splitEntity(target: SketchEntity, at: P): boolean {
@@ -570,12 +592,7 @@ export class SketchEditor {
     if (!best) return this.host.notify("Click a corner of a polygon, rectangle or N-gon (where two straight edges meet).");
     const rounded = roundCorner(best.e, best.i, this.cornerSize, this.cornerBevel);
     if (!rounded) return this.host.notify(`A ${this.cornerBevel ? "bevel" : "radius"} of ${this.cornerSize} mm doesn't fit at that corner: try a smaller one.`);
-    this.selected = new Set([rounded.id]);
-    this.host.commit((entities) => {
-      const i = entities.findIndex((x) => x.id === rounded.id);
-      if (i >= 0) entities[i] = rounded;
-    });
-    this.host.changed();
+    this.replaceShape(rounded);
   }
 
   /** Add new shapes (copies, offsets, projected outlines…), selecting them. */

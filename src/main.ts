@@ -3738,7 +3738,7 @@ function sketchSettings(s: SketchFeature, update: (mutate: (f: Feature) => void)
 
 const TOOLS: { value: SketchTool; label: string; key: string; title: string }[] = [
   { value: "select", label: "↖ Select", key: "V", title: "Select, box-select, move and edit shapes. Shift-click adds to the selection. Right-click for options." },
-  { value: "point", label: "• Point", key: "O", title: "Reference point to snap to" },
+  { value: "point", label: "• Point", key: "O", title: "Click a shape's edge to add a point to that shape there (shapes merged into another too); click anywhere else for a reference point to snap to" },
   { value: "line", label: "╱ Line", key: "L", title: "Construction line: a guide to snap to" },
   { value: "rect", label: "▭ Rect", key: "R", title: "Rectangle: drag, or click two corners" },
   { value: "circle", label: "◯ Circle", key: "C", title: "Circle: drag from the centre" },
@@ -3751,7 +3751,7 @@ const TOOLS: { value: SketchTool; label: string; key: string; title: string }[] 
   { value: "trim", label: "✂ Trim", key: "T", title: "Click a guide line to cut it back to where it crosses. Click a shape's edge where it runs inside another shape to merge them (or trim it back, if one adds and one cuts); click the part sticking out to trim that off; click a shape's edge on one side of a guide line crossing it to cut that side away." },
   { value: "constrain", label: "📐 Constrain", key: "K", title: "Click points, edges or circles (one or two), then pick a rule or dimension in the panel: horizontal, parallel, equal, tangent, a length…" },
   { value: "corner", label: "◜ Corner", key: "F", title: "Round or bevel a corner: click where two straight edges meet (a polygon's, rectangle's or N-gon's). Set the size in the panel." },
-  { value: "split", label: "⫽ Split", key: "X", title: "Click a line or brush stroke to cut it in two there; click a shape's edge to add a corner there (rectangles and N-gons become editable polygons)" },
+  { value: "split", label: "⫽ Split", key: "X", title: "Click a line or brush stroke to cut it in two there; click a shape's edge to add a corner there (rectangles and N-gons become editable polygons; shapes merged into another keep theirs)" },
 ];
 
 const ENTITY_LABEL: Record<SketchEntityType, string> = {
