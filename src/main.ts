@@ -956,7 +956,7 @@ function hiddenInView(f: Feature): boolean {
   return false;
 }
 
-const panelKey = (ed: SketchEditor) => `${ed.tool}|${ed.newMode}|${ed.ngonSides}|${ed.brushWidth}|${[...ed.selected].join(",")}|${JSON.stringify(ed.picked)}|${ed.activePoint}`;
+const panelKey = (ed: SketchEditor) => `${ed.tool}|${ed.newMode}|${ed.lineMode}|${ed.ngonSides}|${ed.brushWidth}|${[...ed.selected].join(",")}|${JSON.stringify(ed.picked)}|${ed.activePoint}`;
 
 // ---- Context menu --------------------------------------------------------
 
@@ -4144,7 +4144,7 @@ function sketchSettings(s: SketchFeature, update: (mutate: (f: Feature) => void)
 const TOOLS: { value: SketchTool; label: string; key: string; title: string }[] = [
   { value: "select", label: "↖ Select", key: "V", title: "Select, box-select, move and edit shapes. Shift-click adds to the selection. Right-click for options." },
   { value: "point", label: "• Point", key: "O", title: "Click a shape's edge to add a point to that shape there (shapes merged into another too); click anywhere else for a reference point to snap to" },
-  { value: "line", label: "╱ Line", key: "L", title: "Construction line: a guide to snap to" },
+  { value: "line", label: "╱ Line", key: "L", title: "Line: click points along it, then double-click, Enter or right-click ▸ Finish line (it needn't close). A guide to snap to, or a solid or cut line as wide as you set (e.g. a cut round a flexing tab)." },
   { value: "rect", label: "▭ Rect", key: "R", title: "Rectangle: drag, or click two corners" },
   { value: "circle", label: "◯ Circle", key: "C", title: "Circle: drag from the centre" },
   { value: "ellipse", label: "⬭ Ellipse", key: "E", title: "Ellipse: drag from the centre to a corner" },
@@ -4208,6 +4208,10 @@ function renderSketchPanel(panel: HTMLElement, s: SketchFeature, ed: SketchEdito
   }
 
   const items: HTMLElement[] = [title, tools];
+  if (ed.tool === "line") {
+    items.push(labeled("New lines", segmented(MODE_OPTIONS, ed.lineMode, (m) => ((ed.lineMode = m), ed.render(), renderProperties()), "entity")));
+    if (ed.lineMode !== "construction") items.push(lengthField("Width", ed.brushWidth, (v) => ((ed.brushWidth = v), ed.render(), renderProperties()), { min: 0 }));
+  }
   if (ed.tool === "brush") {
     items.push(lengthField("Brush width", ed.brushWidth, (v) => ((ed.brushWidth = v), ed.render(), renderProperties()), { min: 0 }));
   }

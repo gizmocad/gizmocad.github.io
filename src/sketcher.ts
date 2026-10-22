@@ -82,7 +82,7 @@ const COLOR = {
 };
 
 /** Tools that are drawn with two points (drag, or click twice). */
-const TWO_POINT = new Set<SketchTool>(["line", "rect", "circle", "ellipse", "ngon", "slot"]);
+const TWO_POINT = new Set<SketchTool>(["rect", "circle", "ellipse", "ngon", "slot"]);
 
 type Drag =
   | { kind: "move"; from: P; offset: P }
@@ -94,8 +94,10 @@ export class SketchEditor {
   /** Mode for new closed shapes. Points and lines are always construction. */
   newMode: EntityMode = "add";
   ngonSides = 6;
-  /** Brush stroke width in sketch units. */
+  /** Brush stroke width in sketch units (a solid or cut line's too). */
   brushWidth = 4;
+  /** Line tool: a guide (dashed, to snap to), or a solid or cut line as wide as the brush. */
+  lineMode: EntityMode = "construction";
   /** Corner tool: the radius of a rounded corner, or how far back along each edge a bevel cuts. */
   cornerSize = 2;
   cornerBevel = false;
@@ -201,9 +203,22 @@ export class SketchEditor {
   finishShape() {
     const pts = dedupe(this.drawing);
     this.drawing = [];
+    if (this.tool === "line") return this.finishLine(pts);
     if (pts.length < 3 || (this.tool !== "polygon" && this.tool !== "spline")) return this.render();
     if (this.tool === "polygon") this.add({ id: newId(), mode: this.newMode, type: "polygon", points: pts, bends: pts.map(() => 0) });
     else this.add({ id: newId(), mode: this.newMode, type: "spline", points: pts });
+  }
+
+  /** A line through the points clicked: guide lines, or one stroke (open, unless it ends on its start). */
+  private finishLine(pts: P[]) {
+    if (pts.length < 2) return this.render();
+    if (this.lineMode === "construction") {
+      const lines: SketchEntity[] = pts.slice(1).map((b, i) => ({ id: newId(), mode: "construction", type: "line", x1: pts[i][0], y1: pts[i][1], x2: b[0], y2: b[1] }));
+      this.host.commit((entities) => entities.push(...lines));
+      this.selected = new Set(lines.map((l) => l.id));
+      return;
+    }
+    this.add({ id: newId(), mode: this.lineMode, type: "stroke", points: pts, width: this.brushWidth });
   }
 
   // ---- Pointer handling ----------------------------------------------------
@@ -234,7 +249,7 @@ export class SketchEditor {
 
     if (e.kind === "context") return this.contextMenu(raw, p, e);
     if (this.tool === "select") return this.handleSelect(e, raw, p);
-    if (this.tool === "polygon" || this.tool === "spline") return this.handleMultiPoint(e.kind, p);
+    if (this.tool === "polygon" || this.tool === "spline" || this.tool === "line") return this.handleMultiPoint(e.kind, p);
     if (this.tool === "split") {
       if (e.kind === "down") this.splitUnder(raw, e.pixel);
       return;
@@ -363,7 +378,11 @@ export class SketchEditor {
     if (kind === "dblclick") return this.finishShape();
     if (kind !== "down") return;
     const first = this.drawing[0];
-    if (first && this.drawing.length >= 3 && first[0] === p[0] && first[1] === p[1]) return this.finishShape();
+    if (first && this.drawing.length >= 3 && first[0] === p[0] && first[1] === p[1]) {
+      // A line ending back on its start goes all the way round.
+      if (this.tool === "line") this.drawing.push(p);
+      return this.finishShape();
+    }
     const last = this.drawing[this.drawing.length - 1];
     if (!last || last[0] !== p[0] || last[1] !== p[1]) this.drawing.push(p);
     this.render();
@@ -447,6 +466,7 @@ export class SketchEditor {
     if (this.drawing.length >= 3 && (this.tool === "polygon" || this.tool === "spline")) {
       items.push({ label: "Close shape", action: () => this.finishShape() });
     }
+    if (this.drawing.length >= 2 && this.tool === "line") items.push({ label: "Finish line", action: () => this.finishShape() });
     if (this.drawing.length) items.push({ label: "Cancel drawing", action: () => this.cancel() });
 
     const h = this.handleAt(raw, e.pixel);
@@ -683,15 +703,21 @@ export class SketchEditor {
 
     // Shape in progress.
     const c = this.cursor;
-    const previewColor = this.newMode === "subtract" ? COLOR.subtract : this.newMode === "construction" ? COLOR.construction : COLOR.preview;
+    const mode = this.tool === "line" ? this.lineMode : this.newMode;
+    const previewColor = mode === "subtract" ? COLOR.subtract : mode === "construction" ? COLOR.construction : COLOR.preview;
     if (this.drawing.length && c) {
       const a = this.drawing[0];
-      const preview = this.previewEntity(a, c);
+      const preview = this.tool === "line" ? null : this.previewEntity(a, c);
       if (preview) {
         this.addLine(outline(preview), previewColor, isClosed(preview), { dashed: true });
         this.drawRuler(preview);
       }
-      if ((this.tool === "polygon" || this.tool === "spline") && this.drawing.length) {
+      if (this.tool === "line") {
+        const path = [...this.drawing, c];
+        if (this.lineMode === "construction" || this.brushWidth <= 0) this.addLine(path, previewColor, false, { dashed: true });
+        else this.addLine(outline({ id: "", mode: "add", type: "stroke", points: dedupe(path), width: this.brushWidth }), previewColor, true, { dashed: true });
+      }
+      if ((this.tool === "polygon" || this.tool === "spline" || this.tool === "line") && this.drawing.length) {
         const last = this.drawing[this.drawing.length - 1];
         this.segmentRuler(last, c);
       }

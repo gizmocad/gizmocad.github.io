@@ -51,6 +51,7 @@
   regular polygons, slots, polygons with arc edges, smooth curves (closer points make tighter bends), and freehand brush strokes, on the XY/XZ/YZ plane or any
   tilted Plane object. Shapes can add to the profile, cut it, or just act as guides. Snap to existing
   points and the grid (hold Alt to place freely). Edit by dragging the dots, typing exact values, or right-clicking. To add a point to a shape, click its edge with the Point tool (or right-click it ▸ Add point here): it goes where you click, curved edges keep their curve, and it works on shapes merged into others too. The fill shows the area the sketch makes: what it adds, less what it cuts (cut shapes have red outlines).
+  The Line tool (L) draws through the points you click and needn't close (double-click or Enter to finish): a guide line, or a solid or cut line of a set width, e.g. a U-shaped cut round a tab so it flexes.
   A finished sketch stays flat (just a drawing) until you click Extrude (up, down or both ways) or Revolve in the 3D view.
   While you draw, everything is 2D: the sketch shows as its drawing (its solid comes back when you finish) and the rest of the model lies flat on the sketch's plane as outlines to draw against.
 - **Split & dividers:** cut any shape or sketch into pieces along X, Y or Z, tilted at any angle, with as many parallel
