@@ -198,7 +198,12 @@ export class SketchEditor {
     const ids = new Set(this.selected);
     const made: string[] = [];
     this.host.commit((entities) => {
-      for (const e of entities) if (ids.has(e.id) && isClosed(e)) e.mode = mode;
+      for (const e of entities) {
+        if (!ids.has(e.id) || !isClosed(e)) continue;
+        e.mode = mode;
+        // A guide that adds or cuts now needs a width.
+        if (e.type === "stroke" && mode !== "construction" && !e.width) e.width = this.brushWidth;
+      }
       // Guide lines made to add or cut: lines that do (as wide as the Line tool's), joined into one where they meet.
       const lines = mode === "construction" ? [] : entities.filter((e): e is Extract<SketchEntity, { type: "line" }> => ids.has(e.id) && e.type === "line");
       if (!lines.length) return;
@@ -228,13 +233,15 @@ export class SketchEditor {
   /** A line through the points clicked: guide lines, or one stroke (open, unless it ends on its start). */
   private finishLine(pts: P[]) {
     if (pts.length < 2) return this.render();
-    if (this.lineMode === "construction") {
+    // A guide through more points is one line too (one that can curve, like a solid or cut one); a two-point
+    // guide stays a straight guide line (which mirrors and trims can use).
+    if (this.lineMode === "construction" && pts.length === 2) {
       const lines: SketchEntity[] = pts.slice(1).map((b, i) => ({ id: newId(), mode: "construction", type: "line", x1: pts[i][0], y1: pts[i][1], x2: b[0], y2: b[1] }));
       this.host.commit((entities) => entities.push(...lines));
       this.selected = new Set(lines.map((l) => l.id));
       return;
     }
-    this.add({ id: newId(), mode: this.lineMode, type: "stroke", points: pts, width: this.brushWidth });
+    this.add({ id: newId(), mode: this.lineMode, type: "stroke", points: pts, width: this.lineMode === "construction" ? 0 : this.brushWidth });
   }
 
   // ---- Pointer handling ----------------------------------------------------

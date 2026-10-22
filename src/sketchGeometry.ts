@@ -702,7 +702,8 @@ export function translateEntity(e: SketchEntity, [du, dv]: P) {
 
 /** Points the cursor snaps to: corners, centres, ends, midpoints. */
 export function snapPoints(e: SketchEntity): P[] {
-  if (e.type === "stroke") return e.points.length ? [e.points[0], e.points[e.points.length - 1]] : [];
+  // A line's ends (a guide's every point, as separate guide lines' ends were).
+  if (e.type === "stroke") return e.mode === "construction" ? e.points.slice() : e.points.length ? [e.points[0], e.points[e.points.length - 1]] : [];
   const pts = handles(e).map((h) => h.p);
   if (e.type === "line") pts.push(mid([e.x1, e.y1], [e.x2, e.y2]));
   if (e.type === "rect") {

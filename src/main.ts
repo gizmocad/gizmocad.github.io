@@ -4293,7 +4293,20 @@ function renderSketchPanel(panel: HTMLElement, s: SketchFeature, ed: SketchEdito
     const e = sel[0];
     items.push(section(`Edit ${ENTITY_LABEL[e.type].toLowerCase()}`));
     if (e.type === "line") items.push(segmented(MODE_OPTIONS, e.mode, (m) => ed.setSelectedMode(m), "entity"));
-    else if (e.type !== "point") items.push(segmented(MODE_OPTIONS, e.mode, (m) => updateEntity(e.id, (t) => (t.mode = m)), "entity"));
+    else if (e.type !== "point")
+      items.push(
+        segmented(
+          MODE_OPTIONS,
+          e.mode,
+          (m) =>
+            updateEntity(e.id, (t) => {
+              t.mode = m;
+              // A guide that adds or cuts now needs a width.
+              if (t.type === "stroke" && m !== "construction" && !t.width) t.width = ed.brushWidth;
+            }),
+          "entity",
+        ),
+      );
     items.push(...entityFields(e, updateEntity));
     if (e.trims?.length) {
       // Trimmed but still itself: its sizes above still work; the trim follows.
