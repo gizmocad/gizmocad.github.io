@@ -26,6 +26,7 @@ export type ShapeKind =
   | "star"
   | "text"
   | "screw"
+  | "snap"
   | "sketch"
   | "group"
   | "plane"
@@ -148,6 +149,43 @@ export interface ScrewParams {
   /** At the top: a recess for the screw's head, a hex nut trap, or a hole for a heat-set threaded insert. */
   head: "none" | "counterbore" | "countersink" | "nut" | "insert";
   depth: number;
+}
+/**
+ * One half of a snap-fit joint, for two parts printed apart that click together. The peg stands
+ * up from its part's face (Z ≥ 0) with a slot down its tip, so the tip squeezes in, and a catch
+ * round it; the socket (a hole in the other part, placed the same) has a bore and, past where the
+ * catch ends up, a wider pocket for the catch to spring out into. `pair` is the other half.
+ */
+export interface SnapParams {
+  part: "peg" | "socket";
+  diameter: number;
+  /** How far the peg goes into the other part. */
+  depth: number;
+  /** How far the catch sticks out round the peg. */
+  catch: number;
+  /** How much bigger than the peg the socket is, all round. */
+  clearance: number;
+  /** A sloped catch, so the parts pull apart again; otherwise it stays shut. */
+  release: boolean;
+  pair?: string;
+}
+/** Heights up a snap joint's axis, from the face its peg stands on (see SnapParams). */
+export function snapLayout(p: SnapParams) {
+  const r = p.diameter / 2;
+  // The tip tapers in (squeezing its slotted halves together as it's pushed home), the catch runs
+  // straight a little, then its back steps in to the peg: at 45° it pulls apart again, nearly flat it stays shut.
+  const lead = Math.max(1, 2.5 * p.catch);
+  const land = 0.4;
+  const back = p.release ? p.catch : 0.2 * p.catch;
+  const widest = p.depth - lead;
+  return { r, widest, land, back, catchAt: widest - land - back, embed: Math.min(1, r) };
+}
+
+/** Give a snap joint's other half the same sizes (they only fit together that way). */
+export function syncSnapPair(features: Feature[], f: Feature) {
+  if (f.kind !== "snap") return;
+  const other = features.find((x) => x.id === f.params.pair);
+  if (other?.kind === "snap") other.params = { ...f.params, part: other.params.part, pair: other.params.pair };
 }
 export type ScrewSize = "M2" | "M2.5" | "M3" | "M4" | "M5" | "M6" | "M8" | "M10";
 /** Shaft diameters for each fit, and the head recess (counterbore Ø × depth, countersink Ø at 90°). ISO 273 / 4762 / 10642. */
@@ -548,6 +586,7 @@ export type Feature =
   | (FeatureBase & { kind: "star"; params: StarParams })
   | (FeatureBase & { kind: "text"; params: TextParams })
   | (FeatureBase & { kind: "screw"; params: ScrewParams })
+  | (FeatureBase & { kind: "snap"; params: SnapParams })
   | (FeatureBase & { kind: "sketch"; params: SketchParams })
   | (FeatureBase & { kind: "group"; params: Record<string, never> })
   /** A reference plane (its local XY). Sketches placed inside it are drawn on it. */
@@ -627,6 +666,8 @@ function defaultParams(kind: ShapeKind): Feature["params"] {
       return { text: "Text", font: "sans", bold: true, size: 10, height: 2, spacing: 0, align: "center" };
     case "screw":
       return { size: "M3", fit: "normal", head: "none", depth: 10 };
+    case "snap":
+      return { part: "peg", diameter: 5, depth: 6, catch: 0.4, clearance: 0.15, release: false };
     case "sketch":
       return { plane: "XY", offset: 0, operation: "flat", depth: 10, direction: "normal", angle: 360, entities: [] };
     case "group":
@@ -654,7 +695,7 @@ export function nextColour(features: Feature[]): string {
 
 export function createFeature(kind: ShapeKind, existing: Feature[], parentId: string | null = null): Feature {
   const n = existing.filter((f) => f.kind === kind).length + 1;
-  const label = kind === "torus" ? "Ring" : kind === "screw" ? "Screw hole" : kind[0].toUpperCase() + kind.slice(1);
+  const label = kind === "torus" ? "Ring" : kind === "screw" ? "Screw hole" : kind === "snap" ? "Snap peg" : kind[0].toUpperCase() + kind.slice(1);
   return {
     id: newId(),
     name: `${label} ${n}`,

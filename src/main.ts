@@ -42,6 +42,9 @@ import {
   type Variable,
   type SketchOperation,
   type ScrewParams,
+  type SnapParams,
+  snapLayout,
+  syncSnapPair,
   type GrooveTip,
   type SculptFeature,
   type Vec3,
@@ -58,7 +61,7 @@ import {
   colourOf,
   isMergedGroup,
 } from "./model";
-import { Box3, BufferAttribute, BufferGeometry, EdgesGeometry, Matrix4, Quaternion, Vector3 } from "three";
+import { Box3, BufferAttribute, BufferGeometry, EdgesGeometry, Euler, MathUtils, Matrix4, Quaternion, Vector3 } from "three";
 import { CONSTRAINT_LABEL, constraintFits, measure as measureConstraint, refPoints as refPointsOf, solveSketch } from "./constraints";
 import { autosave, build3mf, loadAutosave, outlinesToEntities, parse3mf, parseStl, svgToEntities, type ImportedPart, type MeshPart } from "./fileFormats";
 import { fcstdSketches, parseDxf, parseFcstd, parseGltf, parseObj, parseOff, parsePly, stem, type PickedFile } from "./importFormats";
@@ -889,6 +892,7 @@ const KIND_ICON: Record<ShapeKind, string> = {
   star: "★",
   text: "T",
   screw: "⊚",
+  snap: "⊥",
   sketch: "✎",
   group: "▤",
   plane: "◇",
@@ -1485,6 +1489,144 @@ function startConnect(id: string, type: "hinge" | "orbit" | "slider") {
   );
 }
 
+
+// ---- Snap joints ---------------------------------------------------------------
+
+/** The "Snap joint" panel section: join this part to another that it clicks onto after printing. */
+function snapSection(f: Feature): HTMLElement[] {
+  const make = button("⊥ Snap to another part", () => startSnapJoint(f.id), "wide");
+  make.title = "A peg with a catch on this part, and a socket in the other it clicks into";
+  return [section("Snap joint"), make, hint("For parts printed apart that click together: a slotted peg with a catch on this one, and a socket for it in the other.")];
+}
+
+function startSnapJoint(id: string) {
+  const f = findFeature(id);
+  if (!f) return;
+  const mine = (other: string | null) => !!other && subtreeIds(doc.features, id).has(other);
+  viewport.startPlacement({
+    feature: f,
+    marker: true,
+    allowSelf: true,
+    onPlace(point, rotation, targetId) {
+      setStatus("");
+      if (!targetId) return setNotice(`Click a face of ${f.name}, or of the part it snaps to.`);
+      // On the other part's face: the peg points into it, back along the arrow.
+      if (!mine(targetId)) return makeSnapJoint(id, targetId, point, rotation, true);
+      viewport.startPlacement({
+        feature: f,
+        pickOnly: true,
+        onPlace(_p, _r, other) {
+          setStatus("");
+          if (!other || mine(other)) return setNotice(`Click the part ${f.name}'s peg snaps into.`);
+          makeSnapJoint(id, other, point, rotation, false);
+        },
+        onCancel() {
+          setStatus("");
+        },
+      });
+      setStatus(`Now click the part ${f.name}'s peg snaps into. Esc to cancel.`);
+    },
+    onCancel() {
+      setStatus("");
+    },
+  });
+  setStatus(`Click where the peg goes: on the face of ${f.name} that meets the other part, or on that part's face (its centre dots snap). Esc to cancel.`);
+}
+
+/**
+ * A peg on one part and its socket in the other, on the line through the point clicked square to
+ * its face: where the two parts meet along it (a lid's underside, say, clicking its top), else at
+ * the point, pointing along the face's arrow (back along it if `flip`: it was the other part's face).
+ */
+function makeSnapJoint(pegOn: string, socketIn: string, point: Vec3, rotation: Vec3, flip: boolean) {
+  const a = findFeature(pegOn);
+  const b = findFeature(socketIn);
+  if (!a || !b) return;
+  const d = MathUtils.degToRad;
+  const turn = new Quaternion().setFromEuler(new Euler(d(rotation.x), d(rotation.y), d(rotation.z), "ZYX"));
+  const normal = new Vector3(0, 0, 1).applyQuaternion(turn);
+  const meet = viewport.meetingAlong(a.id, b.id, point, { x: normal.x, y: normal.y, z: normal.z });
+  if (meet ? normal.dot(new Vector3(meet.dir.x, meet.dir.y, meet.dir.z)) < 0 : flip) turn.multiply(new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), Math.PI));
+  if (meet) point = meet.point;
+  const world = new Matrix4().compose(new Vector3(point.x, point.y, point.z), turn, new Vector3(1, 1, 1));
+  const peg = createFeature("snap", doc.features, a.id) as Extract<Feature, { kind: "snap" }>;
+  const socket = { ...createFeature("snap", doc.features, b.id), mode: "hole" } as Extract<Feature, { kind: "snap" }>;
+  const n = doc.features.filter((x) => x.kind === "snap" && x.params.part === "peg").length + 1;
+  peg.name = `Snap peg ${n}`;
+  socket.name = `Snap socket ${n}`;
+  // Into a thin part it goes right through, and the catch clicks over the far side.
+  const along = new Vector3(0, 0, 1).applyQuaternion(turn);
+  const through = viewport.exitAlong(b.id, point, { x: along.x, y: along.y, z: along.z });
+  const p = peg.params;
+  const { catchAt } = snapLayout(p);
+  const thin = through !== null && through > 0.5 && through < p.depth + p.clearance + 0.5;
+  if (thin) p.depth = Math.round((through + 0.1 + (p.depth - catchAt)) * 100) / 100;
+  peg.params.pair = socket.id;
+  socket.params = { ...p, part: "socket", pair: peg.id };
+  const colour = colourOf(doc.features, a);
+  if (colour) peg.color = colour;
+  commit((features) => {
+    insertFeatures(features, [peg, socket]);
+    setWorldMatrix(features, peg.id, world);
+    setWorldMatrix(features, socket.id, world);
+    // The socket cuts the other part, not this one (nor its peg).
+    const t = features.find((x) => x.id === a.id);
+    if (t) t.ignoreHoles = [...(t.ignoreHoles ?? []), socket.id];
+  });
+  selectedIds = [peg.id];
+  selectedId = peg.id;
+  renderPanels();
+  setNotice(
+    thin
+      ? `${peg.name} on ${a.name} goes right through ${b.name} (${fmt(through!)} mm thick) and its catch clicks over the far side.`
+      : `${peg.name} on ${a.name} clicks into ${socket.name} in ${b.name}. Change its sizes here: both halves follow.`,
+  );
+}
+
+/** A snap joint half's sizes: changing them changes both halves. */
+function snapFields(f: Extract<Feature, { kind: "snap" }>): HTMLElement[] {
+  const p = f.params;
+  const set = (mutate: (p: SnapParams) => void) =>
+    commit((features) => {
+      const t = features.find((x) => x.id === f.id);
+      if (t?.kind !== "snap") return;
+      mutate(t.params);
+      syncSnapPair(features, t);
+    });
+  const other = findFeature(p.pair ?? null);
+  const otherPart = findFeature(other?.parentId ?? null);
+  const peg = p.part === "peg";
+  const items: HTMLElement[] = [
+    lengthField("Diameter", p.diameter, (v) => set((t) => (t.diameter = v)), { min: 0 }),
+    lengthField("Depth", p.depth, (v) => set((t) => (t.depth = v)), { min: 0 }),
+    lengthField("Catch", p.catch, (v) => set((t) => (t.catch = v)), { min: 0 }),
+    lengthField("Clearance", p.clearance, (v) => set((t) => (t.clearance = v)), { min: 0 }),
+    labeled(
+      "Holds",
+      segmented(
+        [
+          { value: "shut", label: "Stays shut", title: "A catch with a flat back: it doesn't pull out again" },
+          { value: "release", label: "Pulls apart", title: "A catch sloped at 45° on its back: a firm pull takes the parts apart again" },
+        ],
+        p.release ? "release" : "shut",
+        (v) => set((t) => (t.release = v === "release")),
+      ),
+    ),
+  ];
+  if (!other) items.push(hint(`Its ${peg ? "socket" : "peg"} has been deleted: make a new snap joint, or delete this one too.`));
+  else {
+    const go = button(`Select the ${peg ? "socket" : "peg"}`, () => selectObject(other.id));
+    items.push(
+      hint(
+        peg
+          ? `Clicks into ${escapeHtml(other.name)}${otherPart ? ` in <b>${escapeHtml(otherPart.name)}</b>` : ""}. <b>Depth</b> is how far it goes in; <b>Catch</b> how far the catch sticks out round it (more holds tighter but takes more force); <b>Clearance</b> how much bigger the socket is. Print with the peg pointing up, and push the parts together until it clicks.`
+          : `The socket for ${escapeHtml(other.name)}${otherPart ? ` on <b>${escapeHtml(otherPart.name)}</b>` : ""}: a bore, and past it a wider pocket the catch clicks into.`,
+      ),
+      go,
+    );
+  }
+  return items;
+}
 
 // ---- Text and screw holes -----------------------------------------------------
 
@@ -3264,6 +3406,8 @@ function objectItemsNow(f: Feature): HTMLElement[] {
     items.push(section("Text"), ...textFields(f, update));
   } else if (f.kind === "screw") {
     items.push(section("Screw hole"), ...screwFields(f, update));
+  } else if (f.kind === "snap") {
+    items.push(section(f.params.part === "peg" ? "Snap joint: peg" : "Snap joint: socket"), ...snapFields(f));
   } else if (f.kind === "hedron") {
     items.push(section("Size"), ...hedronFields(f, update));
   } else if (f.kind === "imported") {
@@ -3325,6 +3469,7 @@ function objectItemsNow(f: Feature): HTMLElement[] {
 
   if (f.kind !== "plane") items.push(...holesSection(f, update));
   items.push(...connectionSection(f, update));
+  if (f.mode === "solid" && !["plane", "sculpt", "snap"].includes(f.kind) && !flat) items.push(...snapSection(f));
   if (!["group", "plane", "sculpt"].includes(f.kind) && !flat) items.push(...cutSection(f));
   if (f.kind !== "plane") items.push(...mirrorSection([f.id]), ...patternSection(f));
 

@@ -115,6 +115,11 @@
   **◩ Intersect** keeps only where they all overlap (a box and a sphere make a rounded cube); a combined group can switch between All of them and Only the overlap.
 - **Folders:** groups (Group button, Ctrl+G, or drag objects onto each other in the list) fold shut with the ▾ arrow beside them.
 - **Chisel:** on a solid, **Chisel** then drag across a face to carve a groove (set its width, depth and Flat, V or Round tip). Each stroke is a hole inside the object whose sketch can be edited.
+- **Snap joints:** for parts printed apart that click together. On a part, **⊥ Snap to another part**, then click where the
+  peg goes (on the face where they meet, or straight through the other part: it finds where they meet along that line) and the
+  part it goes into. That part gets a socket (a bore, and a wider pocket the catch springs out into); this one a peg with a slot
+  down its tip and a catch round it. Into a thin part the peg goes right through and catches on the far side. Diameter, depth,
+  catch, clearance and Stays shut / Pulls apart (a flat or a 45° back to the catch) change both halves together.
 - **Clearance:** a hole can grow by a set amount on every side, so a part the same shape fits into what it cuts.
   On a solid, **Make a clearance cut** adds a copy of it as a hole 0.2 mm bigger all round that cuts what it sits in but not itself.
   On a group (or an object with parts inside it) the cut is one hole around all of it.

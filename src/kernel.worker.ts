@@ -25,6 +25,8 @@ import {
   type Clip,
   clipNormal,
   type ScrewParams,
+  type SnapParams,
+  snapLayout,
   type Shell,
   type SpringParams,
   type TextParams,
@@ -1585,6 +1587,26 @@ function buildScrewHole(p: ScrewParams): Shape3D {
   return hole.fuse(pocket);
 }
 
+/** A snap joint's half: the slotted peg with its catch, or the socket it clicks into (see SnapParams). */
+function buildSnap(p: SnapParams): Shape3D {
+  const { r, widest, land, catchAt, embed } = snapLayout(p);
+  const c = p.catch;
+  if (r <= 0 || p.depth <= 0 || c < 0) throw new Error("A snap joint needs a diameter and depth above 0.");
+  if (catchAt < 0.5) throw new Error(`A snap joint this size needs a depth of at least ${(p.depth - catchAt + 0.5).toFixed(1)} mm for its catch.`);
+  if (p.part === "socket") {
+    // The bore, then a wider pocket from just before where the catch ends up (so it clicks home even if the print's a little off).
+    const [bore, pocket, ledge, end] = [r + p.clearance, r + c + p.clearance, catchAt - 0.1, p.depth + p.clearance + 0.3];
+    return revolveUpright(polygonDrawing([[0, -0.5], [bore, -0.5], [bore, ledge], [pocket, ledge], [pocket, end], [0, end]]));
+  }
+  // Sunk into its own part a little, so the two print as one.
+  const tip = Math.max(0.6 * r, r - 0.4);
+  const peg = revolveUpright(polygonDrawing([[0, -embed], [r, -embed], [r, catchAt], [r + c, widest - land], [r + c, widest], [tip, p.depth], [0, p.depth]]));
+  // A slot down the tip, so its two halves squeeze together as the catch goes through the bore.
+  const slot = Math.min(r, 2 * (c + p.clearance) + 0.3);
+  const from = Math.max(0.5, Math.min(catchAt - 1, 0.3 * p.depth));
+  return peg.cut(makeBaseBox(slot, 2 * (r + c) + 2, p.depth - from + 1).translate(0, 0, from));
+}
+
 function polygonDrawing(points: [number, number][]): Drawing {
   const pen = draw(points[0]);
   for (const p of points.slice(1)) pen.lineTo(p);
@@ -1715,6 +1737,8 @@ function buildBase(f: Feature, taper = 0): Shape3D | null {
       return buildText(f.params, lean, taper);
     case "screw":
       return buildScrewHole(f.params);
+    case "snap":
+      return buildSnap(f.params);
     case "sketch":
       if ((isGroove(f) || isSweepSketch(f)) && !lean && !taper) {
         // Exact solids (a STEP export) only: everything else uses the groove's triangles.

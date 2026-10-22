@@ -2,7 +2,7 @@
 // X/Y/Z; instead of storing a stretch, we bake them into the object's real
 // dimensions so every size stays exact and editable.
 
-import { SCREW_SIZES, subtreeIds, type Feature, type SketchEntity, type SketchPlane, type Vec3 } from "./model";
+import { SCREW_SIZES, snapLayout, subtreeIds, syncSnapPair, type Feature, type SketchEntity, type SketchPlane, type Vec3 } from "./model";
 import { decodeFloats, encodeFloats } from "./sculpt";
 import { hedronBox } from "./hedron";
 import { gearOuterRadius, prismPoints, round, starPoints } from "./sketchGeometry";
@@ -24,7 +24,7 @@ export function roundFactor(s: Vec3): number {
 }
 
 /** Kinds whose X and Y always resize together. */
-const ROUND_KINDS = new Set(["cone", "tube", "torus", "prism", "thread", "gear", "spring", "star", "text", "screw"]);
+const ROUND_KINDS = new Set(["cone", "tube", "torus", "prism", "thread", "gear", "spring", "star", "text", "screw", "snap"]);
 
 /** Does this object stay round across X/Y when resized (so X and Y change together)? */
 export function staysRound(f: Feature): boolean {
@@ -194,6 +194,10 @@ function scaleOwn(f: Feature, s: Vec3, snap: number) {
       // Screw sizes are standard; only the depth changes.
       f.params.depth = snapLength(f.params.depth * s.z, snap);
       break;
+    case "snap":
+      f.params.diameter = snapLength(f.params.diameter * roundFactor(s), snap);
+      f.params.depth = snapLength(f.params.depth * s.z, snap);
+      break;
     case "sketch": {
       const [ua, va, na] = PLANE_AXES[f.params.plane];
       for (const e of f.params.entities) scaleEntity(e, s[ua], s[va]);
@@ -288,6 +292,7 @@ export function resizeFeature(features: Feature[], id: string, s: Vec3, snap: nu
   const anchors = anchor ? [anchor].flat() : [];
   const before = anchors.length ? structuredClone(f) : null;
   resizeOwnTree(features, f, s, snap);
+  syncSnapPair(features, f);
   for (const a of anchors) {
     // The anchor face sat at `at`; after scaling about the origin it sits at at·k, so move back by the difference.
     const shift = a.at * (1 - actualFactor(before!, f, a.axis, s));
@@ -381,6 +386,13 @@ function baseExtents(f: Feature): [Vec3, Vec3] | null {
       const r = f.params.diameter / 2;
       if (f.params.style === "flat") return [{ x: -r, y: 0, z: 0 }, { x: r, y: f.params.height, z: f.params.depth }];
       return [{ x: -r, y: -r, z: 0 }, { x: r, y: r, z: f.params.height }];
+    }
+    case "snap": {
+      const p = f.params;
+      const { r, embed } = snapLayout(p);
+      const socket = p.part === "socket";
+      const R = r + p.catch + (socket ? p.clearance : 0);
+      return [{ x: -R, y: -R, z: socket ? -0.5 : -embed }, { x: R, y: R, z: socket ? p.depth + p.clearance + 0.3 : p.depth }];
     }
     case "screw": {
       const size = SCREW_SIZES[f.params.size];

@@ -2042,6 +2042,66 @@ export class Viewport {
     this.sectionGroup.add(frame);
   }
 
+  /**
+   * Where the line through `at` (world) along `dir` crosses from object `a` into object `b`, or from
+   * `b` into `a`, if they meet (or overlap a little) there: the point nearest `at`, and the way from `a` to `b`.
+   */
+  meetingAlong(a: string, b: string, at: Vec3, dir: Vec3): { point: Vec3; dir: Vec3 } | null {
+    const d = new THREE.Vector3(dir.x, dir.y, dir.z).normalize();
+    const p = new THREE.Vector3(at.x, at.y, at.z);
+    // Each part's stretches along the line, from one end of the model to the other.
+    const spans = (id: string) => this.alongLine(id, p.clone().addScaledVector(d, -1e4), d);
+    const [sa, sb] = [spans(a), spans(b)];
+    let best: { t: number; sign: number } | null = null;
+    for (const [aIn, aOut] of sa)
+      for (const [bIn, bOut] of sb) {
+        for (const [t, sign, gap] of [[(aOut + bIn) / 2, 1, Math.abs(aOut - bIn)], [(bOut + aIn) / 2, -1, Math.abs(bOut - aIn)]]) {
+          if (gap > 0.5) continue;
+          if (!best || Math.abs(t - 1e4) < Math.abs(best.t - 1e4)) best = { t, sign };
+        }
+      }
+    if (!best) return null;
+    const q = p.clone().addScaledVector(d, best.t - 1e4);
+    return { point: { x: q.x, y: q.y, z: q.z }, dir: { x: d.x * best.sign, y: d.y * best.sign, z: d.z * best.sign } };
+  }
+
+  /**
+   * How far from `from` (world) along `dir` the object `id` (and what's inside it) ends: where a
+   * ray going that way comes out of it. Null if it doesn't go through it.
+   */
+  exitAlong(id: string, from: Vec3, dir: Vec3): number | null {
+    const d = new THREE.Vector3(dir.x, dir.y, dir.z).normalize();
+    const out = this.alongLine(id, new THREE.Vector3(from.x, from.y, from.z), d).find(([, end]) => end > 1e-6);
+    return out ? out[1] : null;
+  }
+
+  /** Where a ray from `from` along unit `d` is inside object `id` (and what's inside it): [in, out] distances (in may be 0, starting inside). */
+  private alongLine(id: string, from: THREE.Vector3, d: THREE.Vector3): [number, number][] {
+    const node = this.nodes.get(id);
+    if (!node) return [];
+    this.root.updateMatrixWorld(true);
+    const meshes: THREE.Mesh[] = [];
+    node.traverse((o) => o instanceof THREE.Mesh && o.userData.id && this.features.get(o.userData.id)?.mode !== "hole" && isShown(o) && meshes.push(o));
+    // Its far sides face away from the ray: hit from behind, so both sides count.
+    const sides = meshes.map((m) => (m.material as THREE.Material).side);
+    meshes.forEach((m) => ((m.material as THREE.Material).side = THREE.DoubleSide));
+    try {
+      const spans: [number, number][] = [];
+      let start: number | null = null;
+      for (const h of new THREE.Raycaster(from, d).intersectObjects(meshes, false)) {
+        const leaving = !!h.face && h.face.normal.clone().transformDirection(h.object.matrixWorld).dot(d) > 0;
+        if (!leaving) start ??= h.distance;
+        else {
+          spans.push([start ?? 0, h.distance]);
+          start = null;
+        }
+      }
+      return spans;
+    } finally {
+      meshes.forEach((m, i) => ((m.material as THREE.Material).side = sides[i]));
+    }
+  }
+
   /** The model's world bounds (shown objects), or null if there's nothing. */
   modelBounds(onlyIds?: Set<string>, solidOnly = false): THREE.Box3 | null {
     this.root.updateMatrixWorld(true);
