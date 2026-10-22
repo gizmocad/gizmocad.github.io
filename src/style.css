@@ -364,6 +364,7 @@ body.nothing-selected .panel.right, body.nothing-selected .panel-grip.right { di
 
 .edge-op { border: 1px solid var(--border); border-radius: 8px; padding: 8px; margin-bottom: 8px; }
 .edge-op.picking { border-color: #ff8a00; box-shadow: 0 0 0 2px rgba(255, 138, 0, 0.18); }
+.edge-op.draft { border-style: dashed; border-color: var(--accent); }
 .edge-op-head { display: flex; gap: 6px; align-items: center; justify-content: space-between; margin-bottom: 6px; }
 .edge-op-head strong { font-size: 12px; font-weight: 600; }
 .edge-op .segmented button { padding-left: 2px; padding-right: 2px; min-width: 0; }

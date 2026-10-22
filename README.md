@@ -71,8 +71,13 @@
   vertical, parallel, perpendicular, equal, tangent, coincident or fixed, or a length, distance, diameter or angle
   dimension. The drawing then keeps to them as you edit it, and the values can be changed in the panel.
 - **Fillets & chamfers:** round or bevel all, top, bottom or vertical edges, or edges you click.
+  A new one is set up first (type, size, which edges) and only worked out when you click **Apply**.
   On a group they act on the merged result (e.g. the rim of a hole). A size that's too big for
-  the shape is automatically reduced to the largest safe size, and the panel shows the size used.
+  the shape is automatically reduced to the largest safe size, and the panel shows the size used;
+  if only a few edges can't take it, the rest keep the full size.
+  On a sketch, slivers where its shapes nearly meet (edges under 0.15 mm), joins between curved edges
+  that are almost but not quite smooth, and curves that barely bulge are tidied first (by thousandths of a
+  millimetre), so the finish goes all the way round.
 - **Sculpting:** free-form clay (start from a sphere or cube, or turn any shape, sketch or group
   into clay with "Sculpt this object") shaped with Draw, Inflate, Smooth,
   Flatten and Grab brushes, with optional X mirroring and "Add detail" to refine the mesh. Sculpts are meshes: they export to STL

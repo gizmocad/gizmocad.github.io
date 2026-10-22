@@ -2,7 +2,7 @@
 
 import opencascade from "replicad-opencascadejs";
 import wasmUrl from "replicad-opencascadejs/wasm?url";
-import { measureVolume, Plane, EdgeFinder, FaceFinder, type Face, type Edge, type Wire, type Sketch, type CompoundSketch, type Sketches, type GenericSweepConfig, makeBSplineApproximation, assembleWire, cast, deserializeShape, draw, drawCircle, drawEllipse, drawText, genericSweep, getOC, importSTEP, loadFont, makeBaseBox, makeBox, makeCircle, makeCompound, makeCylinder, makeHelix, makeLine, makeEllipsoid, makePolygon, makeSolid, makeSphere, setOC, type Drawing, type Shape3D } from "replicad";
+import { measureVolume, Blueprint, BlueprintSketcher, Blueprints, CompoundBlueprint, Drawing, type Curve2D, Plane, EdgeFinder, FaceFinder, type Face, type Edge, type Wire, type Sketch, type CompoundSketch, type Sketches, type GenericSweepConfig, makeBSplineApproximation, assembleWire, cast, deserializeShape, draw, drawCircle, drawEllipse, drawText, genericSweep, getOC, importSTEP, loadFont, makeBaseBox, makeBox, makeCircle, makeCompound, makeCylinder, makeHelix, makeLine, makeEllipsoid, makePolygon, makeSolid, makeSphere, setOC, type Shape3D } from "replicad";
 import {
   PLANE_ROTATIONS,
   SCREW_SIZES,
@@ -260,6 +260,7 @@ function buildSketch(p: SketchParams, featureLean: Lean, taper = 0, self?: Featu
     const s = entitySolid(e, p, lean, taper);
     if (s) shape = shape.cut(s);
   }
+  if (self?.edgeOps.length) shape = tidyForFinishes(shape, p, lean, taper);
 
   if (p.operation === "extrude") {
     const depth = Math.abs(p.depth);
@@ -271,6 +272,225 @@ function buildSketch(p: SketchParams, featureLean: Lean, taper = 0, self?: Featu
   if (p.offset) shape = shape.translate(0, 0, p.offset);
   for (const r of PLANE_ROTATIONS[p.plane]) shape = shape.rotate(r.degrees, [0, 0, 0], r.axis);
   return shape;
+}
+
+/** Edges shorter than this, where a sketch's shapes nearly meet, are closed up (see closeTinyEdges). */
+const TINY_EDGE = 0.15;
+/** Edges meeting at less than this many degrees off smooth get a tiny rounding (see roundNearSmooth). */
+const NEAR_SMOOTH = 25;
+
+/**
+ * A sketch's profile tidied for fillets and chamfers, which OpenCascade can't fit beside an edge
+ * a few hundredths of a millimetre long (where the sketch's shapes nearly meet), nor across a join
+ * where two edges meet almost but not quite smoothly (as curved polygon edges often do). The
+ * profile is redrawn in 2D with those taken out, as long as that gives the same solid otherwise.
+ */
+function tidyForFinishes(shape: Shape3D, p: SketchParams, lean: Lean, taper: number): Shape3D {
+  if (p.operation !== "extrude" && p.operation !== "revolve") return shape;
+  try {
+    const d = tidyDrawing(profileDrawing(p, "This sketch"));
+    if (!d) return shape;
+    const solid = solidify(d, p, lean, taper);
+    const [was, now] = [measureVolume(shape), measureVolume(solid)];
+    return isValidShape(solid) && Math.abs(now - was) <= 0.005 * was + 0.5 ? solid : shape;
+  } catch {
+    return shape;
+  }
+}
+
+/** The drawing with each loop tidied (see tidyForFinishes), or null if there was nothing to tidy. */
+function tidyDrawing(d: Drawing): Drawing | null {
+  let changed = false;
+  const loop = (bp: Blueprint) => {
+    const out = tidyLoop(bp);
+    if (out !== bp) changed = true;
+    return out;
+  };
+  const compound = (c: Blueprint | CompoundBlueprint) => (c instanceof CompoundBlueprint ? new CompoundBlueprint(c.blueprints.map(loop)) : loop(c));
+  const inner = (d as unknown as { innerShape: Blueprint | CompoundBlueprint | Blueprints | null }).innerShape;
+  if (!inner) return null;
+  const shape = inner instanceof Blueprints ? new Blueprints(inner.blueprints.map(compound)) : compound(inner);
+  return changed ? new Drawing(shape) : null;
+}
+
+/** A loop's edge being tidied: a line, an arc (through `via`) or another curve (left as it is). */
+type Piece = { kind: "line" | "arc" | "other"; a: P2; b: P2; via: P2; curve: Curve2D | null };
+
+/** About how long an edge is. */
+const pieceLength = (x: Piece) => (x.kind === "line" ? dist2(x.a, x.b) : dist2(x.a, x.via) + dist2(x.via, x.b));
+
+/** An arc's circle, and whether it runs anticlockwise. */
+function pieceCircle(x: Piece): { o: P2; r: number; ccw: boolean } | null {
+  const [a, m, b] = [x.a, x.via, x.b];
+  const d = 2 * (a[0] * (m[1] - b[1]) + m[0] * (b[1] - a[1]) + b[0] * (a[1] - m[1]));
+  if (Math.abs(d) < 1e-12) return null;
+  const sq = (p: P2) => p[0] * p[0] + p[1] * p[1];
+  const o: P2 = [(sq(a) * (m[1] - b[1]) + sq(m) * (b[1] - a[1]) + sq(b) * (a[1] - m[1])) / d, (sq(a) * (b[0] - m[0]) + sq(m) * (a[0] - b[0]) + sq(b) * (m[0] - a[0])) / d];
+  return { o, r: dist2(a, o), ccw: (m[0] - a[0]) * (b[1] - m[1]) - (m[1] - a[1]) * (b[0] - m[0]) > 0 };
+}
+
+/** The point midway along an arc of `circle` from `a` to `b`. */
+function arcMiddle(c: { o: P2; r: number; ccw: boolean }, a: P2, b: P2): P2 {
+  const ang = (p: P2) => Math.atan2(p[1] - c.o[1], p[0] - c.o[0]);
+  const turn = (((c.ccw ? ang(b) - ang(a) : ang(a) - ang(b)) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+  const t = ang(a) + ((c.ccw ? 1 : -1) * turn) / 2;
+  return [c.o[0] + c.r * Math.cos(t), c.o[1] + c.r * Math.sin(t)];
+}
+
+/** Which way an edge runs at its start or end (a unit vector). */
+function pieceTangent(x: Piece, end: "a" | "b"): P2 {
+  const c = x.kind === "arc" ? pieceCircle(x) : null;
+  if (!c) {
+    const l = dist2(x.a, x.b) || 1;
+    return [(x.b[0] - x.a[0]) / l, (x.b[1] - x.a[1]) / l];
+  }
+  const p = x[end];
+  const s = c.ccw ? 1 : -1;
+  return [(-(p[1] - c.o[1]) / c.r) * s, ((p[0] - c.o[0]) / c.r) * s];
+}
+
+/**
+ * A closed loop tidied for fillets and chamfers: arcs that hardly bulge (by under 0.01 mm, a
+ * nudged polygon edge) made straight, edges shorter than TINY_EDGE taken out (the edges either
+ * side meet at the tiny one's middle instead), then each join where two lines or arcs meet a
+ * little off smooth (under NEAR_SMOOTH degrees) rounded with an arc just big enough to make it
+ * smooth, at most 0.3 mm along each edge: the outline moves by thousandths of a millimetre.
+ */
+function tidyLoop(bp: Blueprint): Blueprint {
+  const pieces: Piece[] = bp.curves.map((c) => ({ kind: c.geomType === "LINE" ? "line" : c.geomType === "CIRCLE" ? "arc" : "other", a: c.firstPoint, b: c.lastPoint, via: c.value((c.firstParameter + c.lastParameter) / 2), curve: c }));
+  let straightened = 0;
+  for (const x of pieces) {
+    const chord = dist2(x.a, x.b);
+    const bulge = chord > 1e-9 ? Math.abs((x.b[0] - x.a[0]) * (x.via[1] - x.a[1]) - (x.b[1] - x.a[1]) * (x.via[0] - x.a[0])) / chord : Infinity;
+    if (x.kind === "arc" && bulge < 0.01) {
+      Object.assign(x, { kind: "line", curve: null });
+      straightened++;
+    }
+  }
+  const changed = straightened + closeTinyEdges(pieces) + roundNearSmooth(pieces) > 0;
+  if (!changed) return bp;
+  return new Blueprint(
+    pieces.map((x) => {
+      if (x.curve) return x.curve;
+      const pen = new BlueprintSketcher(x.a);
+      return (x.kind === "line" ? pen.lineTo(x.b) : pen.threePointsArcTo(x.b, x.via)).done().curves[0];
+    }),
+  );
+}
+
+/** Take out a loop's tiny edges (see tidyLoop); how many. A changed edge loses its `curve`, to be redrawn. */
+function closeTinyEdges(pieces: Piece[]): number {
+  let closed = 0;
+  for (let i = 0; pieces.length > 3 && i < pieces.length; ) {
+    const n = pieces.length;
+    const [prev, tiny, next] = [pieces[(i - 1 + n) % n], pieces[i], pieces[(i + 1) % n]];
+    if (pieceLength(tiny) >= TINY_EDGE || (prev.kind === "other" && next.kind === "other")) {
+      i++;
+      continue;
+    }
+    // Other curves can't be redrawn: the edges meet at their end.
+    const at: P2 = prev.kind === "other" ? tiny.a : next.kind === "other" ? tiny.b : [(tiny.a[0] + tiny.b[0]) / 2, (tiny.a[1] + tiny.b[1]) / 2];
+    if (prev.kind !== "other") Object.assign(prev, { b: at, curve: null });
+    if (next.kind !== "other") Object.assign(next, { a: at, curve: null });
+    pieces.splice(i, 1);
+    closed++;
+    i = Math.max(0, i - 1); // The edge before may be tiny now.
+  }
+  return closed;
+}
+
+/** Round a loop's joins that are a little off smooth (see tidyLoop); how many. */
+function roundNearSmooth(pieces: Piece[]): number {
+  let rounded = 0;
+  for (let i = 0; i < pieces.length; i++) {
+    const [p, q] = [pieces[i], pieces[(i + 1) % pieces.length]];
+    if (p.kind === "other" || q.kind === "other" || p === q) continue;
+    const blend = joinBlend(p, q);
+    if (!blend) continue;
+    pieces.splice(i + 1, 0, blend);
+    rounded++;
+    i++;
+  }
+  return rounded;
+}
+
+/**
+ * The arc rounding the join from `p` into `q` (a line or arc each) if they meet a little off
+ * smooth, with `p` and `q` cut back to meet it; null (and nothing changed) otherwise.
+ */
+function joinBlend(p: Piece, q: Piece): Piece | null {
+  const [u, v] = [pieceTangent(p, "b"), pieceTangent(q, "a")];
+  const turn = Math.atan2(u[0] * v[1] - u[1] * v[0], u[0] * v[0] + u[1] * v[1]);
+  if (Math.abs(turn) < 1e-3 || Math.abs(turn) > (NEAR_SMOOTH * Math.PI) / 180) return null;
+  const side = Math.sign(turn); // The rounding's centre is on the side the outline turns to.
+  const along = Math.min(0.3, pieceLength(p) / 4, pieceLength(q) / 4);
+  let r = Math.min(along / Math.tan(Math.abs(turn) / 2), 200);
+  const [cp, cq] = [p.kind === "arc" ? pieceCircle(p) : null, q.kind === "arc" ? pieceCircle(q) : null];
+  // Each edge moved `r` towards that side: a line shifts; an arc's circle grows or shrinks.
+  const inward = (c: { ccw: boolean }) => c.ccw === side > 0;
+  for (const c of [cp, cq]) if (c && inward(c)) r = Math.min(r, c.r * 0.5);
+  type Offset = { line: [P2, P2] } | { o: P2; r: number };
+  const offset = (x: Piece, c: { o: P2; r: number; ccw: boolean } | null): Offset => {
+    if (!c) {
+      const t = pieceTangent(x, "a");
+      const n: P2 = [-t[1] * side * r, t[0] * side * r];
+      return { line: [[x.a[0] + n[0], x.a[1] + n[1]], t] };
+    }
+    return { o: c.o, r: inward(c) ? c.r - r : c.r + r };
+  };
+  const centres = crossings(offset(p, cp), offset(q, cq));
+  const join = p.b;
+  const centre = centres.sort((m, n) => dist2(m, join) - dist2(n, join))[0];
+  if (!centre) return null;
+  // Where the rounding touches each edge, which must be near the join, on the edge.
+  const touch = (x: Piece, c: { o: P2; r: number } | null): P2 => {
+    if (!c) {
+      const t = pieceTangent(x, "a");
+      const k = (centre[0] - x.a[0]) * t[0] + (centre[1] - x.a[1]) * t[1];
+      return [x.a[0] + t[0] * k, x.a[1] + t[1] * k];
+    }
+    const l = dist2(centre, c.o) || 1;
+    return [c.o[0] + ((centre[0] - c.o[0]) / l) * c.r, c.o[1] + ((centre[1] - c.o[1]) / l) * c.r];
+  };
+  const [tp, tq] = [touch(p, cp), touch(q, cq)];
+  if (dist2(tp, join) > pieceLength(p) / 2 || dist2(tq, join) > pieceLength(q) / 2 || dist2(tp, tq) < 1e-6) return null;
+  const mid: P2 = [(tp[0] + tq[0]) / 2 - centre[0], (tp[1] + tq[1]) / 2 - centre[1]];
+  const ml = Math.hypot(mid[0], mid[1]) || 1;
+  const blend: Piece = { kind: "arc", a: tp, b: tq, via: [centre[0] + (mid[0] / ml) * r, centre[1] + (mid[1] / ml) * r], curve: null };
+  Object.assign(p, { b: tp, via: cp ? arcMiddle(cp, p.a, tp) : p.via, curve: null });
+  Object.assign(q, { a: tq, via: cq ? arcMiddle(cq, tq, q.b) : q.via, curve: null });
+  return blend;
+}
+
+/** Where two lines (a point and direction) or circles cross. */
+function crossings(m: { line: [P2, P2] } | { o: P2; r: number }, n: { line: [P2, P2] } | { o: P2; r: number }): P2[] {
+  if ("line" in m && "line" in n) {
+    const [[a, d], [b, e]] = [m.line, n.line];
+    const den = d[0] * e[1] - d[1] * e[0];
+    if (Math.abs(den) < 1e-12) return [];
+    const t = ((b[0] - a[0]) * e[1] - (b[1] - a[1]) * e[0]) / den;
+    return [[a[0] + d[0] * t, a[1] + d[1] * t]];
+  }
+  if ("line" in m || "line" in n) {
+    const [l, c] = "line" in m ? [m, n as { o: P2; r: number }] : [n as { line: [P2, P2] }, m];
+    const [a, d] = l.line;
+    const f: P2 = [a[0] - c.o[0], a[1] - c.o[1]];
+    const bq = f[0] * d[0] + f[1] * d[1];
+    const disc = bq * bq - (f[0] * f[0] + f[1] * f[1] - c.r * c.r);
+    if (disc < 0) return [];
+    return [-bq - Math.sqrt(disc), -bq + Math.sqrt(disc)].map((t) => [a[0] + d[0] * t, a[1] + d[1] * t] as P2);
+  }
+  const [c1, c2] = [m, n] as { o: P2; r: number }[];
+  const d = dist2(c1.o, c2.o);
+  if (d < 1e-12 || d > c1.r + c2.r || d < Math.abs(c1.r - c2.r)) return [];
+  const a = (c1.r * c1.r - c2.r * c2.r + d * d) / (2 * d);
+  const h = Math.sqrt(Math.max(0, c1.r * c1.r - a * a));
+  const [ux, uy] = [(c2.o[0] - c1.o[0]) / d, (c2.o[1] - c1.o[1]) / d];
+  const [px, py] = [c1.o[0] + ux * a, c1.o[1] + uy * a];
+  return [
+    [px - uy * h, py + ux * h],
+    [px + uy * h, py - ux * h],
+  ];
 }
 
 type EdgeFilter = Parameters<Shape3D["fillet"]>[1];
@@ -487,6 +707,17 @@ function safeEdgeOp(shape: Shape3D, op: EdgeOp): Shape3D {
   }
   const safe = Math.floor(lo * 0.98 * 100) / 100;
   const result = safe > 0 ? tryEdgeOp(shape, op, safe) : null;
+  if (!result && !facetedBuild && op.type !== "bevel") {
+    // Each edge takes it, but not all together, at any size: the full size on as many as go together.
+    const filter = edgeFilter(shape, op);
+    const edges = filter ? filter(new EdgeFinder(), shape).find(shape) : shape.edges;
+    const most = edges.length > 1 && edges.length <= 80 ? mostEdges(shape, op, edges, []) : null;
+    if (most) {
+      adjusted[op.id] = 0;
+      adjusted[`${op.id}@edges`] = edges.length - most.kept;
+      return most.shape;
+    }
+  }
   adjusted[op.id] = result ? safe : 0;
   return result ?? shape;
 }
@@ -524,21 +755,54 @@ function partialEdgeOp(shape: Shape3D, op: EdgeOp): { shape: Shape3D; size: numb
   }
   const small = Math.floor(lo * 0.98 * 100) / 100;
   const both = (big: number) => tryEdgeSizes(shape, op, (e) => (good.some((x) => x.isSame(e)) ? big : small > 0 && bad.some((x) => x.isSame(e)) ? small : null));
-  let result = both(op.size);
-  if (!result) {
-    // The full size beside the small one doesn't fit: the biggest the rest can take alongside it.
-    let [a, b] = [small, op.size];
-    for (let i = 0; i < 7; i++) {
-      const mid = (a + b) / 2;
-      if (both(mid)) a = mid;
-      else b = mid;
-    }
-    const big = Math.floor(a * 0.98 * 100) / 100;
-    if (big <= small * 1.2) return null; // No better than one size for all.
-    result = both(big);
-    if (result) return { shape: result, size: small, reduced: bad.length, rest: big };
+  const result = both(op.size);
+  if (result) return { shape: result, size: small, reduced: bad.length };
+  // The edges beside one too small for it (a tiny edge where two shapes nearly meet) often can't take it
+  // either, and some only fail together: the full size on as many as go together, the rest left sharp.
+  const most = mostEdges(shape, op, good, bad);
+  if (most && most.kept * 2 >= good.length) return { shape: most.shape, size: 0, reduced: edges.length - most.kept };
+  // Too few of them: the biggest size the rest can take alongside the small one, if that's better than one size for all.
+  let [a, b] = [small, op.size];
+  for (let i = 0; i < 7; i++) {
+    const mid = (a + b) / 2;
+    if (both(mid)) a = mid;
+    else b = mid;
   }
-  return result ? { shape: result, size: small, reduced: bad.length } : null;
+  const big = Math.floor(a * 0.98 * 100) / 100;
+  const smaller = big > small * 1.2 ? both(big) : null;
+  if (smaller) return { shape: smaller, size: small, reduced: bad.length, rest: big };
+  return most ? { shape: most.shape, size: 0, reduced: edges.length - most.kept } : null;
+}
+
+/**
+ * The finish at full size on as many of `good` as go together: first all those not touching a
+ * `bad` edge at once, then one at a time (those away from trouble, then the longest, first).
+ */
+function mostEdges(shape: Shape3D, op: EdgeOp, good: Edge[], bad: Edge[]): { shape: Shape3D; kept: number } | null {
+  const only = (set: Edge[]) => (e: Edge) => (set.some((x) => x.isSame(e)) ? op.size : null);
+  const ends = (e: Edge) => [e.startPoint, e.endPoint];
+  const touches = (e: Edge) => bad.some((x) => ends(x).some((p) => ends(e).some((q) => p.sub(q).Length < 1e-4)));
+  const order = good.map((e) => ({ e, near: touches(e), length: e.length })).sort((x, y) => Number(x.near) - Number(y.near) || y.length - x.length);
+  const kept: Edge[] = [];
+  let best: Shape3D | null = null;
+  const away = order.filter((x) => !x.near).map((x) => x.e);
+  const together = away.length ? tryEdgeSizes(shape, op, only(away)) : null;
+  if (together) {
+    kept.push(...away);
+    best = together;
+  }
+  // One at a time is a try each: not for very many.
+  if (order.length <= 40) {
+    for (const { e } of order) {
+      if (kept.includes(e)) continue;
+      const tried = tryEdgeSizes(shape, op, only([...kept, e]));
+      if (tried) {
+        kept.push(e);
+        best = tried;
+      }
+    }
+  }
+  return best ? { shape: best, kept: kept.length } : null;
 }
 
 /** A bevel at its full distance with the steepest angle (below the one asked for) that still fits, if any. */

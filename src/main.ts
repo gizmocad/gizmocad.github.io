@@ -108,6 +108,8 @@ window.addEventListener("blur", () => (shiftHeld = false));
 
 /** The fillet/chamfer whose edges are being picked in the viewport, if any. */
 let edgePick: { featureId: string; opId: string } | null = null;
+/** A new fillet, chamfer or bevel being set up: it's only added (and worked out) when applied. */
+let edgeDraft: { featureId: string; op: EdgeOp } | null = null;
 type Axis = "x" | "y" | "z";
 /** The Split / Dividers tools while open for an object (previewed in the view until applied). */
 /**
@@ -720,6 +722,7 @@ async function convertToSolid(id: string) {
 
 function pickedOp(): EdgeOp | null {
   if (!edgePick) return null;
+  if (edgeDraft?.op.id === edgePick.opId) return edgeDraft.op;
   return findFeature(edgePick.featureId)?.edgeOps.find((o) => o.id === edgePick!.opId) ?? null;
 }
 
@@ -745,12 +748,21 @@ function startEdgePick(featureId: string, opId: string) {
     id: featureId,
     points: pickedOp()?.points ?? [],
     onPick(point) {
-      commit((features) => {
-        const op = features.find((f) => f.id === featureId)?.edgeOps.find((o) => o.id === opId);
-        if (!op) return;
+      const toggle = (op: EdgeOp) => {
         const i = op.points.findIndex((p) => Math.hypot(p[0] - point[0], p[1] - point[1], p[2] - point[2]) < 1e-3);
         if (i >= 0) op.points.splice(i, 1);
         else op.points.push(point.map((v) => Math.round(v * 1e5) / 1e5) as [number, number, number]);
+      };
+      // A finish still being set up just notes its edges; nothing's worked out until it's applied.
+      if (edgeDraft?.op.id === opId) {
+        toggle(edgeDraft.op);
+        viewport.updateEdgePick(edgeDraft.op.points);
+        renderProperties();
+        return;
+      }
+      commit((features) => {
+        const op = features.find((f) => f.id === featureId)?.edgeOps.find((o) => o.id === opId);
+        if (op) toggle(op);
       });
     },
   });
@@ -3144,6 +3156,7 @@ function renderProperties() {
   if (splitDraft && splitDraft.id !== selectedId) splitDraft = null;
   if (dividerDraft && dividerDraft.id !== selectedId) dividerDraft = null;
   if (patternDraft && (patternDraft.id !== selectedId || selectedIds.length > 1)) patternDraft = null;
+  if (edgeDraft && edgeDraft.featureId !== selectedId) edgeDraft = null;
   renderPropertiesPanel();
   const preview = patternDraft ? { id: patternDraft.id, style: "add" as const, boxes: [], copies: patternPreview(patternDraft).map((m) => m.toArray()) } : cutPreviewBoxes();
   viewport.setPreview(editingSketchId || sculptingId ? null : preview);
@@ -3417,27 +3430,43 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
       ),
     );
   }
-  const setOp = (opId: string, mutate: (op: EdgeOp) => void) =>
-    update((t) => {
-      const op = t.edgeOps.find((o) => o.id === opId);
-      if (op) mutate(op);
-    });
-
   const OP_NAME: Record<EdgeOp["type"], string> = { fillet: "Fillet", chamfer: "Chamfer", bevel: "Bevel" };
-  f.edgeOps.forEach((op, n) => {
+  const draft = edgeDraft?.featureId === f.id ? edgeDraft.op : null;
+  // A finish being set up changes just itself; one that's applied changes the object.
+  const changer = (op: EdgeOp) => (mutate: (op: EdgeOp) => void) => {
+    if (op === draft) {
+      mutate(op);
+      renderProperties();
+    } else
+      update((t) => {
+        const o = t.edgeOps.find((x) => x.id === op.id);
+        if (o) mutate(o);
+      });
+  };
+  const closeDraft = () => {
+    if (edgePick?.opId === draft?.id) stopEdgePick();
+    edgeDraft = null;
+  };
+  [...f.edgeOps, ...(draft ? [draft] : [])].forEach((op, n) => {
+    const setOp = changer(op);
     const box = document.createElement("div");
-    box.className = `edge-op${edgePick?.opId === op.id ? " picking" : ""}`;
+    box.className = `edge-op${edgePick?.opId === op.id ? " picking" : ""}${op === draft ? " draft" : ""}`;
 
     // Its name and a remove button, then the type on its own full-width row (so all three fit).
     const head = document.createElement("div");
     head.className = "edge-op-head";
     const name = document.createElement("strong");
-    name.textContent = `${OP_NAME[op.type]} ${n + 1}`;
+    name.textContent = `${op === draft ? "New " + OP_NAME[op.type].toLowerCase() : `${OP_NAME[op.type]} ${n + 1}`}`;
     const remove = button("✕", () => {
+      if (op === draft) {
+        closeDraft();
+        renderProperties();
+        return;
+      }
       if (edgePick?.opId === op.id) stopEdgePick();
       update((t) => (t.edgeOps = t.edgeOps.filter((o) => o.id !== op.id)));
     }, "icon danger");
-    remove.title = "Remove";
+    remove.title = op === draft ? "Cancel" : "Remove";
     head.append(name, remove);
     const type = segmented(
       [
@@ -3446,7 +3475,7 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
         { value: "bevel", label: "Bevel", title: "Cut the edges flat at any angle: a distance along the flatter face, and the cut's angle from it" },
       ],
       op.type,
-      (v) => setOp(op.id, (o) => (o.type = v)),
+      (v) => setOp((o) => (o.type = v)),
     );
 
     const target = document.createElement("select");
@@ -3454,20 +3483,20 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
     target.value = op.target;
     target.onchange = () => {
       const value = target.value as EdgeTarget;
-      setOp(op.id, (o) => (o.target = value));
+      setOp((o) => (o.target = value));
       if (value === "picked" && !op.points.length) startEdgePick(f.id, op.id);
     };
 
-    box.append(head, type, lengthField(op.type === "fillet" ? "Radius" : "Distance", op.size, (v) => setOp(op.id, (o) => (o.size = v)), { min: 0 }));
+    box.append(head, type, lengthField(op.type === "fillet" ? "Radius" : "Distance", op.size, (v) => setOp((o) => (o.size = v)), { min: 0 }));
     if (op.type === "bevel") {
       box.append(
-        lengthField("Angle", op.angle ?? 45, (v) => setOp(op.id, (o) => (o.angle = Math.min(89, Math.max(1, v)))), { unit: "°", plain: true }),
-        checkToggle("Measure from the other face", !!op.flip, (on) => setOp(op.id, (o) => (o.flip = on || undefined))),
+        lengthField("Angle", op.angle ?? 45, (v) => setOp((o) => (o.angle = Math.min(89, Math.max(1, v)))), { unit: "°", plain: true }),
+        checkToggle("Measure from the other face", !!op.flip, (on) => setOp((o) => (o.flip = on || undefined))),
       );
     }
     box.append(labeled("Edges", target));
     if (f.kind !== "group" && (op.afterHoles || holesReaching(activeFeatures(doc.features), f).length)) {
-      const after = checkToggle("After holes", !!op.afterHoles, (on) => setOp(op.id, (o) => (on ? (o.afterHoles = true) : delete o.afterHoles)));
+      const after = checkToggle("After holes", !!op.afterHoles, (on) => setOp((o) => (on ? (o.afterHoles = true) : delete o.afterHoles)));
       after.title = "Cut the holes that reach this object first, so the edges they make can be rounded too";
       box.append(after);
     }
@@ -3484,14 +3513,14 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
         note.append(used > 0 ? `Too big for ${some} of the edges: they use ${formatLength(used)} mm (the largest that fits there), ${others}.` : `Too big for ${some} of the edges, so they're left sharp; ${others}.`);
       } else if (used > 0) {
         note.append(`Too big for these edges, so ${formatLength(used)} mm (the largest safe size) is used.`);
-        note.append(button(`Set to ${formatLength(used)}`, () => setOp(op.id, (o) => (o.size = used)), "link"));
+        note.append(button(`Set to ${formatLength(used)}`, () => setOp((o) => (o.size = used)), "link"));
         // Ways to keep it bigger: a chamfer can become a flatter bevel; a fillet can round fewer edges.
         if (op.type === "chamfer") {
-          const toBevel = button(`Make it a bevel (keeps ${formatLength(op.size)} mm)`, () => setOp(op.id, (o) => ((o.type = "bevel"), (o.angle = 45))), "link");
+          const toBevel = button(`Make it a bevel (keeps ${formatLength(op.size)} mm)`, () => setOp((o) => ((o.type = "bevel"), (o.angle = 45))), "link");
           toBevel.title = "A bevel can be flatter than 45°, so it fits at the full distance";
           note.append(" ", toBevel);
         } else if (op.type === "fillet" && op.target === "all") {
-          const topOnly = button("Round the top edges only", () => setOp(op.id, (o) => (o.target = "top")), "link");
+          const topOnly = button("Round the top edges only", () => setOp((o) => (o.target = "top")), "link");
           topOnly.title = "On a thin part the top and bottom roundings meet in the middle; rounding only the top allows a radius up to about the thickness";
           note.append(" ", topOnly);
         }
@@ -3509,7 +3538,7 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
       const note = document.createElement("div");
       note.className = "safe-note";
       note.append(`Too steep to fit at ${formatLength(op.size)} mm, so the cut is made flatter: ${formatLength(flatter)}°.`);
-      note.append(button(`Set to ${formatLength(flatter)}°`, () => setOp(op.id, (o) => (o.angle = flatter)), "link"));
+      note.append(button(`Set to ${formatLength(flatter)}°`, () => setOp((o) => (o.angle = flatter)), "link"));
       box.append(note);
     }
 
@@ -3522,6 +3551,23 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
       row.append(count, button(picking ? "✓ Done" : "Pick edges", () => (picking ? stopEdgePick() : startEdgePick(f.id, op.id)), picking ? "primary" : ""));
       box.append(row);
       if (picking) box.append(hint("Click edges in the view to add or remove them. Orange = picked."));
+    }
+    if (op === draft) {
+      // Nothing is worked out until it's applied: set it up first.
+      const none = op.target === "picked" && !op.points.length;
+      const apply = button("✓ Apply", () => {
+        closeDraft();
+        update((t) => t.edgeOps.push(op));
+      }, "primary");
+      apply.disabled = none || op.size <= 0;
+      const cancel = button("Cancel", () => {
+        closeDraft();
+        renderProperties();
+      });
+      const row = document.createElement("div");
+      row.className = "actions";
+      row.append(apply, cancel);
+      box.append(row, hint(none ? "Pick the edges to finish, then Apply." : "Set it up, then Apply: it's worked out once you apply it."));
     }
     items.push(box);
   });
@@ -3538,11 +3584,13 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
       const box = viewport.modelBounds(new Set([h.id]));
       return !mine || !box || box.intersectsBox(mine);
     });
-  const newOp = (type: EdgeOp["type"]) =>
-    update((t) => t.edgeOps.push({ id: newId(), type, size: 1, target: "all", points: [], ...(type === "bevel" ? { angle: 30 } : {}), ...(afterHoles ? { afterHoles: true } : {}) }));
+  const newOp = (type: EdgeOp["type"]) => {
+    edgeDraft = { featureId: f.id, op: { id: newId(), type, size: 1, target: "all", points: [], ...(type === "bevel" ? { angle: 30 } : {}), ...(afterHoles ? { afterHoles: true } : {}) } };
+    renderProperties();
+  };
   add.className = "actions edge-add";
   add.append(button("+ Fillet", () => newOp("fillet")), button("+ Chamfer", () => newOp("chamfer")), button("+ Bevel", () => newOp("bevel")));
-  items.push(add);
+  if (!draft) items.push(add);
   if (f.kind === "group") items.push(hint("Rounding a group merges its shapes first, so you can round edges where they meet, or the rim of a hole."));
   return items;
 }
