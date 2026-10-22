@@ -4666,18 +4666,22 @@ let estimating: string | null = null;
 
 function estimateSection(): HTMLElement[] {
   if (offscreenPanel) return [];
-  const key = `${modelRevision}|${topSelected().join(",")}`;
-  if (estimate?.key !== key && estimating !== key) {
+  const selection = topSelected().join(",");
+  const key = `${modelRevision}|${selection}`;
+  // Worked out only when asked: on a big model it keeps the kernel busy, holding up every change after it.
+  const work = () => {
+    if (estimating === key) return;
     estimating = key;
+    renderProperties();
     kernel
       .stats(exportFeatures().features)
-      .then((stats) => {
-        estimate = { key, stats };
-        if (`${modelRevision}|${topSelected().join(",")}` === key) renderProperties();
-      })
+      .then((stats) => (estimate = { key, stats }))
       .catch(() => (estimate = { key, stats: null }))
-      .finally(() => estimating === key && (estimating = null));
-  }
+      .finally(() => {
+        if (estimating === key) estimating = null;
+        if (`${modelRevision}|${topSelected().join(",")}` === key) renderProperties();
+      });
+  };
   const save = () => {
     store(PRINT_KEY, JSON.stringify(printSettings));
     renderProperties();
@@ -4689,7 +4693,12 @@ function estimateSection(): HTMLElement[] {
   const out = document.createElement("div");
   out.className = "estimate";
   const s = estimate?.key === key ? estimate.stats : null;
-  if (!s) out.textContent = estimate?.key === key ? "Nothing solid to print." : "Working it out…";
+  if (estimate?.key !== key) {
+    // Not worked out for this yet (or it's changed since): a button to do it.
+    const again = estimate?.key.endsWith(`|${selection}`);
+    if (estimating === key) out.textContent = "Working it out…";
+    else out.append(button(again ? "↻ Work it out again" : "⚖ Work out weight & cost", work), ...(again ? [" (it's changed since)"] : []));
+  } else if (!s) out.textContent = "Nothing solid to print.";
   else {
     const { grams, metres, cost } = printEstimate(s);
     const solid = (s.volume / 1000) * (MATERIALS[printSettings.material] ?? 1.24);

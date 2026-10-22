@@ -38,7 +38,7 @@
 - **Tilt:** taper an object's sides in or out by an angle (the base keeps its size), or lean the whole shape over along X or Y.
 - **Colours** per object (new objects take turns through green, orange, purple, yellow and pink), shown in the view and saved into 3MF exports.
 - **Measure** (M): click two points (corners and edges snap) for the distance and its X/Y/Z parts; two faces also give their angle.
-- **Print estimate:** a selected object (or several) shows roughly what printing it takes: weight in grams for the chosen material and infill, metres of 1.75 mm filament, and cost at your price per kg, plus its volume, surface area and centre of mass. GizmoCAD menu ▸ Print estimate does the whole model.
+- **Print estimate:** for a selected object (or several), click **Work out weight & cost** to see roughly what printing it takes: weight in grams for the chosen material and infill, metres of 1.75 mm filament, and cost at your price per kg, plus its volume, surface area and centre of mass. GizmoCAD menu ▸ Print estimate does the whole model.
 - **Print check** (⚠ in the view's corner): overhangs steeper than 45° that don't sit on the bed show orange, walls thinner than 0.8 mm (two nozzle widths) red, with how much of each.
   Moving parts (hinged, sliding, orbiting) are checked against the rest: where one overlaps shows purple, and a gap under 0.3 mm is flagged, since printed in place either would fuse it.
 - Mark any shape as a **hole**: what it cuts is shown cut as you work, with the hole itself see-through so you can still move it.
