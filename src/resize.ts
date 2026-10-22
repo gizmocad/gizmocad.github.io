@@ -292,13 +292,21 @@ function actualFactor(before: Feature, after: Feature, axis: "x" | "y" | "z", s:
 export function resizeFeature(features: Feature[], id: string, s: Vec3, snap: number, anchor?: ResizeAnchor | ResizeAnchor[]) {
   const f = features.find((x) => x.id === id);
   if (!f) return;
-  const anchors = anchor ? [anchor].flat() : [];
+  // A snap peg or socket grows about its own axis and base, so it stays on the centre it was put on (and lined up with its other half).
+  const anchors = anchor && f.kind !== "snap" ? [anchor].flat() : [];
   const before = anchors.length ? structuredClone(f) : null;
   resizeOwnTree(features, f, s, snap);
   syncSnapPair(features, f);
+  const [was, now] = before ? [featureExtents(before), featureExtents(f)] : [null, null];
   for (const a of anchors) {
     // The anchor face sat at `at`; after scaling about the origin it sits at at·k, so move back by the difference.
-    const shift = a.at * (1 - actualFactor(before!, f, a.axis, s));
+    let shift = a.at * (1 - actualFactor(before!, f, a.axis, s));
+    // Not every shape grows evenly from its origin (a screw's head stands a set amount proud): when the fixed
+    // side is one of its ends, where that end went is measured instead.
+    if (was && now) {
+      if (Math.abs(a.at - was[0][a.axis]) < 0.05) shift = was[0][a.axis] - now[0][a.axis];
+      else if (Math.abs(a.at - was[1][a.axis]) < 0.05) shift = was[1][a.axis] - now[1][a.axis];
+    }
     f.position = {
       x: round(f.position.x + a.dir.x * shift),
       y: round(f.position.y + a.dir.y * shift),

@@ -345,6 +345,9 @@ export class Viewport {
           obj.position.copy(anchor.start).add(local.applyQuaternion(obj.quaternion));
         }
         this.events.onResizing(this.heldNode(obj).userData.id, { x: obj.scale.x, y: obj.scale.y, z: obj.scale.z });
+        // A snap joint's other half grows with it, so they're seen to stay lined up.
+        const pair = this.snapPartner(obj);
+        if (pair) pair.scale.set(obj.scale.x * (this.features.get(pair.userData.id)?.mirrored ? -1 : 1), obj.scale.y, obj.scale.z);
         obj.scale.x *= flip;
       }
       if (obj && obj === this.moveProxy) this.followProxy();
@@ -3024,6 +3027,13 @@ export class Viewport {
     this.events.onResized(id!, s, this.moveFor?.id === id ? this.sketchAnchors(s, anchor) : anchor, true);
   }
 
+  /** A snap peg's or socket's other half (its node), when the socket follows the peg. */
+  private snapPartner(obj: THREE.Object3D): THREE.Object3D | null {
+    const f = this.features.get(obj.userData.id);
+    if (f?.kind !== "snap" || f.params.follow === false || !f.params.pair) return null;
+    return this.nodes.get(f.params.pair) ?? null;
+  }
+
   /** In One side mode, work out which face stays fixed for the handle just grabbed. */
   private startResizeAnchor() {
     this.resizeAnchor = null;
@@ -3035,6 +3045,7 @@ export class Viewport {
     // An imported object's origin needn't be at the bottom of its shape: its bottom stays put, as other shapes' does.
     const imported = f?.kind === "imported" || (f?.kind === "sculpt" && f.params.base === "imported");
     if (!this.oneSide && !(imported && handle === "Z")) return;
+    if (f?.kind === "snap") return; // A snap joint's half always grows about its axis and base.
     const box = this.localBox(node.userData.id, node);
     if (!box) return;
     const axis = handle.toLowerCase() as "x" | "y" | "z";
@@ -3076,6 +3087,8 @@ export class Viewport {
       const anchor = this.resizeAnchor;
       this.resizeAnchor = null;
       obj.scale.set(flip, 1, 1);
+      const pair = this.snapPartner(obj);
+      if (pair) pair.scale.set(this.features.get(pair.userData.id)?.mirrored ? -1 : 1, 1, 1);
       if (anchor) obj.position.copy(anchor.start);
       const m = obj === this.moveProxy ? this.moveFor : null;
       if (m) {
