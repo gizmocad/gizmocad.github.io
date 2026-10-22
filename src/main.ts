@@ -43,6 +43,8 @@ import {
   type SketchOperation,
   type ScrewParams,
   type SnapParams,
+  cutsAround,
+  holeSurroundings,
   snapHeadroom,
   snapLayout,
   syncSnapPair,
@@ -2731,8 +2733,17 @@ function combineSection(f: Feature, update: (mutate: (f: Feature) => void) => vo
 function fitSection(f: Feature, update: (mutate: (f: Feature) => void) => void): HTMLElement[] {
   if (f.kind === "sketch" && f.params.operation === "flat") return [];
   if (f.mode === "hole") {
-    if (f.kind === "snap") return [];
+    // Its part is inside another object: cut that too (else that one fills the hole back in where they overlap).
+    const around = holeSurroundings(doc.features, f);
+    const reach = around.length
+      ? [
+          checkToggle(`Cut ${around.map((x) => x.name).join(", ")} too`, cutsAround(f), (on) => update((t) => (t.cutsAround = on))),
+          hint(`${escapeHtml(findFeature(f.parentId)?.name ?? "")} is inside ${escapeHtml(around[0].name)}: ticked, this hole cuts that as well, so it isn't filled back in where they overlap.`),
+        ]
+      : [];
+    if (f.kind === "snap") return reach.length ? [section("Cuts"), ...reach] : [];
     const items: HTMLElement[] = [
+      ...(reach.length ? [section("Cuts"), ...reach] : []),
       section("Clearance"),
       lengthField("Clearance", f.clearance ?? 0, (v) => update((t) => (v > 0 ? (t.clearance = v) : delete t.clearance))),
       hint("Grows this hole by this much on every side, so a part the same shape fits into what it cuts. About 0.2 mm is a snug fit on most printers; 0.3–0.5 mm slides freely."),

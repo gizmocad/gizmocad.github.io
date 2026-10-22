@@ -27,6 +27,7 @@ import {
   type ScrewParams,
   type SnapParams,
   snapHeadroom,
+  withHolesCuttingAround,
   snapLayout,
   type Shell,
   type SpringParams,
@@ -3738,6 +3739,7 @@ self.onmessage = async (event: MessageEvent<KernelRequest>) => {
     facetMigrations = {};
     excludeTextured = false; // In case an earlier request stopped half way.
     if ("features" in req) {
+      (req as { features: Feature[] }).features = withHolesCuttingAround(req.features);
       modelFeatures = req.features;
       rememberBreps(req.features);
       await ensureFonts(req.features);

@@ -186,6 +186,38 @@ export function snapLayout(p: SnapParams) {
 /** The gap past a snap peg's tip at the bottom of its socket. */
 export const snapHeadroom = (p: SnapParams) => p.headroom ?? p.clearance + 0.3;
 
+/**
+ * The objects a hole's part is inside, up to the first group (outermost last): a hole cuts just its own
+ * part's branch, so a part inside another (a copy of it, say) would fill the hole back in.
+ */
+export function holeSurroundings(features: Feature[], h: Feature): Feature[] {
+  const out: Feature[] = [];
+  let p = features.find((x) => x.id === h.parentId);
+  if (h.mode !== "hole" || !p || p.mode !== "solid" || p.kind === "group") return out;
+  for (let q = features.find((x) => x.id === p!.parentId); q && q.mode === "solid" && q.kind !== "group"; q = features.find((x) => x.id === q!.parentId)) out.push((p = q));
+  return out;
+}
+
+export const cutsAround = (h: Feature) => h.mode === "hole" && (h.cutsAround ?? h.kind === "snap");
+
+/**
+ * The model as the kernel builds it: holes set to cut around them moved up (staying where they are) to
+ * the outermost object their part is inside, so they cut that and everything in it.
+ */
+export function withHolesCuttingAround(features: Feature[]): Feature[] {
+  const lift = features.filter((h) => cutsAround(h) && !h.joint && holeSurroundings(features, h).length);
+  if (!lift.length) return features;
+  const out = features.map((f) => (lift.includes(f) ? structuredClone(f) : f));
+  for (const h of lift) {
+    const world = worldMatrix(out, h.id);
+    const to = holeSurroundings(out, h).at(-1)!;
+    const copy = out.find((x) => x.id === h.id)!;
+    copy.parentId = to.id;
+    setWorldMatrix(out, copy.id, world);
+  }
+  return out;
+}
+
 /** Give a snap joint's other half the same sizes (they only fit together that way). */
 export function syncSnapPair(features: Feature[], f: Feature) {
   if (f.kind !== "snap") return;
@@ -542,6 +574,8 @@ interface FeatureBase {
   suppressed?: boolean;
   /** Holes (by id) that don't cut it, or anything inside it, though they'd otherwise reach it. */
   ignoreHoles?: string[];
+  /** Holes only: also cut the objects its part is inside (unset: snap sockets do, other holes don't). */
+  cutsAround?: boolean;
   /** Holes only: grown by this much (mm) on every side, so a part the same shape fits into what it cuts. */
   clearance?: number;
   /** Groups only: shown, and exported, as one joined shape rather than separate parts that move together. */
