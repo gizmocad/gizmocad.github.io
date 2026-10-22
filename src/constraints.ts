@@ -211,9 +211,12 @@ export function measure(type: SketchConstraint["type"], refs: SketchRef[], entit
 
 // ---- Solving ----------------------------------------------------------------------
 
-/** The numbers of an entity the solver may change, as get/set pairs. */
-function slots(e: SketchEntity): { get(): number; set(v: number): void }[] {
-  const field = (k: string) => ({ get: () => (e as unknown as Record<string, number>)[k], set: (v: number) => ((e as unknown as Record<string, number>)[k] = v) });
+/** Sizes (radii, widths…), as opposed to positions and angles: the solver would rather move a shape than resize it. */
+const SIZES = new Set(["width", "height", "radius", "rx", "ry"]);
+
+/** The numbers of an entity the solver may change, as get/set pairs (`size`: one of its sizes). */
+function slots(e: SketchEntity): { get(): number; set(v: number): void; size?: boolean }[] {
+  const field = (k: string) => ({ get: () => (e as unknown as Record<string, number>)[k], set: (v: number) => ((e as unknown as Record<string, number>)[k] = v), size: SIZES.has(k) });
   const pts = (list: P[]) => list.flatMap((p) => [0, 1].map((i) => ({ get: () => p[i], set: (v: number) => (p[i] = v) })));
   switch (e.type) {
     case "rect":
@@ -246,10 +249,12 @@ export interface SolveResult {
 
 /**
  * Move the constrained entities (in place) so every constraint holds, changing
- * them as little as possible. `before` is the drawing before the user's edit:
- * numbers that changed since are held nearly still, so the edit itself sticks.
+ * them as little as possible, and moving shapes rather than resizing them.
+ * `before` is the drawing before the user's edit: numbers that changed since
+ * are held nearly still, so the edit itself sticks. Shapes in `hold` are held
+ * still too (the shape a new rule was added against).
  */
-export function solveSketch(entities: SketchEntity[], constraints: SketchConstraint[], before?: SketchEntity[]): SolveResult {
+export function solveSketch(entities: SketchEntity[], constraints: SketchConstraint[], before?: SketchEntity[], hold: Set<string> = new Set()): SolveResult {
   const map = new Map(entities.map((e) => [e.id, e]));
   const dead = constraints.filter((c) => c.refs.some((r) => !resolve(map, r)) || !constraintFits(c.type, c.refs)).map((c) => c.id);
   const live = constraints.filter((c) => !dead.includes(c.id));
@@ -265,7 +270,7 @@ export function solveSketch(entities: SketchEntity[], constraints: SketchConstra
     const prevSlots = prev && prev.type === e.type ? slots(structuredClone(prev)) : null;
     slots(e).forEach((s, i) => {
       const changed = prevSlots && prevSlots[i] && Math.abs(prevSlots[i].get() - s.get()) > 1e-9;
-      vars.push({ ...s, weight: changed ? 1e6 : 1 });
+      vars.push({ ...s, weight: hold.has(id) ? 1e9 : changed ? 1e6 : s.size ? 100 : 1 });
     });
   }
 

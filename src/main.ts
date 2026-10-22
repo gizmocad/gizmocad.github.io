@@ -143,13 +143,21 @@ function commit(mutate: (features: Feature[]) => void) {
   redoStack.length = 0;
   // Sketches with constraints: note their drawing before the change, so the solver can tell what was edited.
   const before = new Map(doc.features.flatMap((f) => (f.kind === "sketch" && f.params.constraints?.length ? [[f.id, structuredClone(f.params.entities)] as const] : [])));
+  const rulesBefore = new Set(doc.features.flatMap((f) => (f.kind === "sketch" ? (f.params.constraints ?? []).map((c) => c.id) : [])));
   const jointsBefore = new Map(doc.features.flatMap((f) => (f.joint ? [[f.id, f.joint.value] as const] : [])));
   mutate(doc.features);
   keepPendingExpr();
   followJoints(jointsBefore);
   for (const f of doc.features) {
     if (f.kind !== "sketch" || !f.params.constraints?.length) continue;
-    const result = solveSketch(f.params.entities, f.params.constraints, before.get(f.id));
+    // A new rule between two shapes moves the first one picked to the second (e.g. an edge onto a circle), which stays put.
+    const hold = new Set(
+      f.params.constraints.flatMap((c) => {
+        const last = c.refs.at(-1)?.entity;
+        return !rulesBefore.has(c.id) && last && c.refs.some((r) => r.entity !== last) ? [last] : [];
+      }),
+    );
+    const result = solveSketch(f.params.entities, f.params.constraints, before.get(f.id), hold);
     if (result.dead.length) f.params.constraints = f.params.constraints.filter((c) => !result.dead.includes(c.id));
     if (result.error > 1e-3) setNotice("These constraints can't all be met at once: remove one, or change a dimension.");
   }
