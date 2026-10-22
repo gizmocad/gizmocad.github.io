@@ -451,7 +451,8 @@ async function settle() {
 async function buildNow() {
   const token = ++buildToken;
   const started = performance.now();
-  const features = kernel.snapshot(activeFeatures(doc.features));
+  // The sketch being drawn is just a drawing until it's finished: its solid isn't built, nor shown in a group it's in.
+  const features = kernel.snapshot(activeFeatures(doc.features).map((f) => (f.id === editingSketchId && f.kind === "sketch" ? { ...f, params: { ...f.params, operation: "flat" as const } } : f)));
   try {
     await kernel.ready;
     await syncFonts();

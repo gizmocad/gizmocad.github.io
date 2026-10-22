@@ -52,6 +52,7 @@
   tilted Plane object. Shapes can add to the profile, cut it, or just act as guides. Snap to existing
   points and the grid (hold Alt to place freely). Edit by dragging the dots, typing exact values, or right-clicking.
   A finished sketch stays flat (just a drawing) until you click Extrude (up, down or both ways) or Revolve in the 3D view.
+  While you draw, everything is 2D: the sketch shows as its drawing (its solid comes back when you finish) and the rest of the model lies flat on the sketch's plane as outlines to draw against.
 - **Split & dividers:** cut any shape or sketch into pieces along X, Y or Z, tilted at any angle, with as many parallel
   cuts as you like (drag each cut's arrow or type it, or space them evenly; all pieces stay editable),
   or add evenly spaced divider walls (count, thickness, height), e.g. inside a tray.

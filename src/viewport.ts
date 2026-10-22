@@ -905,6 +905,9 @@ export class Viewport {
     this.viewCube.visible = false;
     this.grids.visible = false;
     this.sketchLayer.visible = true;
+    // The print check's marks are 3D: they come back when sketching ends.
+    this.printCheckGroup.removeFromParent();
+    this.clashGroup.visible = false;
     this.updateSketchFrame(true);
     this.applyAppearance();
   }
@@ -942,6 +945,9 @@ export class Viewport {
     if (this.sketchWasOrtho) queueMicrotask(() => this.setOrthographic(true));
     this.grids.visible = true;
     this.sketchLayer.visible = false;
+    this.flattenOntoSketch();
+    this.clashGroup.visible = true;
+    if (this.printCheckOn) this.drawPrintCheck();
     this.applyAppearance();
   }
 
@@ -957,9 +963,13 @@ export class Viewport {
       s.planeKey = key;
       aimCamera = true;
     }
-    this.sketchLayer.matrix.copy(node.matrixWorld).multiply(planeMatrix(f.params));
+    // Where the sketch sits in the model (the model itself is drawn flattened while sketching).
+    const world = node.matrix.clone();
+    for (let p = node.parent; p && p !== this.root; p = p.parent) world.premultiply(p.matrix);
+    this.sketchLayer.matrix.copy(world).multiply(planeMatrix(f.params));
     this.sketchLayer.matrixWorldNeedsUpdate = true;
     this.sketchLayer.updateMatrixWorld(true);
+    this.flattenOntoSketch();
     if (!aimCamera) return;
 
     const origin = new THREE.Vector3().setFromMatrixPosition(this.sketchLayer.matrix);
@@ -969,6 +979,20 @@ export class Viewport {
     this.camera.up.copy(up);
     this.camera.position.copy(origin).addScaledVector(normal, 160);
     this.camera.lookAt(origin);
+  }
+
+  /**
+   * While sketching, the rest of the model is drawn squashed flat onto the
+   * sketch's plane, so it reads as 2D outlines to draw against rather than
+   * solids. (Not quite zero thickness: lighting needs the matrix invertible.)
+   */
+  private flattenOntoSketch() {
+    this.root.matrixAutoUpdate = false;
+    if (this.sketch) {
+      const plane = this.sketchLayer.matrix;
+      this.root.matrix.copy(plane).multiply(new THREE.Matrix4().makeScale(1, 1, 1e-3)).multiply(plane.clone().invert());
+    } else this.root.matrix.identity();
+    this.root.updateMatrixWorld(true);
   }
 
   private sketchPlaneWorld(): THREE.Plane {
@@ -1794,6 +1818,7 @@ export class Viewport {
       this.clashGroup.add(m);
     }
     if (meshes.length) this.scene.add(this.clashGroup);
+    this.clashGroup.visible = !this.sketch;
     this.invalidate();
   }
 
@@ -1802,6 +1827,7 @@ export class Viewport {
     disposeTree(this.printCheckGroup);
     this.printCheckGroup = new THREE.Group();
     this.printCheckResult = null;
+    if (this.sketch) return; // Drawn again when sketching ends (the model is flattened meanwhile).
     this.needsRender = true;
     if (!this.printCheckOn) return;
     this.root.updateMatrixWorld(true);
