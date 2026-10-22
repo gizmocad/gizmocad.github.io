@@ -2076,12 +2076,14 @@ export class Viewport {
   }
 
   /** Where a ray from `from` along unit `d` is inside object `id` (and what's inside it): [in, out] distances (in may be 0, starting inside). */
-  private alongLine(id: string, from: THREE.Vector3, d: THREE.Vector3): [number, number][] {
+  private alongLine(id: string, from: THREE.Vector3, d: THREE.Vector3, inside = true): [number, number][] {
     const node = this.nodes.get(id);
     if (!node) return [];
     this.root.updateMatrixWorld(true);
     const meshes: THREE.Mesh[] = [];
-    node.traverse((o) => o instanceof THREE.Mesh && o.userData.id && this.features.get(o.userData.id)?.mode !== "hole" && isShown(o) && meshes.push(o));
+    // `inside`: what's inside it counts as it (only shown things); otherwise just its own shape, hidden or not.
+    if (inside) node.traverse((o) => o instanceof THREE.Mesh && o.userData.id && this.features.get(o.userData.id)?.mode !== "hole" && isShown(o) && meshes.push(o));
+    else for (const o of node.children) if (o instanceof THREE.Mesh && o.userData.id === id) meshes.push(o);
     // Its far sides face away from the ray: hit from behind, so both sides count.
     const sides = meshes.map((m) => (m.material as THREE.Material).side);
     meshes.forEach((m) => ((m.material as THREE.Material).side = THREE.DoubleSide));
@@ -2100,6 +2102,27 @@ export class Viewport {
     } finally {
       meshes.forEach((m, i) => ((m.material as THREE.Material).side = sides[i]));
     }
+  }
+
+  /**
+   * The solid objects (not in `skip`, hidden or not) a line from `from` (world) along `dir` is inside
+   * at distance `at`, shown ones first; else the last one it goes into before then.
+   */
+  partsAlong(from: Vec3, dir: Vec3, at: number, skip: Set<string>): string[] {
+    const start = new THREE.Vector3(from.x, from.y, from.z);
+    const d = new THREE.Vector3(dir.x, dir.y, dir.z).normalize();
+    const inside: string[] = [];
+    let last: { id: string; t: number } | null = null;
+    for (const id of this.nodes.keys()) {
+      if (skip.has(id) || this.features.get(id)?.mode !== "solid" || this.features.get(id)?.kind === "group") continue;
+      for (const [enter, leave] of this.alongLine(id, start, d, false)) {
+        if (enter <= at && leave >= at) inside.push(id);
+        else if (enter <= at && (!last || enter > last.t)) last = { id, t: enter };
+      }
+    }
+    const shown = (id: string) => isShown(this.nodes.get(id)!);
+    const found = [...new Set(inside)].sort((a, b) => Number(shown(b)) - Number(shown(a)));
+    return found.length ? found : last ? [last.id] : [];
   }
 
   /** The model's world bounds (shown objects), or null if there's nothing. */

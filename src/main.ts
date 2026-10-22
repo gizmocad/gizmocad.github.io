@@ -1597,6 +1597,48 @@ function makeSnapJoint(pegOn: string, socketIn: string, point: Vec3, rotation: V
   );
 }
 
+/** Make a snap peg's socket again in the part it now points into, lined up with it (its old socket, and stray ones there, go). */
+function remakeSocket(pegId: string) {
+  const peg = findFeature(pegId);
+  if (peg?.kind !== "snap" || peg.params.part !== "peg") return;
+  const part = findFeature(peg.parentId);
+  const world = worldMatrix(doc.features, peg.id);
+  const base = new Vector3().setFromMatrixPosition(world);
+  const axis = new Vector3(0, 0, 1).transformDirection(world);
+  // The part its catch ends up in (it may go through others on the way, such as a hinged arm).
+  // Looked for just outside where its socket goes (down the middle may be an old socket's hole).
+  const { r, catchAt } = snapLayout(peg.params);
+  const side = new Vector3(1, 0, 0).transformDirection(world).multiplyScalar(r + peg.params.catch + peg.params.clearance + 0.5);
+  const skip = part ? subtreeIds(doc.features, part.id) : new Set([peg.id]);
+  const parts = [...new Set([side, side.clone().negate()].flatMap((s) => viewport.partsAlong(base.clone().add(s), axis, (catchAt + peg.params.depth) / 2, skip)))];
+  const old = findFeature(peg.params.pair ?? null);
+  // Into the part its old socket was in (or a socket left where it points, whose peg is gone); else where its catch ends up.
+  const near = (x: Feature) => new Vector3().setFromMatrixPosition(worldMatrix(doc.features, x.id)).distanceTo(base) < 3;
+  const strays = doc.features.filter((x) => x.kind === "snap" && x.params.part === "socket" && !findFeature(x.params.pair ?? null) && near(x));
+  const shown = (id: string) => !hiddenInView(findFeature(id)!);
+  const before = [old, ...strays].find((x) => x?.parentId && x.parentId !== part?.id)?.parentId;
+  const into = before ?? parts.find(shown) ?? parts[0];
+  const target = findFeature(into ?? null);
+  if (!target) return setNotice(`${peg.name} doesn't point into another part: move it so it goes into the part it snaps into.`);
+  const gone = doc.features
+    .filter((x) => x.kind === "snap" && x.params.part === "socket" && (x.id === old?.id || (!findFeature(x.params.pair ?? null) && x.parentId === target.id && near(x))))
+    .map((x) => x.id);
+  const socket = { ...createFeature("snap", doc.features, target.id), mode: "hole", name: peg.name.replace(/peg/i, "socket") } as Extract<Feature, { kind: "snap" }>;
+  socket.params = { ...peg.params, part: "socket", pair: peg.id };
+  commit((features) => {
+    features.splice(0, features.length, ...features.filter((x) => !gone.includes(x.id)));
+    for (const x of features) if (x.ignoreHoles?.some((h) => gone.includes(h))) x.ignoreHoles = x.ignoreHoles.filter((h) => !gone.includes(h));
+    insertFeatures(features, [socket]);
+    setWorldMatrix(features, socket.id, world);
+    const p = features.find((x) => x.id === peg.id);
+    if (p?.kind === "snap") p.params.pair = socket.id;
+    // The socket cuts the other part, not the peg's.
+    const t = part && features.find((x) => x.id === part.id);
+    if (t) t.ignoreHoles = [...(t.ignoreHoles ?? []), socket.id];
+  });
+  setNotice(`${socket.name} is made in ${target.name}, lined up with ${peg.name}${gone.length ? ` (${gone.length === 1 ? "the old socket is" : `${gone.length} old sockets are`} gone)` : ""}.`);
+}
+
 /** A snap joint half's sizes: changing them changes both halves. */
 function snapFields(f: Extract<Feature, { kind: "snap" }>): HTMLElement[] {
   const p = f.params;
@@ -1627,8 +1669,17 @@ function snapFields(f: Extract<Feature, { kind: "snap" }>): HTMLElement[] {
       ),
     ),
   ];
-  if (!other) items.push(hint(`Its ${peg ? "socket" : "peg"} has been deleted: make a new snap joint, or delete this one too.`));
-  else {
+  if (peg) {
+    // Moved since (into another part, say), or its socket deleted: made again where it now points.
+    const lined = other?.kind === "snap" && worldMatrix(doc.features, other.id).equals(worldMatrix(doc.features, f.id)) && other.params.depth === p.depth && other.params.diameter === p.diameter;
+    const remake = button("↻ Remake its socket", () => remakeSocket(f.id), lined ? "wide" : "primary wide");
+    remake.title = "Make its socket again in the part it points into, lined up with it (the old one goes)";
+    items.push(remake);
+    if (!lined) items.push(hint(other ? "<b>Its socket isn't lined up with it</b> (it's been moved): remake it." : "<b>Its socket has been deleted:</b> remake it in the part this points into."));
+  }
+  if (!other) {
+    if (!peg) items.push(hint("Its peg has been deleted: delete this too, or make a new snap joint."));
+  } else {
     const go = button(`Select the ${peg ? "socket" : "peg"}`, () => selectObject(other.id));
     items.push(
       hint(
