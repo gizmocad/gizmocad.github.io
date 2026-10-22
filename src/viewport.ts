@@ -10,7 +10,7 @@ import type { MeshData } from "./kernel";
 import { scenePalette } from "./theme";
 import { PLANE_ROTATIONS, baseMatrix, clampJoint, colourOf, jointMatrix, localMatrix, sweepOf, worldMatrix, type Feature, type Joint, type SketchParams, type Vec3 } from "./model";
 import { featureExtents, isTilted, rulerLength, staysRound, type ResizeAnchor } from "./resize";
-import { isClosed, outline, prismPoints } from "./sketchGeometry";
+import { isClosed, outline, prismPoints, sketchRegion } from "./sketchGeometry";
 import { hedron } from "./hedron";
 import { SculptMesh, creasedGeometry, isCadMesh, sculptGeometry, type BrushSettings } from "./sculpt";
 import { ViewCube } from "./viewCube";
@@ -3134,7 +3134,27 @@ function buildFlatSketch(f: Extract<Feature, { kind: "sketch" }>): THREE.Object3
   const frame = planeMatrix(f.params);
   const out: THREE.Object3D[] = [];
   const lineMat = new THREE.LineBasicMaterial({ color: scenePalette().sketchAdd });
+  const cutMat = new THREE.LineBasicMaterial({ color: COLORS.hole });
   const guideMat = new THREE.LineDashedMaterial({ color: scenePalette().sketchConstruction, dashSize: 1.5, gapSize: 1 });
+  const fillWith = (shape: THREE.Shape) => {
+    const fill = new THREE.Mesh(
+      new THREE.ShapeGeometry(shape),
+      new THREE.MeshBasicMaterial({ color: COLORS.solid, transparent: true, opacity: 0.25, side: THREE.DoubleSide, depthWrite: false }),
+    );
+    fill.geometry.applyMatrix4(frame);
+    fill.userData.id = f.id;
+    fill.userData.flat = true;
+    out.push(fill);
+  };
+  // Filled where it'll be solid: its added shapes less its cut-outs.
+  const region = sketchRegion(f.params.entities);
+  const v2 = (ring: [number, number][]) => ring.map(([x, y]) => new THREE.Vector2(x, y));
+  for (const [outer, ...holes] of region ?? []) {
+    if (outer.length < 3) continue;
+    const shape = new THREE.Shape(v2(outer));
+    shape.holes = holes.filter((h) => h.length >= 3).map((h) => new THREE.Path(v2(h)));
+    fillWith(shape);
+  }
   for (const e of f.params.entities) {
     const pts = outline(e);
     if (!pts.length) continue;
@@ -3148,19 +3168,11 @@ function buildFlatSketch(f: Extract<Feature, { kind: "sketch" }>): THREE.Object3
     const closed = isClosed(e);
     const geom = new THREE.BufferGeometry().setFromPoints([...pts, ...(closed ? [pts[0]] : [])].map(([x, y]) => new THREE.Vector3(x, y, 0)));
     geom.applyMatrix4(frame);
-    const line = new THREE.Line(geom, guide ? guideMat : lineMat);
+    const line = new THREE.Line(geom, guide ? guideMat : e.mode === "subtract" ? cutMat : lineMat);
     if (guide) line.computeLineDistances();
     out.push(line);
-    if (closed && !guide && pts.length >= 3) {
-      const fill = new THREE.Mesh(
-        new THREE.ShapeGeometry(new THREE.Shape(pts.map(([x, y]) => new THREE.Vector2(x, y)))),
-        new THREE.MeshBasicMaterial({ color: COLORS.solid, transparent: true, opacity: 0.25, side: THREE.DoubleSide, depthWrite: false }),
-      );
-      fill.geometry.applyMatrix4(frame);
-      fill.userData.id = f.id;
-      fill.userData.flat = true;
-      out.push(fill);
-    }
+    // (If the cut-outs couldn't be worked out, each added shape is filled on its own.)
+    if (!region && closed && e.mode === "add" && pts.length >= 3) fillWith(new THREE.Shape(v2(pts)));
   }
   return out;
 }

@@ -1380,3 +1380,22 @@ export function tangentPoints(entities: SketchEntity[], from: P): P[] {
   }
   return out;
 }
+
+/**
+ * The area a sketch makes: its added shapes together, less its cut-outs (as
+ * outlines, each polygon an outer ring then its holes). Null if it can't be
+ * worked out (then each shape stands alone).
+ */
+export function sketchRegion(entities: SketchEntity[]): P[][][] | null {
+  const rings = (mode: SketchEntity["mode"]) => entities.filter((e) => isClosed(e) && e.mode === mode).map((e) => outline(e)).filter((r) => r.length >= 3);
+  const adds = rings("add");
+  const cuts = rings("subtract");
+  if (!adds.length) return [];
+  try {
+    let region: MultiPolygon = clipping.union([adds[0]], ...adds.slice(1).map((r) => [r]));
+    if (cuts.length) region = clipping.difference(region, ...cuts.map((r) => [r]));
+    return region as P[][][];
+  } catch {
+    return null;
+  }
+}
