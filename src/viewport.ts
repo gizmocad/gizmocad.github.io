@@ -8,7 +8,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import type { MeshData } from "./kernel";
 import { scenePalette } from "./theme";
-import { PLANE_ROTATIONS, baseMatrix, clampJoint, colourOf, jointMatrix, localMatrix, sweepOf, worldMatrix, type Feature, type Joint, type SketchParams, type Vec3 } from "./model";
+import { PLANE_ROTATIONS, baseMatrix, clampJoint, colourOf, jointMatrix, localMatrix, sweepOf, worldMatrix, type Feature, type Joint, type SketchEntity, type SketchParams, type Vec3 } from "./model";
 import { featureExtents, isTilted, rulerLength, staysRound, type ResizeAnchor } from "./resize";
 import { bounds, isClosed, outline, prismPoints, sketchRegion } from "./sketchGeometry";
 import { hedron } from "./hedron";
@@ -2614,11 +2614,29 @@ export class Viewport {
   // ---- Snap points ----------------------------------------------------------
 
   /**
-   * Snap points in an object's own frame. Round shapes get points that lie on
+   * Snap points in an object's own frame: those of its shape (see shapeSnapPoints),
+   * a sketch's centres (see sketchCentres), and a connected object's pivot, to line
+   * up an axle, a hinge or a pin with.
+   */
+  private snapPointsOf(id: string, node: THREE.Object3D): THREE.Vector3[] {
+    const pts = this.shapeSnapPoints(id, node);
+    const f = this.features.get(id);
+    const extra = f?.kind === "sketch" ? sketchCentres(f) : [];
+    if (f?.joint && node.parent) {
+      // The pivot sits in the parent's frame (it stays put as the object turns or slides about it).
+      const o = f.joint.origin;
+      extra.push(new THREE.Vector3(o.x, o.y, o.z).applyMatrix4(node.parent.matrixWorld).applyMatrix4(node.matrixWorld.clone().invert()));
+    }
+    for (const p of extra) if (!pts.some((q) => q.distanceToSquared(p) < 1e-6)) pts.push(p);
+    return pts;
+  }
+
+  /**
+   * Snap points of an object's shape. Round shapes get points that lie on
    * them (centres, and the four sides of each circle); everything else gets the
    * corners, edge middles, face centres and centre of its box.
    */
-  private snapPointsOf(id: string, node: THREE.Object3D): THREE.Vector3[] {
+  private shapeSnapPoints(id: string, node: THREE.Object3D): THREE.Vector3[] {
     // Split pieces use their (cut) box; the shape-specific points may be gone.
     const own = this.features.get(id);
     const f = own?.clips?.length || (own && isTilted(own)) ? undefined : own;
@@ -3305,6 +3323,28 @@ function ghostify(mesh: THREE.Mesh): THREE.Mesh {
   mesh.material = ghostMaterial();
   delete mesh.userData.id;
   return mesh;
+}
+
+/**
+ * Where a sketch's round shapes are centred (circles, also those merged into another shape,
+ * ellipses, regular polygons, each end of a slot) and its points, in its own frame: on its plane
+ * and at the far end of its extrusion.
+ */
+function sketchCentres(f: Extract<Feature, { kind: "sketch" }>): THREE.Vector3[] {
+  const p = f.params;
+  const uv: [number, number][] = [];
+  const collect = (e: SketchEntity) => {
+    if (e.type === "circle" || e.type === "ellipse" || e.type === "ngon" || e.type === "point") uv.push([e.x, e.y]);
+    if (e.type === "slot") uv.push([e.x1, e.y1], [e.x2, e.y2]);
+    for (const t of e.trims ?? []) if (t.op === "merge" || t.op === "hull") t.shapes.forEach(collect);
+  };
+  p.entities.forEach(collect);
+  // How far it reaches from its plane, along the plane's normal.
+  const d = p.operation === "extrude" ? Math.abs(p.depth) : 0;
+  const down = (p.direction === "reversed") !== p.depth < 0;
+  const levels = p.direction === "both" ? [-d, 0, d] : d ? [0, down ? -d : d] : [0];
+  const frame = planeMatrix({ plane: p.plane, offset: 0 });
+  return uv.flatMap(([u, v]) => levels.map((w) => new THREE.Vector3(u, v, (p.offset ?? 0) + w).applyMatrix4(frame)));
 }
 
 /** Is this object drawn, i.e. neither it nor anything it sits in is hidden? */

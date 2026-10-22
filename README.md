@@ -89,7 +89,7 @@
   evenly, and a 3D ruler shows the size along each axis as you drag. **One side** resizes only the end whose handle you drag, keeping the opposite
   face where it is. Spheres stretch into ellipsoids and cylinders into ovals.
   A sketch's gizmo sits on its shapes, wherever its origin is: it moves, turns and resizes about them.
-- **Points**: while moving, every object shows snap points (corners, edge middles, face centres).
+- **Points**: while moving, every object shows snap points (corners, edge middles, face centres; a sketch's circle, slot and polygon centres and its points; a hinge or slider's pivot).
   Drag an object near another's point and it snaps there, so faces and edges line up exactly.
   The Points menu can hide the dots (snapping still works) or turn point snapping off.
 - **View cube** in the corner of the 3D view turns with the camera; click a face, edge or corner to look from that side.
