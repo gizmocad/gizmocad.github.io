@@ -921,15 +921,26 @@ function toggleGhost(id: string, more: string[] = []) {
 }
 
 function toggleHidden(id: string, more: string[] = []) {
-  const hide = !findFeature(id)?.hidden;
+  const f = findFeature(id);
+  if (!f) return;
+  // Hidden because what it sits in is: showing it shows that too (hiding something hides what's inside it).
+  const hide = !hiddenInView(f);
+  const by = hiddenBy(f);
   commit((features) => {
     for (const x of [id, ...more]) {
-      const f = features.find((y) => y.id === x);
-      if (!f) continue;
-      if (hide) f.hidden = true;
-      else delete f.hidden;
+      for (let t = features.find((y) => y.id === x); t; t = hide ? undefined : features.find((y) => y.id === t!.parentId)) {
+        if (hide) t.hidden = true;
+        else delete t.hidden;
+      }
     }
   });
+  if (!hide && by) setNotice(`Showed ${by.name} too: ${f.name} is inside it, and hiding something hides what's inside it.`);
+}
+
+/** The nearest object this one sits inside that's hidden (and so hides it too), if any. */
+function hiddenBy(f: Feature): Feature | undefined {
+  for (let p = findFeature(f.parentId); p; p = findFeature(p.parentId)) if (p.hidden) return p;
+  return undefined;
 }
 
 /** Is the object, or anything it sits inside, hidden? */
@@ -1062,10 +1073,13 @@ function objectRow(f: Feature, depth: number, inside: Set<string>) {
   };
   ghost.ondblclick = (e) => e.stopPropagation();
   const eye = li.querySelector<HTMLButtonElement>(".eye:not(.ghost-btn)")!;
-  eye.innerHTML = f.hidden ? EYE_SHUT : EYE_OPEN;
-  eye.title = f.hidden ? "Show (H)" : "Hide (H)";
-  eye.setAttribute("aria-label", `${f.hidden ? "Show" : "Hide"} ${f.name}`);
-  eye.classList.toggle("off", !!f.hidden);
+  // Hidden along with what it sits in: shown as hidden, and showing it shows that too.
+  const by = f.hidden ? undefined : hiddenBy(f);
+  const unseen = !!f.hidden || !!by;
+  eye.innerHTML = unseen ? EYE_SHUT : EYE_OPEN;
+  eye.title = by ? `Hidden because ${by.name} (which it's inside) is hidden: click to show both` : unseen ? "Show (H)" : "Hide (H)";
+  eye.setAttribute("aria-label", `${unseen ? "Show" : "Hide"} ${f.name}`);
+  eye.classList.toggle("off", unseen);
   eye.onclick = (e) => {
     e.stopPropagation();
     toggleHidden(f.id);
