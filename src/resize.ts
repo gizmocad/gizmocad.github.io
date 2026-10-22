@@ -280,20 +280,21 @@ function actualFactor(before: Feature, after: Feature, axis: "x" | "y" | "z", s:
  * Apply a resize from the gizmo. Groups resize evenly with everything inside
  * them; other objects resize along their own axes, and their children keep
  * their relative places (but not their sizes). With an anchor, the object also
- * moves so only the dragged side changes.
+ * moves so only the dragged side changes (with one on each axis, a middle stays put).
  */
-export function resizeFeature(features: Feature[], id: string, s: Vec3, snap: number, anchor?: ResizeAnchor) {
+export function resizeFeature(features: Feature[], id: string, s: Vec3, snap: number, anchor?: ResizeAnchor | ResizeAnchor[]) {
   const f = features.find((x) => x.id === id);
   if (!f) return;
-  const before = anchor ? structuredClone(f) : null;
+  const anchors = anchor ? [anchor].flat() : [];
+  const before = anchors.length ? structuredClone(f) : null;
   resizeOwnTree(features, f, s, snap);
-  if (anchor && before) {
+  for (const a of anchors) {
     // The anchor face sat at `at`; after scaling about the origin it sits at at·k, so move back by the difference.
-    const shift = anchor.at * (1 - actualFactor(before, f, anchor.axis, s));
+    const shift = a.at * (1 - actualFactor(before!, f, a.axis, s));
     f.position = {
-      x: round(f.position.x + anchor.dir.x * shift),
-      y: round(f.position.y + anchor.dir.y * shift),
-      z: round(f.position.z + anchor.dir.z * shift),
+      x: round(f.position.x + a.dir.x * shift),
+      y: round(f.position.y + a.dir.y * shift),
+      z: round(f.position.z + a.dir.z * shift),
     };
   }
 }

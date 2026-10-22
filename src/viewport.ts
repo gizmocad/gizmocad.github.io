@@ -10,7 +10,7 @@ import type { MeshData } from "./kernel";
 import { scenePalette } from "./theme";
 import { PLANE_ROTATIONS, baseMatrix, clampJoint, colourOf, jointMatrix, localMatrix, sweepOf, worldMatrix, type Feature, type Joint, type SketchParams, type Vec3 } from "./model";
 import { featureExtents, isTilted, rulerLength, staysRound, type ResizeAnchor } from "./resize";
-import { isClosed, outline, prismPoints, sketchRegion } from "./sketchGeometry";
+import { bounds, isClosed, outline, prismPoints, sketchRegion } from "./sketchGeometry";
 import { hedron } from "./hedron";
 import { SculptMesh, creasedGeometry, isCadMesh, sculptGeometry, type BrushSettings } from "./sculpt";
 import { ViewCube } from "./viewCube";
@@ -42,7 +42,7 @@ export interface ViewportEvents {
   /** While resizing with the gizmo: scale factors along the object's own axes. */
   onResizing(id: string, scale: Vec3): void;
   /** A resize drag finished (`exact`: a size typed on the ruler, not snapped to the grid). */
-  onResized(id: string, scale: Vec3, anchor?: ResizeAnchor, exact?: boolean): void;
+  onResized(id: string, scale: Vec3, anchor?: ResizeAnchor | ResizeAnchor[], exact?: boolean): void;
   /** While turning/sliding a connected object by its joint: the joint's value (degrees or mm). */
   onJointMoving(id: string, value: number): void;
   /** A joint drag finished. */
@@ -219,8 +219,8 @@ export class Viewport {
   private localAxes = false;
   /** Resize: only the side whose handle is dragged moves; the opposite face stays put. */
   oneSide = false;
-  /** Set when a one-sided resize drag starts: the fixed face, and where the object started. */
-  private resizeAnchor: { axis: "x" | "y" | "z"; at: number; start: THREE.Vector3 } | null = null;
+  /** Set when a one-sided resize drag starts: the fixed face (from the gizmo, and in the object's own frame), and where the gizmo started. */
+  private resizeAnchor: { axis: "x" | "y" | "z"; at: number; own: number; start: THREE.Vector3 } | null = null;
   private shiftHeld = false;
   /** Dimension lines shown on the selected object while resizing, and their labels. */
   private ruler = new THREE.Group();
@@ -262,6 +262,9 @@ export class Viewport {
   /** Stand-in for a connection's pivot in Pivot mode: moving it moves the connection, not the object. */
   private pivotProxy = new THREE.Object3D();
   private pivotFor: string | null = null;
+  /** Stand-in the gizmo moves for a sketch: it sits on the sketch's shapes (its origin can be well away from them), and the sketch follows it. */
+  private moveProxy = new THREE.Object3D();
+  private moveFor: { id: string; node: THREE.Object3D; centre: THREE.Vector3; start: { proxy: THREE.Matrix4; node: THREE.Matrix4 } | null } | null = null;
   private jointDrag: { id: string; node: THREE.Object3D; joint: Joint; base: THREE.Matrix4; align: THREE.Quaternion; value: number } | null = null;
   /** The matched pair while snapping: a ring on the target and a guide line. */
   private snapHint = new THREE.Group();
@@ -341,11 +344,13 @@ export class Viewport {
           local.x *= flip; // Its own X points the other way when mirrored.
           obj.position.copy(anchor.start).add(local.applyQuaternion(obj.quaternion));
         }
-        this.events.onResizing(obj.userData.id, { x: obj.scale.x, y: obj.scale.y, z: obj.scale.z });
+        this.events.onResizing(this.heldNode(obj).userData.id, { x: obj.scale.x, y: obj.scale.y, z: obj.scale.z });
         obj.scale.x *= flip;
       }
+      if (obj && obj === this.moveProxy) this.followProxy();
     });
     this.gizmo.addEventListener("mouseDown", () => {
+      this.startProxyDrag();
       this.startResizeAnchor();
       this.startPointDrag();
       this.startGroupDrag();
@@ -504,7 +509,8 @@ export class Viewport {
   setLocalAxes(on: boolean) {
     this.localAxes = on;
     // Only the object gizmo follows this; connection and cut handles set their own space.
-    if (this.gizmo.object && this.gizmo.object === this.nodes.get(this.selectedId ?? "")) this.gizmo.space = on ? "local" : "world";
+    const obj = this.gizmo.object;
+    if (obj && (obj === this.moveProxy || obj === this.nodes.get(this.selectedId ?? ""))) this.gizmo.space = on ? "local" : "world";
   }
 
   get snapSize() {
@@ -1082,10 +1088,12 @@ export class Viewport {
     disposeTree(this.pivotProxy);
     this.pivotProxy.clear();
     this.pivotFor = null;
+    this.moveProxy.removeFromParent();
+    this.moveFor = null;
     if (target && this.cutHandle?.id === f?.id) this.attachCutGizmo(target);
     else if (target && f?.joint && this.userMode === "joint") this.attachJointGizmo(f, f.joint, target);
     else if (target && f?.joint && this.userMode === "pivot") this.attachPivotGizmo(f, f.joint, target);
-    else if (target) this.gizmo.attach(target);
+    else if (target) this.attachObjectGizmo(target, f);
     else this.gizmo.detach();
     this.drawRuler();
     this.drawSnapDots();
@@ -1503,6 +1511,58 @@ export class Viewport {
   }
 
 
+  // ---- A sketch's gizmo, on its shapes -----------------------------------------
+
+  /** The gizmo on an object: a sketch's sits on its shapes (its origin can be anywhere), others' on their origin. */
+  private attachObjectGizmo(node: THREE.Object3D, f: Feature | undefined) {
+    const centre = f?.kind === "sketch" ? sketchCentre(f) : null;
+    if (!f || !centre || centre.lengthSq() < 1e-12 || !node.parent) return void this.gizmo.attach(node);
+    node.updateMatrix();
+    const p = this.moveProxy;
+    p.position.copy(centre).applyMatrix4(node.matrix);
+    p.quaternion.copy(node.quaternion);
+    p.scale.set(1, 1, 1);
+    node.parent.add(p);
+    p.updateMatrixWorld(true);
+    this.moveFor = { id: f.id, node, centre, start: null };
+    this.gizmo.attach(p);
+  }
+
+  /** What a gizmo drag moves: the sketch for its stand-in, else the dragged node itself. */
+  private heldNode(obj: THREE.Object3D): THREE.Object3D {
+    return obj === this.moveProxy && this.moveFor ? this.moveFor.node : obj;
+  }
+
+  private startProxyDrag() {
+    const m = this.moveFor;
+    if (!m || this.gizmo.object !== this.moveProxy) return;
+    this.moveProxy.updateMatrix();
+    m.node.updateMatrix();
+    m.start = { proxy: this.moveProxy.matrix.clone(), node: m.node.matrix.clone() };
+  }
+
+  /** The sketch follows its stand-in: moved, turned or resized about the middle of its shapes. */
+  private followProxy() {
+    const m = this.moveFor;
+    if (!m?.start) return;
+    this.moveProxy.updateMatrix();
+    this.moveProxy.matrix.clone().multiply(m.start.proxy.clone().invert()).multiply(m.start.node).decompose(m.node.position, m.node.quaternion, m.node.scale);
+  }
+
+  /** Resizing a sketch keeps the middle of its shapes still (and in One side mode, the side held). */
+  private sketchAnchors(s: Vec3, held?: { axis: "x" | "y" | "z"; at: number }): ResizeAnchor[] {
+    const m = this.moveFor!;
+    const flip = this.features.get(m.id)?.mirrored ? -1 : 1;
+    return (["x", "y", "z"] as const)
+      .filter((axis) => Math.abs(s[axis] - 1) > 1e-4)
+      .map((axis) => {
+        const dir = new THREE.Vector3();
+        dir[axis] = axis === "x" ? flip : 1;
+        dir.applyQuaternion(m.node.quaternion);
+        return { axis, at: held?.axis === axis ? held.at : m.centre[axis], dir: { x: dir.x, y: dir.y, z: dir.z } };
+      });
+  }
+
   // ---- Moving several objects -------------------------------------------------
 
   /** The other selected objects that move with the gizmo (not ones inside another selected object). */
@@ -1523,7 +1583,7 @@ export class Viewport {
   private startGroupDrag() {
     this.groupDrag = null;
     const obj = this.gizmo.object;
-    if (!obj || obj.userData.id !== this.selectedId || this.gizmo.mode === "scale") return;
+    if (!obj || this.heldNode(obj).userData.id !== this.selectedId || this.gizmo.mode === "scale") return;
     const others = this.groupFollowers();
     if (!others.length) return;
     this.root.updateMatrixWorld(true);
@@ -2643,14 +2703,21 @@ export class Viewport {
     if (obj === this.pivotProxy) return this.startPivotDrag();
     if (!obj || obj === this.jointProxy || obj === this.cutProxy || !this.showsSnapPoints()) return;
     this.root.updateMatrixWorld(true);
-    const moving = this.movingIds(obj);
+    const held = this.heldNode(obj);
+    const moving = this.movingIds(held);
     for (const n of this.groupFollowers()) this.movingIds(n).forEach((x) => moving.add(x));
     const targets: THREE.Vector3[] = [];
     for (const [id, node] of this.nodes) {
       if (moving.has(id) || this.features.get(id)?.kind === "group" || !this.solidTarget(node)) continue;
       for (const p of this.snapPointsOf(id, node)) targets.push(p.applyMatrix4(node.matrixWorld));
     }
-    this.pointDrag = { local: this.snapPointsOf(obj.userData.id, obj), targets, snapped: false };
+    let local = this.snapPointsOf(held.userData.id, held);
+    if (held !== obj) {
+      // A sketch's points, seen from its gizmo's stand-in.
+      const toObj = obj.matrixWorld.clone().invert().multiply(held.matrixWorld);
+      local = local.map((p) => p.applyMatrix4(toObj));
+    }
+    this.pointDrag = { local, targets, snapped: false };
   }
 
   /**
@@ -2853,7 +2920,7 @@ export class Viewport {
       dir.applyQuaternion(obj.quaternion);
       anchor = { axis, at: box.min[axis], dir: { x: dir.x, y: dir.y, z: dir.z } };
     }
-    this.events.onResized(id!, s, anchor, true);
+    this.events.onResized(id!, s, this.moveFor?.id === id ? this.sketchAnchors(s, anchor) : anchor, true);
   }
 
   /** In One side mode, work out which face stays fixed for the handle just grabbed. */
@@ -2862,23 +2929,27 @@ export class Viewport {
     const obj = this.gizmo.object;
     const handle = this.gizmo.axis;
     if (!obj || this.gizmo.mode !== "scale" || (handle !== "X" && handle !== "Y" && handle !== "Z")) return;
-    const f = this.features.get(obj.userData.id);
+    const node = this.heldNode(obj);
+    const f = this.features.get(node.userData.id);
     // An imported object's origin needn't be at the bottom of its shape: its bottom stays put, as other shapes' does.
     const imported = f?.kind === "imported" || (f?.kind === "sculpt" && f.params.base === "imported");
     if (!this.oneSide && !(imported && handle === "Z")) return;
-    const box = this.localBox(obj.userData.id, obj);
+    const box = this.localBox(node.userData.id, node);
     if (!box) return;
     const axis = handle.toLowerCase() as "x" | "y" | "z";
+    const flip = f?.mirrored ? -1 : 1;
+    // A sketch's gizmo sits on its shapes, on unflipped axes: where the fixed side is from there.
+    const fromGizmo = (at: number) => (obj === this.moveProxy ? (at - this.moveFor!.centre[axis]) * (axis === "x" ? flip : 1) : at);
     if (!this.oneSide) {
-      this.resizeAnchor = { axis, at: box.min[axis], start: obj.position.clone() };
+      this.resizeAnchor = { axis, at: fromGizmo(box.min[axis]), own: box.min[axis], start: obj.position.clone() };
       return;
     }
     // Each axis has a handle on both ends; the grab point says which end this is.
     // pointStart (grab point relative to the object, world axes) is set by the gizmo but not in its types.
     const grab = (this.gizmo as unknown as { pointStart: THREE.Vector3 }).pointStart.clone().applyQuaternion(obj.getWorldQuaternion(new THREE.Quaternion()).invert());
-    if (this.features.get(obj.userData.id)?.mirrored) grab.x = -grab.x; // Into its own (flipped) frame.
+    if (flip < 0) grab.x = -grab.x; // Into its own (flipped) frame.
     const at = grab[axis] >= 0 ? box.min[axis] : box.max[axis];
-    this.resizeAnchor = { axis, at, start: obj.position.clone() };
+    this.resizeAnchor = { axis, at: fromGizmo(at), own: at, start: obj.position.clone() };
   }
 
   private commitDrag() {
@@ -2905,6 +2976,12 @@ export class Viewport {
       this.resizeAnchor = null;
       obj.scale.set(flip, 1, 1);
       if (anchor) obj.position.copy(anchor.start);
+      const m = obj === this.moveProxy ? this.moveFor : null;
+      if (m) {
+        m.start?.node.decompose(m.node.position, m.node.quaternion, m.node.scale);
+        if (Math.abs(s.x - 1) > 1e-4 || Math.abs(s.y - 1) > 1e-4 || Math.abs(s.z - 1) > 1e-4) this.events.onResized(m.id, s, this.sketchAnchors(s, anchor ? { axis: anchor.axis, at: anchor.own } : undefined));
+        return;
+      }
       if (Math.abs(s.x - 1) > 1e-4 || Math.abs(s.y - 1) > 1e-4 || Math.abs(s.z - 1) > 1e-4) {
         const dir = new THREE.Vector3();
         dir[anchor?.axis ?? "x"] = anchor?.axis === "x" ? flip : 1;
@@ -2915,12 +2992,14 @@ export class Viewport {
     }
     // A point snap lands exactly on another object, which needn't be on the grid. On its own
     // axes the gizmo already snapped the move along them; rounding to the world grid would undo that.
-    const grid = this.snap > 0 && !this.pointDrag?.snapped && this.gizmo.space !== "local" ? this.snap : 0;
+    // A sketch's gizmo is on its shapes, put on the grid by the gizmo; its origin follows wherever.
+    const held = this.heldNode(obj);
+    const grid = this.snap > 0 && !this.pointDrag?.snapped && this.gizmo.space !== "local" && held === obj ? this.snap : 0;
     const round = (v: number) => (grid > 0 ? Math.round(v / grid) * grid : Math.round(v * 1e4) / 1e4) + 0;
     const deg = (r: number) => Math.round(THREE.MathUtils.radToDeg(r) * 1e4) / 1e4 + 0;
-    const p = obj.position;
-    const r = obj.rotation;
-    this.events.onTransformed(obj.userData.id, { x: round(p.x), y: round(p.y), z: round(p.z) }, { x: deg(r.x), y: deg(r.y), z: deg(r.z) });
+    const p = held.position;
+    const r = held.rotation;
+    this.events.onTransformed(held.userData.id, { x: round(p.x), y: round(p.y), z: round(p.z) }, { x: deg(r.x), y: deg(r.y), z: deg(r.z) });
   }
 
   private ndc(e: MouseEvent) {
@@ -3130,6 +3209,23 @@ function buildPlane(id: string, size: number) {
  * A sketch that hasn't been extruded yet: its outlines as lines, plus a faint
  * fill of its closed shapes so it can be clicked and moved like other objects.
  */
+/** The middle of a sketch's added shapes (or its cut-outs, or guides, if that's all it has), in the sketch object's own frame. */
+function sketchCentre(f: Extract<Feature, { kind: "sketch" }>): THREE.Vector3 | null {
+  const all = f.params.entities;
+  const shapes = [all.filter((e) => e.mode === "add"), all.filter((e) => e.mode === "subtract"), all].find((list) => list.length) ?? [];
+  const lo = [Infinity, Infinity];
+  const hi = [-Infinity, -Infinity];
+  for (const e of shapes) {
+    const [a, b] = bounds(e);
+    for (const i of [0, 1]) {
+      lo[i] = Math.min(lo[i], a[i]);
+      hi[i] = Math.max(hi[i], b[i]);
+    }
+  }
+  if (!(lo[0] <= hi[0] && lo[1] <= hi[1])) return null;
+  return new THREE.Vector3((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, 0).applyMatrix4(planeMatrix(f.params));
+}
+
 function buildFlatSketch(f: Extract<Feature, { kind: "sketch" }>): THREE.Object3D[] {
   const frame = planeMatrix(f.params);
   const out: THREE.Object3D[] = [];
