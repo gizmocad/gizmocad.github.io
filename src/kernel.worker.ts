@@ -44,7 +44,7 @@ import { entityPath, gearPath, isProfile, outline, prismPoints, starPoints, stro
 import type { BuildStep, Clash, ImportedSolid, ImportSource, KernelRequest, KernelResponse, MeshData, ModelStats, SketchLoop } from "./kernel";
 import { hedron } from "./hedron";
 import { CUSTOM_FONT, builtInFontUrl, fontFamily, isCustomFont } from "./fonts";
-import { Matrix3, Matrix4, Vector3 } from "three";
+import { Box3, Matrix3, Matrix4, Vector3 } from "three";
 import { applyTexture } from "./texture";
 import { BufferAttribute, BufferGeometry, EdgesGeometry, Triangle } from "three";
 import { toCreasedNormals } from "three/addons/utils/BufferGeometryUtils.js";
@@ -892,16 +892,39 @@ const hasAfterHoles = (f: Feature) => (f.kind !== "group" || isMergedGroup(f)) &
 /** The model being worked on (for an object's after-holes finishes, which need the holes that reach it). */
 let modelFeatures: Feature[] = [];
 
-/** A shape in an object's frame with the holes that reach it cut away. */
+/**
+ * The holes cut into an object before its after-holes finishes. When those finishes are all on picked
+ * edges, just the holes near one: a hole elsewhere can't make those edges, and cutting it exactly first
+ * can take many seconds on a big part (it's cut afterwards with the rest, as triangles, far quicker).
+ */
+function holesCutFirst(features: Feature[], f: Feature): Feature[] {
+  const ops = f.edgeOps.filter((o) => o.afterHoles && o.size > 0);
+  const near = ops.length && ops.every((o) => o.target === "picked") ? ops.flatMap((o) => o.points.map((p) => ({ p, r: o.size + 1 }))) : null;
+  const back = worldMatrix(features, f.id).invert();
+  return cuttingHoles(features, f).filter((h) => {
+    // A hole made of triangles (a swept cut, a groove, a mesh) would take many seconds to cut exactly, and
+    // its faceted edges don't round well: it's left to cut afterwards, as holes usually do.
+    const sub = subtreeIds(features, h.id);
+    if (hasFaceted(features.filter((x) => sub.has(x.id)))) return false;
+    if (!near) return true;
+    const hs = branch(features, h);
+    if (!hs) return false;
+    // Its box, in the object's frame.
+    const [a, b] = hs.boundingBox.bounds;
+    hs.delete();
+    const to = back.clone().multiply(worldMatrix(features, h.id));
+    const box = new Box3();
+    for (const c of [0, 1, 2, 3, 4, 5, 6, 7]) box.expandByPoint(new Vector3(c & 1 ? b[0] : a[0], c & 2 ? b[1] : a[1], c & 4 ? b[2] : a[2]).applyMatrix4(to));
+    return near.some(({ p, r }) => box.clone().expandByScalar(r).containsPoint(new Vector3(...p)));
+  });
+}
+
+/** A shape in an object's frame with the holes that reach it (near its after-holes finishes) cut away. */
 function cutByReachingHoles(f: Feature, shape: Shape3D): Shape3D {
   const features = modelFeatures;
   if (!features.some((x) => x.id === f.id)) return shape;
   const [lo, hi] = shape.boundingBox.bounds;
-  for (const h of cuttingHoles(features, f)) {
-    // A hole made of triangles (a swept cut, a groove, a mesh) would take many seconds to cut exactly, and
-    // its faceted edges don't round well: it's left to cut afterwards, as holes usually do.
-    const sub = subtreeIds(features, h.id);
-    if (hasFaceted(features.filter((x) => sub.has(x.id)))) continue;
+  for (const h of holesCutFirst(features, f)) {
     const hs = branch(features, h);
     if (!hs) continue;
     const local = fromWorld(features, f, placeInWorld(features, h, hs));
@@ -925,7 +948,7 @@ function afterHolesKey(f: Feature) {
   if (!hasAfterHoles(f)) return null;
   const features = modelFeatures;
   const back = worldMatrix(features, f.id).invert();
-  return cuttingHoles(features, f).map((h) => [geometryKey(features, h.id), back.clone().multiply(worldMatrix(features, h.id)).elements.map(r6)]);
+  return holesCutFirst(features, f).map((h) => [geometryKey(features, h.id), back.clone().multiply(worldMatrix(features, h.id)).elements.map(r6)]);
 }
 
 /**
@@ -3157,12 +3180,15 @@ let cutFailures: Record<string, string> = {};
  */
 function cutMesh(features: Feature[], f: Feature): MeshData | null {
   if (f.kind === "plane" || f.kind === "sculpt" || (f.kind === "group" && !isMergedGroup(f))) return null;
-  const holes = cuttingHoles(features, f);
-  // Its own shape already has its holes in it (cut before its edge finishes).
-  if (!holes.length || hasAfterHoles(f)) return null;
+  // Its own shape already has the holes its after-holes finishes needed cut into it: the rest are cut here.
+  const first = hasAfterHoles(f) ? new Set(holesCutFirst(features, f).map((h) => h.id)) : null;
+  const holes = cuttingHoles(features, f).filter((h) => !first?.has(h.id));
+  if (!holes.length) return null;
   const world = worldMatrix(features, f.id);
+  const before = afterHolesKey(f);
   const key = JSON.stringify([
     f.kind === "group" ? geometryKey(features, f.id) : [f.kind, keyParams(f), f.edgeOps, f.clips ?? [], f.shell ?? null, f.tilt ?? null, f.mirrored ?? false],
+    before,
     world.elements.map(r6),
     holes.map((h) => [geometryKey(features, h.id), worldMatrix(features, h.id).elements.map(r6)]),
     isTextured(f) ? f.texture : null,
@@ -3185,7 +3211,7 @@ function cutMesh(features: Feature[], f: Feature): MeshData | null {
         else if (f.kind === "imported" && plainFaceted(f)) own = facetOwn(f);
         else {
           // Its own triangles and edges don't change as holes come and go: kept (reading and meshing a big part takes a while).
-          const ownKey = JSON.stringify([f.kind, keyParams(f), f.edgeOps, f.clips ?? [], f.shell ?? null, f.tilt ?? null]);
+          const ownKey = JSON.stringify([f.kind, keyParams(f), f.edgeOps, f.clips ?? [], f.shell ?? null, f.tilt ?? null, before]);
           let mine = ownCutCache.get(ownKey);
           if (!mine) {
             const shape = buildOwn(f)!;
