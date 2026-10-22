@@ -864,14 +864,18 @@ export function trimAt(entities: SketchEntity[], p: P, tolerance: number, ids: (
 
 /**
  * The clicked edge of `hit` lies outside every other shape: cut away the part of `hit` it bounds.
- * If `hit` overlaps other shapes, keep only the overlap (trimming off the overhang); otherwise, if guide lines
- * cross it, cut it along the nearest one and drop the side that was clicked.
+ * If `hit` overlaps other shapes, the piece sticking out that was clicked goes: cut off exactly along
+ * the straight edge it sticks out past (a circle gets a flat there), or, where several edges bound it,
+ * by keeping only the overlap. Otherwise, if guide lines cross it, it's cut along the nearest one,
+ * dropping the side that was clicked.
  */
 function trimOutside(hit: SketchEntity, others: SketchEntity[], p: P, ids: () => string): TrimResult | null {
   try {
     const overlapping = others.filter((o) => isArea(o) && intersects(hit, o));
     if (overlapping.length) {
       const inside = clipping.union([ring(overlapping[0])], ...overlapping.slice(1).map((o) => [ring(o)]));
+      const edge = edgeSteppedPast(hit, inside, p);
+      if (edge) return cutAlong(hit, edge[0], edge[1], p, ids, "Cut off the part sticking out, along the edge it crossed.");
       const left = clipping.intersection([ring(hit)], inside);
       if (!left.length) return null;
       const kept = trimmed(hit, "keep", overlapping, left);
@@ -888,24 +892,56 @@ function trimOutside(hit: SketchEntity, others: SketchEntity[], p: P, ids: () =>
       if (crossings >= 2 && (!best || d < best.d)) best = { a, b, d };
     }
     if (!best) return null;
-    // A huge box on the clicked side of the (extended) line.
-    const { a, b } = best;
-    const dir = sub(b, a);
-    const len = Math.hypot(dir[0], dir[1]);
-    const u: P = [dir[0] / len, dir[1] / len];
-    let n: P = [-u[1], u[0]];
-    if ((p[0] - a[0]) * n[0] + (p[1] - a[1]) * n[1] < 0) n = [-n[0], -n[1]];
-    const big = 1e4;
-    const at = (s: number, t: number): P => [a[0] + u[0] * s + n[0] * t, a[1] + u[1] * s + n[1] * t];
-    const side = [at(-big, 0), at(big, 0), at(big, big), at(-big, big)];
-    const left = clipping.difference([pts], [side]);
-    if (!left.length) return null;
-    const box: SketchEntity = { id: "", mode: "add", type: "polygon", points: side.map(([x, y]) => [round(x), round(y)] as P), bends: [0, 0, 0, 0] };
-    const kept = trimmed(hit, "cut", [box], left);
-    return { remove: [hit.id], add: kept ? [kept] : toEntities(left, hit.mode, ids), message: "Cut the shape along the guide line, removing the side you clicked." };
+    return cutAlong(hit, best.a, best.b, p, ids, "Cut the shape along the guide line, removing the side you clicked.");
   } catch {
     return null;
   }
+}
+
+/**
+ * The piece of `hit` sticking out of `inside` nearest `p`: if what bounds it
+ * (other than `hit`'s own outline) is one straight edge, that edge's ends.
+ */
+function edgeSteppedPast(hit: SketchEntity, inside: MultiPolygon, p: P): [P, P] | null {
+  const pieces = clipping.difference([ring(hit)], inside);
+  let piece: P[] | null = null;
+  let bestD = Infinity;
+  for (const poly of pieces) {
+    const r = (poly[0] as P[]).slice();
+    if (r.length > 1 && dist(r[0], r[r.length - 1]) < 1e-12) r.pop();
+    const d = pointInPolygon(p, r) ? 0 : distToPolyline(p, [...r, r[0]]);
+    if (d < bestD) [piece, bestD] = [r, d];
+  }
+  if (!piece || piece.length < 3) return null;
+  const own = ring(hit);
+  const ownLoop = [...own, own[0]];
+  const [[x0, y0], [x1, y1]] = bounds(hit);
+  const tol = 1e-7 * Math.max(1, x1 - x0, y1 - y0);
+  // Its edges that aren't along hit's own outline: where the other shapes bound it.
+  const foreign = piece.map((a, i) => [a, piece![(i + 1) % piece!.length]] as [P, P]).filter(([a, b]) => distToPolyline(mid(a, b), ownLoop) > tol);
+  if (!foreign.length) return null;
+  const [a, b] = foreign.reduce((x, y) => (dist(y[0], y[1]) > dist(x[0], x[1]) ? y : x));
+  if (dist(a, b) < 1e-9) return null;
+  const offLine = (q: P) => Math.abs((b[0] - a[0]) * (q[1] - a[1]) - (b[1] - a[1]) * (q[0] - a[0])) / dist(a, b);
+  return foreign.every(([u, v]) => offLine(u) <= 1e3 * tol && offLine(v) <= 1e3 * tol) ? [a, b] : null;
+}
+
+/** Cut `hit` along the (endless) line through a and b, dropping the side `p` is on: exact, kept as a trim on the shape. */
+function cutAlong(hit: SketchEntity, a: P, b: P, p: P, ids: () => string, message: string): TrimResult | null {
+  const dir = sub(b, a);
+  const l = Math.hypot(dir[0], dir[1]);
+  const u: P = [dir[0] / l, dir[1] / l];
+  let n: P = [-u[1], u[0]];
+  if ((p[0] - a[0]) * n[0] + (p[1] - a[1]) * n[1] < 0) n = [-n[0], -n[1]];
+  // A huge box on the clicked side of the line.
+  const big = 1e4;
+  const at = (s: number, t: number): P => [a[0] + u[0] * s + n[0] * t, a[1] + u[1] * s + n[1] * t];
+  const side = [at(-big, 0), at(big, 0), at(big, big), at(-big, big)];
+  const left = clipping.difference([ring(hit)], [side]);
+  if (!left.length) return null;
+  const box: SketchEntity = { id: "", mode: "add", type: "polygon", points: side.map(([x, y]) => [round(x), round(y)] as P), bends: [0, 0, 0, 0] };
+  const kept = trimmed(hit, "cut", [box], left);
+  return { remove: [hit.id], add: kept ? [kept] : toEntities(left, hit.mode, ids), message };
 }
 
 /** Merge every group of overlapping shapes (same add/cut kind) among `selected` into one outline each. */
