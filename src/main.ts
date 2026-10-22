@@ -735,6 +735,8 @@ function pickedOp(): EdgeOp | null {
  */
 function featuresForPicking(features: Feature[]): Feature[] {
   const f = features.find((x) => x.id === edgePick?.featureId);
+  // A finish still being set up isn't in the model yet: it's picked as if it were the last one (after the holes, if it goes after them).
+  if (f && edgeDraft?.featureId === f.id && edgeDraft.op.id === edgePick?.opId) f.edgeOps = [...f.edgeOps, structuredClone(edgeDraft.op)];
   const i = f?.edgeOps.findIndex((o) => o.id === edgePick?.opId) ?? -1;
   if (f && i >= 0) f.edgeOps = [...f.edgeOps.slice(0, i), { ...f.edgeOps[i], size: 0 }]; // size 0 = skipped, but keeps a group merged
   return features;
@@ -2665,6 +2667,11 @@ const AXES: { value: Axis; label: string }[] = [
  * The holes that would cut this object: its own, its parents', and the
  * top-level ones (as the kernel works it out), whether or not it ignores them.
  */
+/** The holes that reach an object that aren't already in it (a merged group's own holes are in its shape). */
+function holesFromOutside(f: Feature): Feature[] {
+  return holesReaching(activeFeatures(doc.features), f).filter((h) => f.kind !== "group" || h.parentId !== f.id);
+}
+
 function holesReaching(features: Feature[], f: Feature): Feature[] {
   if (f.mode === "hole") return [];
   const holes = childrenOf(features, f.id).filter((c) => c.mode === "hole");
@@ -3642,7 +3649,7 @@ const TARGETS: { value: EdgeTarget; label: string }[] = [
   { value: "top", label: "Top edges" },
   { value: "bottom", label: "Bottom edges" },
   { value: "vertical", label: "Vertical edges" },
-  { value: "picked", label: "Picked edges" },
+  { value: "picked", label: "Selected edges" },
 ];
 
 /** A checkbox with its label. */
@@ -3730,8 +3737,11 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
   // A finish being set up changes just itself; one that's applied changes the object.
   const changer = (op: EdgeOp) => (mutate: (op: EdgeOp) => void) => {
     if (op === draft) {
+      const after = !!op.afterHoles;
       mutate(op);
       renderProperties();
+      // Its edges being selected: show the shape with or without the holes cut, as it now goes.
+      if (edgePick?.opId === op.id && after !== !!op.afterHoles) void rebuild();
     } else
       update((t) => {
         const o = t.edgeOps.find((x) => x.id === op.id);
@@ -3790,7 +3800,7 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
       );
     }
     box.append(labeled("Edges", target));
-    if (f.kind !== "group" && (op.afterHoles || holesReaching(activeFeatures(doc.features), f).length)) {
+    if (op.afterHoles || holesFromOutside(f).length) {
       const after = checkToggle("After holes", !!op.afterHoles, (on) => setOp((o) => (on ? (o.afterHoles = true) : delete o.afterHoles)));
       after.title = "Cut the holes that reach this object first, so the edges they make can be rounded too";
       box.append(after);
@@ -3821,7 +3831,7 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
         }
       } else if (fromMesh) {
         note.append(
-          "These edges can't be rounded at any size, so this step is skipped. On a solid made from a mesh, curved edges made of many small facets usually can't be: try a smaller size, fewer edges (Picked edges), or import the part as a STEP file.",
+          "These edges can't be rounded at any size, so this step is skipped. On a solid made from a mesh, curved edges made of many small facets usually can't be: try a smaller size, fewer edges (Selected edges), or import the part as a STEP file.",
         );
       } else {
         note.append("These edges can't be rounded at any size, so this step is skipped.");
@@ -3842,10 +3852,10 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
       const row = document.createElement("div");
       row.className = "pick-row";
       const count = document.createElement("span");
-      count.textContent = `${op.points.length} edge${op.points.length === 1 ? "" : "s"} picked`;
-      row.append(count, button(picking ? "✓ Done" : "Pick edges", () => (picking ? stopEdgePick() : startEdgePick(f.id, op.id)), picking ? "primary" : ""));
+      count.textContent = `${op.points.length} edge${op.points.length === 1 ? "" : "s"} selected`;
+      row.append(count, button(picking ? "✓ Done" : "Select edges", () => (picking ? stopEdgePick() : startEdgePick(f.id, op.id)), picking ? "primary" : ""));
       box.append(row);
-      if (picking) box.append(hint("Click edges in the view to add or remove them. Orange = picked."));
+      if (picking) box.append(hint("Click edges in the view to add or remove them. Orange = selected."));
     }
     if (op === draft) {
       // Nothing is worked out until it's applied: set it up first.
@@ -3862,7 +3872,7 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
       const row = document.createElement("div");
       row.className = "actions";
       row.append(apply, cancel);
-      box.append(row, hint(none ? "Pick the edges to finish, then Apply." : "Set it up, then Apply: it's worked out once you apply it."));
+      box.append(row, hint(none ? "Select the edges to finish, then Apply." : "Set it up, then Apply: it's worked out once you apply it."));
     }
     items.push(box);
   });
@@ -3873,9 +3883,8 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
   // (Only holes that touch it: rounding after holes cuts them first, which a far-off hole would only slow down.)
   const mine = viewport.modelBounds(new Set([f.id]));
   const afterHoles =
-    f.kind !== "group" &&
     f.mode === "solid" &&
-    holesReaching(activeFeatures(doc.features), f).some((h) => {
+    holesFromOutside(f).some((h) => {
       const box = viewport.modelBounds(new Set([h.id]));
       return !mine || !box || box.intersectsBox(mine);
     });
@@ -3886,7 +3895,7 @@ function edgeSection(f: Feature, update: (mutate: (f: Feature) => void) => void)
   add.className = "actions edge-add";
   add.append(button("+ Fillet", () => newOp("fillet")), button("+ Chamfer", () => newOp("chamfer")), button("+ Bevel", () => newOp("bevel")));
   if (!draft) items.push(add);
-  if (f.kind === "group") items.push(hint("Rounding a group merges its shapes first, so you can round edges where they meet, or the rim of a hole."));
+  if (f.kind === "group") items.push(hint("Rounding a group merges its shapes first, so you can round edges where they meet, or the rim of a hole (one from outside the group too, with After holes)."));
   return items;
 }
 

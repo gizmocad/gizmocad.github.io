@@ -884,8 +884,8 @@ function buildOwn(f: Feature, swept = true): Shape3D | null {
   return shape && f.clips?.length ? applyClips(shape, f.clips) : shape;
 }
 
-/** Edge finishes set to go after the holes (a group's always apply to its merged result instead). */
-const hasAfterHoles = (f: Feature) => f.kind !== "group" && f.mode === "solid" && f.edgeOps.some((o) => o.afterHoles);
+/** Edge finishes set to go after the holes (a merged group's go on its merged result, after the holes from outside it). */
+const hasAfterHoles = (f: Feature) => (f.kind !== "group" || isMergedGroup(f)) && f.mode === "solid" && f.edgeOps.some((o) => o.afterHoles);
 
 /** The model being worked on (for an object's after-holes finishes, which need the holes that reach it). */
 let modelFeatures: Feature[] = [];
@@ -2916,7 +2916,7 @@ function branchIgnoring(features: Feature[], self: Feature | null, inherited: Cu
  * the way. Callers get copies: placing a shape uses it up.
  */
 const branchCache = new Map<string, { shape: Shape3D | null; failures: Record<string, string>; adjusted: Record<string, number>; tris?: WorldMesh | null }>();
-const branchKey = (features: Feature[], self: Feature) => JSON.stringify([geometryKey(features, self.id), excludeTextured, unswept]);
+const branchKey = (features: Feature[], self: Feature) => JSON.stringify([geometryKey(features, self.id), excludeTextured, unswept, afterHolesKey(self)]);
 
 /** While set, hole groups are built without their sweep (it's then done on their triangles: see groupTriangles). */
 let unswept = false;
@@ -2958,7 +2958,7 @@ function groupTriangles(features: Feature[], f: Feature): WorldMesh | null {
 
 function branch(features: Feature[], self: Feature | null, inherited: Cutter[] = []): Shape3D | null {
   // A merged group's shape depends only on what's inside it (unless something in it waits for outside holes).
-  if (self && isMergedGroup(self) && !inherited.length && !someInside(features, self, hasAfterHoles)) {
+  if (self && isMergedGroup(self) && !inherited.length && !someInside(features, self, (x) => x !== self && hasAfterHoles(x))) {
     const key = branchKey(features, self);
     let hit = branchCache.get(key);
     if (!hit) {
@@ -3013,8 +3013,10 @@ function branchNow(features: Feature[], self: Feature | null, inherited: Cutter[
 function finishBranch(self: Feature, result: Shape3D, hasKids: boolean): Shape3D {
   if (isMergedGroup(self)) {
     try {
-      result = applyEdgeOps(result, self.edgeOps);
+      result = applyEdgeOps(result, self.edgeOps, (o) => !o.afterHoles);
       if (self.shell) result = applyShell(result, self.shell);
+      // Its own holes are already cut; the ones from outside it that reach it go first, so their edges can be rounded too.
+      if (hasAfterHoles(self)) result = applyEdgeOps(cutByReachingHoles(self, result), self.edgeOps, (o) => !!o.afterHoles);
     } catch (err) {
       failures[self.id] = message(err); // Keep the unfinished shape so the rest still builds.
     }
