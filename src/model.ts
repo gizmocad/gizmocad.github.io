@@ -423,7 +423,8 @@ export type SketchEntity = { id: string; mode: EntityMode; trims?: SketchTrim[] 
   /** A smooth closed curve through its points. */
   | { type: "spline"; points: Point2[] }
   /** A freehand brush stroke: the area within width/2 of the path through `points`. */
-  | { type: "stroke"; points: Point2[]; width: number }
+  /** `bends`: how far each segment between points bows out to the left, making it an arc (0 or unset: straight). */
+  | { type: "stroke"; points: Point2[]; width: number; bends?: number[] }
   | { type: "point"; x: number; y: number }
   | { type: "line"; x1: number; y1: number; x2: number; y2: number }
 );

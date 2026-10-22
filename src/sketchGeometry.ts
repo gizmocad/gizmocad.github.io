@@ -238,19 +238,72 @@ export function strokePath(raw: P[], width: number, maxSegments = 40): P[] {
   return out.map((p) => [round(p[0]), round(p[1])] as P);
 }
 
-/** The pieces a stroke is built from: a capsule per segment (or a dot for a single point). */
-export function strokePieces(e: { points: P[]; width: number }): Path[] {
+type StrokeLike = { points: P[]; width: number; bends?: number[] };
+
+/** A stroke's segments: from, to, and how far each bows out (its bend). */
+function strokeSegments(e: StrokeLike): { a: P; b: P; bend: number }[] {
+  const out: { a: P; b: P; bend: number }[] = [];
+  e.points.forEach((b, i) => {
+    if (i === 0) return;
+    const a = e.points[i - 1];
+    if (dist(a, b) > 1e-6) out.push({ a, b, bend: e.bends?.[i - 1] ?? 0 });
+  });
+  return out;
+}
+
+/** A stroke's middle line as points: its curved segments followed along their arcs. */
+export function strokeLine(e: StrokeLike): P[] {
+  const segs = strokeSegments(e);
+  if (!segs.length) return e.points.slice(0, 1);
+  return [segs[0].a, ...segs.flatMap(({ a, b, bend }) => (Math.abs(bend) > 1e-9 ? arcSamples(a, bendPoint(a, b, bend), b, 24) : [b]))];
+}
+
+/**
+ * A curved segment of a stroke as one outline: the arc offset out and in by `r`, with round ends.
+ * Null when it bends tighter than the stroke is wide (no inner side): it's then made of short pieces.
+ */
+function arcBand(a: P, b: P, bend: number, r: number): Path | null {
+  const arc = arcThrough(a, bendPoint(a, b, bend), b);
+  if (!arc || arc.r - r < 1e-3) return null;
+  const at = (t: number, rr: number): P => [arc.c[0] + rr * Math.cos(arc.a0 + t * arc.sweep), arc.c[1] + rr * Math.sin(arc.a0 + t * arc.sweep)];
+  // Along the arc at each end (the way it runs), for the round ends.
+  const ahead = (t: number, d: number): P => {
+    const ang = arc.a0 + t * arc.sweep;
+    const s = Math.sign(arc.sweep) * d;
+    return [arc.c[0] + arc.r * Math.cos(ang) - s * Math.sin(ang), arc.c[1] + arc.r * Math.sin(ang) + s * Math.cos(ang)];
+  };
+  const [out, inn] = [arc.r + r, arc.r - r];
+  return {
+    start: at(0, out),
+    segments: [
+      { kind: "arc", via: at(0.5, out), to: at(1, out) },
+      { kind: "arc", via: ahead(1, r), to: at(1, inn) },
+      { kind: "arc", via: at(0.5, inn), to: at(0, inn) },
+      { kind: "arc", via: ahead(0, -r), to: at(0, out) },
+    ],
+  };
+}
+
+/** The pieces a stroke is built from: a capsule per straight segment, a curved band per curved one (or a dot for a single point). */
+export function strokePieces(e: StrokeLike): Path[] {
   const r = e.width / 2;
-  const pts = e.points.filter((p, i) => i === 0 || dist(p, e.points[i - 1]) > 1e-6);
-  if (r <= 0 || !pts.length) return [];
-  if (pts.length === 1) return [entityPath({ id: "", mode: "add", type: "circle", x: pts[0][0], y: pts[0][1], radius: r })!];
-  return pts.slice(1).map((b, i) => entityPath({ id: "", mode: "add", type: "slot", x1: pts[i][0], y1: pts[i][1], x2: b[0], y2: b[1], radius: r })!);
+  const segs = strokeSegments(e);
+  if (r <= 0 || !e.points.length) return [];
+  const capsule = (a: P, b: P) => entityPath({ id: "", mode: "add", type: "slot", x1: a[0], y1: a[1], x2: b[0], y2: b[1], radius: r })!;
+  if (!segs.length) return [entityPath({ id: "", mode: "add", type: "circle", x: e.points[0][0], y: e.points[0][1], radius: r })!];
+  return segs.flatMap(({ a, b, bend }) => {
+    if (Math.abs(bend) <= 1e-9) return [capsule(a, b)];
+    const band = arcBand(a, b, bend, r);
+    if (band) return [band];
+    const pts = [a, ...arcSamples(a, bendPoint(a, b, bend), b, 12)];
+    return pts.slice(1).map((q, i) => capsule(pts[i], q));
+  });
 }
 
 /** An approximate outline for drawing a stroke: along one side, round the end, back along the other. */
-function strokeOutline(e: { points: P[]; width: number }): P[] {
+function strokeOutline(e: StrokeLike): P[] {
   const r = e.width / 2;
-  const pts = e.points;
+  const pts = strokeLine(e);
   if (pts.length < 2) return pts.length ? outline({ id: "", mode: "add", type: "circle", x: pts[0][0], y: pts[0][1], radius: r }) : [];
   const side = (sign: number) =>
     pts.map((p, i) => {
@@ -396,7 +449,7 @@ function distToPolyline(p: P, pts: P[]): number {
 }
 
 export function distToOutline(e: SketchEntity, p: P): number {
-  if (e.type === "stroke") return Math.abs(distToPolyline(p, e.points) - e.width / 2);
+  if (e.type === "stroke") return Math.abs(distToPolyline(p, strokeLine(e)) - e.width / 2);
   const pts = outline(e);
   if (pts.length === 1) return dist(p, pts[0]);
   let best = Infinity;
@@ -422,7 +475,7 @@ export function hitTest(entities: SketchEntity[], p: P, tolerance: number): stri
     const d = distToOutline(e, p);
     let score: number | null = null;
     if (d <= tolerance) score = d - 1e9; // Near an edge beats being inside.
-    else if (e.type === "stroke" && e.mode !== "construction" && distToPolyline(p, e.points) <= e.width / 2) score = e.width * e.points.length;
+    else if (e.type === "stroke" && e.mode !== "construction" && distToPolyline(p, strokeLine(e)) <= e.width / 2) score = e.width * e.points.length;
     else if (isClosed(e) && e.type !== "stroke" && e.mode !== "construction" && pointInPolygon(p, outline(e))) score = polygonArea(outline(e));
     if (score !== null && (!best || score < best.score)) best = { id: e.id, score };
   }
@@ -507,8 +560,13 @@ function ownHandles(e: SketchEntity): Handle[] {
         ...e.points.map((a, i) => ({ key: `m${i}`, kind: "edge" as const, p: bendPoint(a, e.points[(i + 1) % e.points.length], e.bends[i] ?? 0) })),
       ];
     case "spline":
-    case "stroke":
       return e.points.map((p, i) => ({ key: `v${i}`, kind: "vertex" as const, p }));
+    case "stroke":
+      return [
+        ...e.points.map((p, i) => ({ key: `v${i}`, kind: "vertex" as const, p })),
+        // A dot in the middle of each segment: drag it to curve the segment.
+        ...e.points.slice(1).map((b, i) => ({ key: `m${i}`, kind: "edge" as const, p: bendPoint(e.points[i], b, e.bends?.[i] ?? 0) })),
+      ];
     case "point":
       return [{ key: "c", kind: "center", p: [e.x, e.y] }];
     case "line":
@@ -579,6 +637,11 @@ export function moveHandle(e: SketchEntity, key: string, p: P) {
         const a = e.points[i];
         const b = e.points[(i + 1) % e.points.length];
         e.bends[i] = round(dotP(sub(p, mid(a, b)), leftNormal(a, b)));
+      } else if (e.type === "stroke") {
+        const [a, b] = [e.points[i], e.points[i + 1]];
+        const bends = e.points.slice(1).map((_, k) => e.bends?.[k] ?? 0);
+        bends[i] = round(dotP(sub(p, mid(a, b)), leftNormal(a, b)));
+        e.bends = bends;
       }
       break;
     }
@@ -613,8 +676,18 @@ export function snapPoints(e: SketchEntity): P[] {
   return pts;
 }
 
-/** Insert a point in the middle of edge i (polygon or spline). */
+/** Insert a point in the middle of edge i (polygon, spline, or a line's segment i). */
 export function insertPoint(e: SketchEntity, edge: number) {
+  if (e.type === "stroke") {
+    if (edge < 0 || edge >= e.points.length - 1) return;
+    const bends = e.points.slice(1).map((_, k) => e.bends?.[k] ?? 0);
+    const m = bendPoint(e.points[edge], e.points[edge + 1], bends[edge]);
+    e.points.splice(edge + 1, 0, [round(m[0]), round(m[1])]);
+    const half = round(bends[edge] / 4);
+    bends.splice(edge, 1, half, half);
+    if (bends.some((b) => b)) e.bends = bends;
+    return;
+  }
   if (e.type !== "polygon" && e.type !== "spline") return;
   const a = e.points[edge];
   const b = e.points[(edge + 1) % e.points.length];
@@ -628,6 +701,13 @@ export function insertPoint(e: SketchEntity, edge: number) {
 }
 
 export function removePoint(e: SketchEntity, index: number) {
+  if (e.type === "stroke") {
+    if (e.points.length <= 2) return;
+    e.points.splice(index, 1);
+    // The two segments either side become one straight one (an end point takes just its segment).
+    if (e.bends) e.bends.splice(Math.max(0, index - 1), index === 0 || index === e.points.length ? 1 : 2, ...(index === 0 || index === e.points.length ? [] : [0]));
+    return;
+  }
   if ((e.type !== "polygon" && e.type !== "spline") || e.points.length <= 3) return;
   e.points.splice(index, 1);
   if (e.type === "polygon") e.bends.splice(index, 1);
@@ -678,19 +758,17 @@ export function splitAt(e: SketchEntity, p: P, newId: string): SketchEntity[] | 
     ];
   }
   if (e.type === "stroke") {
-    let best = { i: -1, d: Infinity, at: [0, 0] as P };
-    for (let i = 0; i < e.points.length - 1; i++) {
-      const { at } = project(p, e.points[i], e.points[i + 1]);
-      const d = dist(p, at);
-      if (d < best.d) best = { i, d, at };
-    }
-    if (best.i < 0) return null;
-    const first = [...e.points.slice(0, best.i + 1), best.at];
-    const second = [best.at, ...e.points.slice(best.i + 1)];
-    if (dist(first[0], best.at) < 1e-6 || dist(second.at(-1)!, best.at) < 1e-6) return null; // At an end: nothing to split.
+    if (e.points.length < 2) return null;
+    // The nearest place on it, as on an open polygon (a curved segment splits into two curved halves).
+    const open = { id: "", mode: e.mode, type: "polygon" as const, points: e.points, bends: e.points.slice(1).map((_, k) => e.bends?.[k] ?? 0) };
+    const { edge, at, bends } = polygonEdgePoint(open, p, true);
+    const first = [...e.points.slice(0, edge + 1), at];
+    const second = [at, ...e.points.slice(edge + 1)];
+    if (dist(first[0], at) < 1e-6 || dist(second.at(-1)!, at) < 1e-6) return null; // At an end: nothing to split.
+    const curved = open.bends.some((b) => b);
     return [
-      { ...e, points: first },
-      { ...e, id: newId, points: second },
+      { ...e, points: first, ...(curved ? { bends: [...open.bends.slice(0, edge), bends[0]] } : {}) },
+      { ...e, id: newId, points: second, ...(curved ? { bends: [bends[1], ...open.bends.slice(edge + 1)] } : {}) },
     ];
   }
   // Closed outlines: add a corner where the click was.
@@ -719,9 +797,10 @@ export function splitAt(e: SketchEntity, p: P, newId: string): SketchEntity[] | 
  * The point on a polygon's outline nearest `p`: its edge, how far along it is (0..1) and,
  * to put a corner there, the bends of the edge's two halves (a curved edge keeps its curve).
  */
-function polygonEdgePoint(poly: Extract<SketchEntity, { type: "polygon" }>, p: P): { edge: number; at: P; t: number; bends: [number, number]; d: number } {
+function polygonEdgePoint(poly: Extract<SketchEntity, { type: "polygon" }>, p: P, open = false): { edge: number; at: P; t: number; bends: [number, number]; d: number } {
   let best: { edge: number; at: P; t: number; bends: [number, number]; d: number } | null = null;
   poly.points.forEach((a, edge) => {
+    if (open && edge === poly.points.length - 1) return; // An open line doesn't go back to its start.
     const b = poly.points[(edge + 1) % poly.points.length];
     const bend = poly.bends[edge] ?? 0;
     const arc = bend ? arcThrough(a, bendPoint(a, b, bend), b) : null;
@@ -1191,6 +1270,7 @@ function mapEntity(e: SketchEntity, f: (p: P) => P, angle: (a: number) => number
   }
   if (e.type === "polygon" || e.type === "spline" || e.type === "stroke") e.points = e.points.map(t);
   if (e.type === "polygon" && flip) e.bends = e.bends.map((b) => -b);
+  if (e.type === "stroke" && flip && e.bends) e.bends = e.bends.map((b) => -b);
   if (e.type === "rect" || e.type === "ellipse" || e.type === "ngon") e.angle = round(((angle(e.angle) % 360) + 540) % 360 - 180);
   for (const trim of e.trims ?? []) for (const s of trim.shapes) mapEntity(s, f, angle, flip);
 }

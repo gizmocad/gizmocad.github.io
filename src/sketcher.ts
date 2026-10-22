@@ -475,15 +475,18 @@ export class SketchEditor {
 
     // The dot's own shape: the entity, or a shape merged into it.
     const target = h && handleTarget(h.entity, h.handle.key);
-    if (h && target && (target.entity.type === "polygon" || target.entity.type === "spline")) {
+    if (h && target && (target.entity.type === "polygon" || target.entity.type === "spline" || target.entity.type === "stroke")) {
       const idx = Number(target.key.slice(1));
       const ent = target.entity;
       const onIt = (mutate: (x: SketchEntity) => void) => commitOn(h.entity.id, (x) => mutate(handleTarget(x, h.handle.key).entity));
       if (h.handle.kind === "vertex") {
-        items.push({ label: "Delete point", disabled: ent.points.length <= 3, action: () => onIt((x) => removePoint(x, idx)) });
+        items.push({ label: "Delete point", disabled: ent.points.length <= (ent.type === "stroke" ? 2 : 3), action: () => onIt((x) => removePoint(x, idx)) });
       } else if (h.handle.kind === "edge" && ent.type === "polygon") {
         items.push({ label: "Add point here", action: () => onIt((x) => insertPoint(x, idx)) });
         items.push({ label: "Straighten edge", disabled: !ent.bends[idx], action: () => onIt((x) => x.type === "polygon" && (x.bends[idx] = 0)) });
+      } else if (h.handle.kind === "edge" && ent.type === "stroke") {
+        items.push({ label: "Add point here", action: () => onIt((x) => insertPoint(x, idx)) });
+        items.push({ label: "Straighten", disabled: !ent.bends?.[idx], action: () => onIt((x) => x.type === "stroke" && x.bends && (x.bends[idx] = 0)) });
       }
     }
 

@@ -4148,7 +4148,7 @@ function sketchSettings(s: SketchFeature, update: (mutate: (f: Feature) => void)
 const TOOLS: { value: SketchTool; label: string; key: string; title: string }[] = [
   { value: "select", label: "↖ Select", key: "V", title: "Select, box-select, move and edit shapes. Shift-click adds to the selection. Right-click for options." },
   { value: "point", label: "• Point", key: "O", title: "Click a shape's edge to add a point to that shape there (shapes merged into another too); click anywhere else for a reference point to snap to" },
-  { value: "line", label: "╱ Line", key: "L", title: "Line: click points along it, then double-click, Enter or right-click ▸ Finish line (it needn't close). A guide to snap to, or a solid or cut line as wide as you set (e.g. a cut round a flexing tab)." },
+  { value: "line", label: "╱ Line", key: "L", title: "Line: click points along it, then double-click, Enter or right-click ▸ Finish line (it needn't close). Select it and drag the orange dot in the middle of a segment to curve it. A guide to snap to, or a solid or cut line as wide as you set (e.g. a cut round a flexing tab)." },
   { value: "rect", label: "▭ Rect", key: "R", title: "Rectangle: drag, or click two corners" },
   { value: "circle", label: "◯ Circle", key: "C", title: "Circle: drag from the centre" },
   { value: "ellipse", label: "⬭ Ellipse", key: "E", title: "Ellipse: drag from the centre to a corner" },
@@ -4172,8 +4172,8 @@ const ENTITY_LABEL: Record<SketchEntityType, string> = {
   polygon: "Polygon",
   spline: "Curve",
   point: "Point",
-  line: "Line",
-  stroke: "Brush stroke",
+  line: "Guide line",
+  stroke: "Line",
 };
 
 const MODE_OPTIONS: { value: EntityMode; label: string; title: string }[] = [
@@ -4618,7 +4618,7 @@ function entityFields(e: SketchEntity, updateEntity: (id: string, mutate: (e: Sk
     case "spline":
       return pointRows(e, updateEntity, merged);
     case "stroke":
-      return [num("Width", "width", { min: 0 }), hint(`${e.points.length} points. Drag the dots to adjust the path.`)];
+      return [num("Width", "width", { min: 0 }), hint(`${e.points.length} points. Drag the blue dots to move them, and the orange dot in the middle of a segment to curve it (right-click it to straighten it or add a point there).`)];
   }
 }
 

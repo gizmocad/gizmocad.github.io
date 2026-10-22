@@ -40,7 +40,7 @@ import {
   type SketchEntity,
   type SketchParams,
 } from "./model";
-import { entityPath, gearPath, isProfile, outline, prismPoints, starPoints, strokePieces, wrapPath, type Path } from "./sketchGeometry";
+import { entityPath, gearPath, isProfile, outline, prismPoints, starPoints, strokeLine, strokePieces, wrapPath, type Path } from "./sketchGeometry";
 import type { BuildStep, Clash, ImportedSolid, ImportSource, KernelRequest, KernelResponse, MeshData, ModelStats, SketchLoop } from "./kernel";
 import { hedron } from "./hedron";
 import { CUSTOM_FONT, builtInFontUrl, fontFamily, isCustomFont } from "./fonts";
@@ -1981,7 +1981,8 @@ function sweepPaths(p: SketchParams): { spine: Wire; left: boolean }[] {
   for (const e of p.entities) {
     if (e.mode !== "add") continue;
     if (e.type === "stroke") {
-      const pts = e.points.filter((q, i) => i === 0 || Math.hypot(q[0] - e.points[i - 1][0], q[1] - e.points[i - 1][1]) > 1e-6).map(([x, y]) => [x, y, 0] as [number, number, number]);
+      const line = strokeLine(e);
+      const pts = line.filter((q, i) => i === 0 || Math.hypot(q[0] - line[i - 1][0], q[1] - line[i - 1][1]) > 1e-6).map(([x, y]) => [x, y, 0] as [number, number, number]);
       if (pts.length >= 2) out.push({ spine: assembleWire([pts.length === 2 ? makeLine(pts[0], pts[1]) : makeBSplineApproximation(pts, { tolerance: 1e-3 })]), left: false });
     } else if (isProfile(e)) {
       const d = entityDrawing(e);
@@ -2212,7 +2213,8 @@ function sweepSketchTriangles(f: Feature & { kind: "sketch" }): WorldMesh {
   for (const e of f.params.entities) {
     if (e.type !== "stroke" || e.mode !== "add") continue;
     const r = e.width / 2;
-    const path = e.points.length === 1 ? [e.points[0], e.points[0]] : e.points;
+    const line = strokeLine(e);
+    const path = line.length === 1 ? [line[0], line[0]] : line;
     if (!square) {
       const ball = ([x, y]: [number, number]) => {
         const pts: [number, number, number][] = [];
@@ -2293,7 +2295,8 @@ function grooveTriangles(f: Feature & { kind: "sketch" }): WorldMesh {
       }
       return pts;
     };
-    const path = e.points.length === 1 ? [e.points[0], e.points[0]] : e.points;
+    const line = strokeLine(e);
+    const path = line.length === 1 ? [line[0], line[0]] : line;
     for (let i = 0; i + 1 < path.length; i++) pieces.push(M.Manifold.hull([...section(path[i]), ...section(path[i + 1])]));
   }
   try {

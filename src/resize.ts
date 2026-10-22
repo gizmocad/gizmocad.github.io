@@ -80,7 +80,10 @@ function scaleEntity(e: SketchEntity, su: number, sv: number) {
     case "stroke":
       e.points = e.points.map(([x, y]) => [u(x), v(y)]);
       if (e.type === "polygon") e.bends = e.bends.map((b) => round(b * even));
-      if (e.type === "stroke") e.width = round(e.width * even);
+      if (e.type === "stroke") {
+        e.width = round(e.width * even);
+        if (e.bends) e.bends = e.bends.map((b) => round(b * even));
+      }
       break;
   }
 }
