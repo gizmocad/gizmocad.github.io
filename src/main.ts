@@ -3690,7 +3690,7 @@ function objectItemsNow(f: Feature): HTMLElement[] {
 
   const kids = childrenOf(doc.features, f.id).length;
   const actions = document.createElement("div");
-  actions.className = "actions";
+  actions.className = "actions keep-shown"; // Not part of the section above: it stays when that's folded.
   actions.append(button("Duplicate", duplicateSelected), button(kids ? `Delete (+${kids})` : "Delete", deleteSelected, "danger"));
   items.push(actions);
   if (f.kind === "group") items.push(hint("Groups have no shape of their own. Add shapes to a group by selecting it and clicking a shape, or by dragging in the list."));
@@ -4357,7 +4357,8 @@ function renderSketchPanel(panel: HTMLElement, s: SketchFeature, ed: SketchEdito
   const project = button("⤓ Project the model", () => void projectModel(s, ed));
   project.title = "Bring in the outline of the model where it crosses this sketch's plane (or the face the sketch lies on), to build on or snap to";
   items.push(section("Sketch settings"), ...sketchSettings(s, updateSketch, true), project);
-  items.push(button("✓ Finish sketch", stopSketchEdit, "primary wide"));
+  const finish = button("✓ Finish sketch", stopSketchEdit, "primary wide keep-shown");
+  items.push(finish);
   items.push(hint("Right-click a shape for options, or empty space to select all. Drag dots to reshape; orange dots bend polygon edges into arcs. Right-drag pans, scroll zooms. Esc cancels."));
   panel.replaceChildren(...items);
   sketchStateChanged();
@@ -6340,6 +6341,99 @@ for (const panel of document.querySelectorAll(".panel")) {
   foldHelp(panel);
   new MutationObserver(() => foldHelp(panel)).observe(panel, { childList: true, subtree: true });
 }
+
+// ---- Folding sections ------------------------------------------------------------------
+
+/** Sections that start folded (the less-used ones); the rest start open. One opened or closed by hand stays so. */
+const FOLDED_FIRST = new Set([
+  "Colour",
+  "Parent",
+  "Print estimate",
+  "Edges",
+  "Edges: fillet, chamfer & bevel",
+  "Hollow",
+  "Texture",
+  "Tilt",
+  "Sculpt",
+  "Cut by holes",
+  "Connection",
+  "Combine",
+  "Clearance cut",
+  "Chisel",
+  "Snap joint",
+  "Split & dividers",
+  "Mirror",
+  "Repeat",
+  "Mirror, repeat & offset",
+  "Sketch settings",
+]);
+const FOLD_KEY = "gizmocad.sections";
+const sectionOpen = (() => {
+  try {
+    return JSON.parse(stored(FOLD_KEY) ?? "{}") as Record<string, boolean>;
+  } catch {
+    return {};
+  }
+})();
+
+/** A section's name without its numbers ("Shapes (5)" is "Shapes"; every "Position …" is "Position"), so it's remembered whatever they are. */
+const foldName = (title: HTMLElement) =>
+  (title.dataset.title ?? "")
+    .replace(/\s*\(\d+\)/g, "")
+    .replace(/^Position\b.*/, "Position")
+    .trim();
+
+/** What's under a section title: up to the next title (or something kept on show, like the object's Delete). */
+function sectionBody(title: HTMLElement): HTMLElement[] {
+  const out: HTMLElement[] = [];
+  for (let n = title.nextElementSibling as HTMLElement | null; n && !n.classList.contains("section") && !n.classList.contains("keep-shown"); n = n.nextElementSibling as HTMLElement | null) out.push(n);
+  return out;
+}
+
+function showSection(title: HTMLElement) {
+  const name = foldName(title);
+  const body = sectionBody(title);
+  // Something under way in it (a finish to apply, faces being picked…) keeps it open.
+  const busy = body.some((n) => n.matches(".primary") || !!n.querySelector(".primary"));
+  const open = busy || (sectionOpen[name] ?? !FOLDED_FIRST.has(name));
+  title.classList.toggle("folded", !open);
+  title.setAttribute("aria-expanded", String(open));
+  for (const n of body) n.classList.toggle("fold-away", !open);
+}
+
+/** Each section title in the right panel opens and closes what's under it. */
+function foldSections(panel: HTMLElement) {
+  for (const title of panel.querySelectorAll<HTMLElement>(".section")) {
+    if (!title.querySelector(".fold-chevron")) {
+      title.dataset.title ??= title.textContent ?? "";
+      const chevron = document.createElement("span");
+      chevron.className = "fold-chevron";
+      chevron.textContent = "▾";
+      title.prepend(chevron);
+      title.classList.add("foldable");
+      title.setAttribute("role", "button");
+      title.tabIndex = 0;
+      const toggle = () => {
+        const name = foldName(title);
+        sectionOpen[name] = title.classList.contains("folded");
+        store(FOLD_KEY, JSON.stringify(sectionOpen));
+        showSection(title);
+      };
+      title.onclick = (e) => {
+        if (!(e.target as HTMLElement).closest(".help-btn")) toggle();
+      };
+      title.onkeydown = (e) => {
+        if (e.target !== title || (e.key !== "Enter" && e.key !== " ")) return;
+        e.preventDefault();
+        toggle();
+      };
+    }
+    showSection(title);
+  }
+}
+const propertiesPanel = $("#properties");
+foldSections(propertiesPanel);
+new MutationObserver(() => foldSections(propertiesPanel)).observe(propertiesPanel, { childList: true, subtree: true });
 
 // ---- Resizable side panels ------------------------------------------------------------
 

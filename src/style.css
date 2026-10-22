@@ -442,7 +442,7 @@ header [hidden] { display: none !important; }
 .menu-field select { max-width: 150px; }
 
 /* Buttons under the view cube. */
-.view-tools { position: absolute; top: 102px; right: 10px; display: flex; gap: 3px; }
+.view-tools { position: absolute; top: 102px; right: 10px; display: grid; grid-template-columns: repeat(3, auto); gap: 3px; }
 .view-tools button { width: 26px; height: 26px; padding: 0; font-size: 13px; line-height: 1; border-radius: 6px; background: var(--overlay); }
 body.sketching .view-tools { display: none; }
 
@@ -611,3 +611,11 @@ input.linked { box-shadow: inset 3px 0 0 var(--accent); }
 #tips-dialog .keys { border-collapse: collapse; width: 100%; font-size: 13px; }
 #tips-dialog .keys td { padding: 3px 8px 3px 0; border-bottom: 1px solid var(--border); }
 #tips-dialog .keys td:first-child { white-space: nowrap; font-family: var(--mono, monospace); color: var(--muted); }
+
+/* Section titles in the right panel fold what's under them away. */
+.section.foldable { cursor: pointer; user-select: none; border-radius: 4px; }
+.section.foldable:hover { color: var(--text); }
+.section.foldable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.fold-chevron { display: inline-block; width: 10px; font-size: 10px; transition: transform 0.15s; }
+.section.folded .fold-chevron { transform: rotate(-90deg); }
+.fold-away { display: none !important; }
