@@ -89,7 +89,7 @@ type Drag =
   | { kind: "box"; from: P; to: P; additive: boolean };
 
 export class SketchEditor {
-  tool: SketchTool = "rect";
+  tool: SketchTool = "select";
   /** Mode for new closed shapes. Points and lines are always construction. */
   newMode: EntityMode = "add";
   ngonSides = 6;
