@@ -573,8 +573,42 @@ function ownHandles(e: SketchEntity): Handle[] {
       return [
         { key: "a", kind: "vertex", p: [e.x1, e.y1] },
         { key: "b", kind: "vertex", p: [e.x2, e.y2] },
+        // Drag it to curve the guide (it becomes a guide that can curve).
+        { key: "m0", kind: "edge", p: mid([e.x1, e.y1], [e.x2, e.y2]) },
       ];
   }
+}
+
+/** Make a straight guide line into a line that can curve (a stroke), in place, keeping its id and mode. */
+export function lineAsStroke(e: SketchEntity, width = 0) {
+  if (e.type !== "line") return;
+  const { x1, y1, x2, y2 } = e;
+  const s = e as unknown as Record<string, unknown>;
+  for (const k of ["x1", "y1", "x2", "y2"]) delete s[k];
+  Object.assign(s, { type: "stroke", points: [[x1, y1], [x2, y2]], width });
+}
+
+/** Lines joined end to end into paths, each line in one of them (in order along it). */
+export function chainLines(lines: Extract<SketchEntity, { type: "line" }>[]): P[][] {
+  const left = lines.map((l) => [[l.x1, l.y1], [l.x2, l.y2]] as [P, P]);
+  const same = (a: P, b: P) => dist(a, b) < 1e-4;
+  const paths: P[][] = [];
+  while (left.length) {
+    const path: P[] = [...left.shift()!];
+    for (let i = 0; i < left.length; i++) {
+      const [a, b] = left[i];
+      const [start, end] = [path[0], path[path.length - 1]];
+      if (same(end, a)) path.push(b);
+      else if (same(end, b)) path.push(a);
+      else if (same(start, b)) path.unshift(a);
+      else if (same(start, a)) path.unshift(b);
+      else continue;
+      left.splice(i, 1);
+      i = -1; // It's grown: look through the rest again.
+    }
+    paths.push(path);
+  }
+  return paths;
 }
 
 /** Drag handle `key` of `e` to `p`, updating the entity in place. */
@@ -620,6 +654,10 @@ export function moveHandle(e: SketchEntity, key: string, p: P) {
     }
     case "slot":
     case "line":
+      if (e.type === "line" && key === "m0") {
+        lineAsStroke(e);
+        return moveHandle(e, key, p);
+      }
       if (key === "a") [e.x1, e.y1] = [u, v];
       else if (key === "b") [e.x2, e.y2] = [u, v];
       else if (e.type === "slot") {

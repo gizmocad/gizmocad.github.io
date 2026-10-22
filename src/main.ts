@@ -4216,6 +4216,13 @@ function renderSketchPanel(panel: HTMLElement, s: SketchFeature, ed: SketchEdito
   if (ed.tool === "line") {
     items.push(labeled("New lines", segmented(MODE_OPTIONS, ed.lineMode, (m) => ((ed.lineMode = m), ed.render(), renderProperties()), "entity")));
     if (ed.lineMode !== "construction") items.push(lengthField("Width", ed.brushWidth, (v) => ((ed.brushWidth = v), ed.render(), renderProperties()), { min: 0 }));
+    items.push(
+      hint(
+        ed.lineMode === "construction"
+          ? "<b>Guide</b> lines are dashed helpers to snap to: they don't add or cut. Pick <b>Cut</b> or <b>Add</b> for a line that does (or make guides you've drawn Add or Cut later). To curve a segment, select the line and drag the orange dot in its middle."
+          : "Click points along it, then double-click or press Enter. To curve a segment, select the line and drag the orange dot in its middle.",
+      ),
+    );
   }
   if (ed.tool === "brush") {
     items.push(lengthField("Brush width", ed.brushWidth, (v) => ((ed.brushWidth = v), ed.render(), renderProperties()), { min: 0 }));
@@ -4280,11 +4287,13 @@ function renderSketchPanel(panel: HTMLElement, s: SketchFeature, ed: SketchEdito
   const sel = entities.filter((e) => ed.selected.has(e.id));
   if (sel.length > 1) {
     items.push(section(`${sel.length} shapes selected`));
-    if (sel.some((e) => e.type !== "point" && e.type !== "line")) items.push(segmented(MODE_OPTIONS, sel[0].mode, (m) => ed.setSelectedMode(m), "entity"));
+    if (sel.some((e) => e.type !== "point")) items.push(segmented(MODE_OPTIONS, sel[0].mode, (m) => ed.setSelectedMode(m), "entity"));
+    if (sel.some((e) => e.type === "line")) items.push(hint("Make guide lines Add or Cut to turn them into a line that adds or cuts (ones that meet end to end become one line)."));
   } else if (sel.length === 1) {
     const e = sel[0];
     items.push(section(`Edit ${ENTITY_LABEL[e.type].toLowerCase()}`));
-    if (e.type !== "point" && e.type !== "line") items.push(segmented(MODE_OPTIONS, e.mode, (m) => updateEntity(e.id, (t) => (t.mode = m)), "entity"));
+    if (e.type === "line") items.push(segmented(MODE_OPTIONS, e.mode, (m) => ed.setSelectedMode(m), "entity"));
+    else if (e.type !== "point") items.push(segmented(MODE_OPTIONS, e.mode, (m) => updateEntity(e.id, (t) => (t.mode = m)), "entity"));
     items.push(...entityFields(e, updateEntity));
     if (e.trims?.length) {
       // Trimmed but still itself: its sizes above still work; the trim follows.
@@ -4619,7 +4628,11 @@ function entityFields(e: SketchEntity, updateEntity: (id: string, mutate: (e: Sk
     case "spline":
       return pointRows(e, updateEntity, merged);
     case "stroke":
-      return [num("Width", "width", { min: 0 }), hint(`${e.points.length} points. Drag the blue dots to move them, and the orange dot in the middle of a segment to curve it (right-click it to straighten it or add a point there).`)];
+      return [
+        // A guide is only drawn: it has no width.
+        ...(e.mode === "construction" ? [] : [num("Width", "width", { min: 0 })]),
+        hint(`${e.points.length} points. Drag the blue dots to move them, and the orange dot in the middle of a segment to curve it (right-click it to straighten it or add a point there).`),
+      ];
   }
 }
 

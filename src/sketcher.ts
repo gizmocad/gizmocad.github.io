@@ -10,6 +10,7 @@ import {
   addCorner,
   bounds,
   canSplit,
+  chainLines,
   cornerAt,
   roundCorner,
   handles,
@@ -26,6 +27,7 @@ import {
   snapPoints,
   splinePieces,
   splitAt,
+  strokeLine,
   strokePath,
   tangentPoints,
   trimAt,
@@ -194,9 +196,23 @@ export class SketchEditor {
 
   setSelectedMode(mode: EntityMode) {
     const ids = new Set(this.selected);
+    const made: string[] = [];
     this.host.commit((entities) => {
       for (const e of entities) if (ids.has(e.id) && isClosed(e)) e.mode = mode;
+      // Guide lines made to add or cut: lines that do (as wide as the Line tool's), joined into one where they meet.
+      const lines = mode === "construction" ? [] : entities.filter((e): e is Extract<SketchEntity, { type: "line" }> => ids.has(e.id) && e.type === "line");
+      if (!lines.length) return;
+      const gone = new Set(lines.map((l) => l.id));
+      const strokes: SketchEntity[] = chainLines(lines).map((points) => ({ id: newId(), mode, type: "stroke", points, width: this.brushWidth }));
+      entities.splice(0, entities.length, ...entities.filter((e) => !gone.has(e.id)), ...strokes);
+      made.push(...strokes.map((s) => s.id));
+      for (const id of gone) ids.delete(id);
     });
+    if (made.length) {
+      this.selected = new Set([...ids, ...made]);
+      this.render();
+      this.host.changed();
+    }
   }
 
   /** Close the polygon or curve being drawn (Enter / double-click). */
@@ -435,8 +451,9 @@ export class SketchEditor {
         this.host.commit((entities) => entities.filter((x) => ids.has(x.id)).forEach((x) => translateEntity(x, drag.offset)));
       } else if (drag.kind === "handle") {
         this.host.commit((entities) => {
-          const target = entities.find((x) => x.id === drag.id);
-          if (target) Object.assign(target, drag.preview);
+          // Replaced whole: a guide line curved by its middle has become a different kind of line.
+          const i = entities.findIndex((x) => x.id === drag.id);
+          if (i >= 0) entities[i] = drag.preview;
         });
       } else if (drag.kind === "box") {
         const [x0, x1] = [Math.min(drag.from[0], drag.to[0]), Math.max(drag.from[0], drag.to[0])];
@@ -501,7 +518,7 @@ export class SketchEditor {
         if (corner) items.push({ label: "Add point here", action: () => this.replaceShape(corner.shape) });
       }
       items.push({ label: many ? `Duplicate ${this.selected.size} shapes` : "Duplicate", action: () => this.duplicateSelected() });
-      if (isClosed(hit)) {
+      if (isClosed(hit) || hit.type === "line") {
         items.push(
           { label: "Make Add", disabled: !many && hit.mode === "add", action: () => this.setSelectedMode("add") },
           { label: "Make Cut", disabled: !many && hit.mode === "subtract", action: () => this.setSelectedMode("subtract") },
@@ -679,9 +696,11 @@ export class SketchEditor {
       }
       const selected = this.selected.has(e.id);
       const color = selected ? COLOR.selected : COLOR[e.mode];
-      const pts = outline(e);
+      // A guide that can curve is drawn as just its line.
+      const guide = e.type === "stroke" && e.mode === "construction";
+      const pts = e.type === "stroke" && guide ? strokeLine(e) : outline(e);
       if (e.type === "point") this.addPoints(pts, color, 7);
-      else this.addLine(pts, color, isClosed(e), { dashed: e.mode === "construction" });
+      else this.addLine(pts, color, isClosed(e) && !guide, { dashed: e.mode === "construction" });
       if (selected && this.selected.size <= 20) this.addHandles(e);
     }
 
