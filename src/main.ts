@@ -3866,10 +3866,33 @@ function renderSketchPanel(panel: HTMLElement, s: SketchFeature, ed: SketchEdito
     if (e.trims?.length) {
       // Trimmed but still itself: its sizes above still work; the trim follows.
       const n = e.trims.length;
+      const last = e.trims[n - 1];
       items.push(
         hint(`Trimmed ${n === 1 ? "once" : `${n} times`}: it keeps its own handles and sizes, and the trimmed edge stays where it was.`),
-        button(n === 1 ? "Undo the trim" : "Undo the last trim", () => updateEntity(e.id, (t) => (t.trims = t.trims?.slice(0, -1).length ? t.trims.slice(0, -1) : undefined))),
+        button(last.op === "merge" ? `Separate the ${last.shapes.length + 1} shapes again` : n === 1 ? "Undo the trim" : "Undo the last trim", () =>
+          updateSketch((t) => {
+            if (t.kind !== "sketch") return;
+            const x = t.params.entities.find((y) => y.id === e.id);
+            const undone = x?.trims?.pop();
+            if (!x || !undone) return;
+            if (!x.trims?.length) delete x.trims;
+            // Shapes merged in were taken out of the sketch: they come back as themselves.
+            if (undone.op === "merge") t.params.entities.push(...undone.shapes.map((m) => ({ ...m, id: newId(), mode: x.mode })));
+          }),
+        ),
       );
+      // Shapes merged into it stay editable: their points and sizes, each under its own heading.
+      e.trims.forEach((t, k) => {
+        if (t.op !== "merge") return;
+        t.shapes.forEach((m, j) => {
+          const update = (_id: string, mutate: (x: SketchEntity) => void) =>
+            updateEntity(e.id, (x) => {
+              const inner = x.trims?.[k]?.shapes[j];
+              if (inner) mutate(inner);
+            });
+          items.push(section(`Merged in: ${ENTITY_LABEL[m.type].toLowerCase()}`), ...entityFields(m, update, true));
+        });
+      });
     }
   }
   if (sel.length) {
@@ -4139,7 +4162,8 @@ function sidePresets(current: number, onPick: (sides: number) => void) {
 }
 
 /** Numeric fields for one sketch entity. */
-function entityFields(e: SketchEntity, updateEntity: (id: string, mutate: (e: SketchEntity) => void) => void): HTMLElement[] {
+/** Fields for a shape's sizes or points. `merged`: it's merged into another shape (its points aren't the selection's). */
+function entityFields(e: SketchEntity, updateEntity: (id: string, mutate: (e: SketchEntity) => void) => void, merged = false): HTMLElement[] {
   type Num = { [k: string]: number };
   const num = (label: string, key: string, opts: { min?: number; unit?: string; plain?: boolean } = {}) =>
     lengthField(label, (e as unknown as Num)[key], (v) => updateEntity(e.id, (t) => ((t as unknown as Num)[key] = v)), opts);
@@ -4168,7 +4192,7 @@ function entityFields(e: SketchEntity, updateEntity: (id: string, mutate: (e: Sk
       return [num("Start U", "x1"), num("Start V", "y1"), num("End U", "x2"), num("End V", "y2")];
     case "polygon":
     case "spline":
-      return pointRows(e, updateEntity);
+      return pointRows(e, updateEntity, merged);
     case "stroke":
       return [num("Width", "width", { min: 0 }), hint(`${e.points.length} points. Drag the dots to adjust the path.`)];
   }
@@ -4178,7 +4202,7 @@ function diameterField(e: Extract<SketchEntity, { type: "circle" }>, updateEntit
   return lengthField("Diameter", e.radius * 2, (v) => updateEntity(e.id, (t) => t.type === "circle" && (t.radius = v / 2)), { min: 0 });
 }
 
-function pointRows(e: Extract<SketchEntity, { type: "polygon" | "spline" }>, updateEntity: (id: string, mutate: (e: SketchEntity) => void) => void): HTMLElement[] {
+function pointRows(e: Extract<SketchEntity, { type: "polygon" | "spline" }>, updateEntity: (id: string, mutate: (e: SketchEntity) => void) => void, merged = false): HTMLElement[] {
   const list = document.createElement("div");
   list.className = "point-list";
   const head = document.createElement("div");
@@ -4186,13 +4210,14 @@ function pointRows(e: Extract<SketchEntity, { type: "polygon" | "spline" }>, upd
   head.innerHTML = e.type === "polygon" ? "<span></span><span>U (mm)</span><span>V (mm)</span><span>Bend (mm)</span><span></span>" : "<span></span><span>U (mm)</span><span>V (mm)</span><span></span>";
   if (e.type === "spline") head.classList.add("no-bend");
   list.append(head);
-  const active = sketchEditor?.activePoint ?? null;
+  // (The highlighted point is one of the selected shape's own, not a merged-in one's.)
+  const active = merged ? null : (sketchEditor?.activePoint ?? null);
   e.points.forEach((p, i) => {
     const row = document.createElement("div");
     row.className = `point-row${e.type === "spline" ? " no-bend" : ""}${i === active ? " active" : ""}`;
     // Clicking a row shows its point in the view (and clicking a point in the view highlights its row).
     row.addEventListener("pointerdown", () => {
-      if (!sketchEditor) return;
+      if (!sketchEditor || merged) return;
       sketchEditor.setActivePoint(i);
       sketchPanelKey = panelKey(sketchEditor); // Already shown here: don't rebuild the panel under the pointer.
       list.querySelectorAll(".point-row.active").forEach((r) => r.classList.remove("active"));

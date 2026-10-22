@@ -12,6 +12,7 @@ import {
   cornerAt,
   roundCorner,
   handles,
+  handleTarget,
   hitTest,
   mergeOverlaps,
   insertPoint,
@@ -447,14 +448,17 @@ export class SketchEditor {
     const hitId = h?.entity.id ?? hitTest(this.host.entities(), raw, 6 * e.pixel);
     const hit = this.host.entities().find((x) => x.id === hitId);
 
-    if (h && (h.entity.type === "polygon" || h.entity.type === "spline")) {
-      const idx = Number(h.handle.key.slice(1));
-      const ent = h.entity;
+    // The dot's own shape: the entity, or a shape merged into it.
+    const target = h && handleTarget(h.entity, h.handle.key);
+    if (h && target && (target.entity.type === "polygon" || target.entity.type === "spline")) {
+      const idx = Number(target.key.slice(1));
+      const ent = target.entity;
+      const onIt = (mutate: (x: SketchEntity) => void) => commitOn(h.entity.id, (x) => mutate(handleTarget(x, h.handle.key).entity));
       if (h.handle.kind === "vertex") {
-        items.push({ label: "Delete point", disabled: ent.points.length <= 3, action: () => commitOn(ent.id, (x) => removePoint(x, idx)) });
+        items.push({ label: "Delete point", disabled: ent.points.length <= 3, action: () => onIt((x) => removePoint(x, idx)) });
       } else if (h.handle.kind === "edge" && ent.type === "polygon") {
-        items.push({ label: "Add point here", action: () => commitOn(ent.id, (x) => insertPoint(x, idx)) });
-        items.push({ label: "Straighten edge", disabled: !ent.bends[idx], action: () => commitOn(ent.id, (x) => x.type === "polygon" && (x.bends[idx] = 0)) });
+        items.push({ label: "Add point here", action: () => onIt((x) => insertPoint(x, idx)) });
+        items.push({ label: "Straighten edge", disabled: !ent.bends[idx], action: () => onIt((x) => x.type === "polygon" && (x.bends[idx] = 0)) });
       }
     }
 

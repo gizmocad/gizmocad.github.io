@@ -58,7 +58,7 @@
   **Alignment pins** on a split: each cut gets dowel holes (placed inside the cut face, as far apart as they fit) in both pieces, and the pins to print go beside the model.
   In sketches, the Trim tool (T) merges shapes where you click an edge inside another shape, trims off the part of a shape sticking out
   of another when you click its outside edge, cuts a shape along a guide line (dropping the side you click), or trims a guide line back
-  to its crossings, and "Trim overlaps" merges all selected overlapping shapes. The Split tool (X) cuts a line or brush stroke in two, or adds a corner to a shape's edge.
+  to its crossings, and "Trim overlaps" merges all selected overlapping shapes. Merged shapes stay editable as themselves (drag their dots, or type their sizes and points under "Merged in"), and "Separate … again" splits them back apart. The Split tool (X) cuts a line or brush stroke in two, or adds a corner to a shape's edge.
 - **More sketch tools:** the **Corner** tool (F) rounds or bevels a corner where two straight edges meet (an exact arc). With shapes selected:
   a **mirrored copy** across the V or U axis (or a selected guide line), **repeat** them around the origin (or a selected point; a bolt circle) or in a row,
   and **offset** them outward or inward by a distance (circles, rectangles, slots and N-gons stay themselves; other shapes become exact lines and arcs).

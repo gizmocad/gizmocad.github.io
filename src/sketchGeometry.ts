@@ -443,7 +443,31 @@ export interface Handle {
   p: P;
 }
 
+/** Handle keys of a shape merged into another (see SketchTrim): "t<trim>.<shape>/<its own key>". */
+const MERGED_KEY = /^t(\d+)\.(\d+)\/(.+)$/;
+
+/**
+ * The dots to drag: the shape's own, then those of the shapes merged into it,
+ * which stay editable as themselves (their centres drag just them).
+ */
 export function handles(e: SketchEntity): Handle[] {
+  const all = ownHandles(e);
+  (e.trims ?? []).forEach((t, k) => {
+    if (t.op !== "merge") return;
+    t.shapes.forEach((m, j) => all.push(...handles(m).map((h) => ({ key: `t${k}.${j}/${h.key}`, kind: h.kind === "center" ? ("vertex" as const) : h.kind, p: h.p }))));
+  });
+  return all;
+}
+
+/** The shape a handle key belongs to (the entity, or a shape merged into it) and the key within that shape. */
+export function handleTarget(e: SketchEntity, key: string): { entity: SketchEntity; key: string } {
+  const m = MERGED_KEY.exec(key);
+  const t = m ? e.trims?.[Number(m[1])] : undefined;
+  const inner = t?.op === "merge" ? t.shapes[Number(m![2])] : undefined;
+  return inner ? handleTarget(inner, m![3]) : { entity: e, key };
+}
+
+function ownHandles(e: SketchEntity): Handle[] {
   switch (e.type) {
     case "rect":
       return [{ key: "c", kind: "center", p: [e.x, e.y] }, ...rectCorners(e).map((p, i) => ({ key: `k${i}`, kind: "size" as const, p }))];
@@ -492,6 +516,8 @@ export function handles(e: SketchEntity): Handle[] {
 
 /** Drag handle `key` of `e` to `p`, updating the entity in place. */
 export function moveHandle(e: SketchEntity, key: string, p: P) {
+  const target = handleTarget(e, key);
+  if (target.entity !== e) return moveHandle(target.entity, target.key, p);
   const [u, v] = [round(p[0]), round(p[1])];
   if (key === "c" && "x" in e && "y" in e) {
     e.x = u;
@@ -895,8 +921,11 @@ export function mergeOverlaps(selected: SketchEntity[], ids: () => string): Trim
     if (g.length < 2) continue;
     try {
       const mp = clipping.union([ring(g[0])], ...g.slice(1).map((e) => [ring(e)]));
+      // One plain outline: the first shape that can be stays itself, with the rest merged in (all still editable).
+      const host = g.find((e) => e.type !== "stroke");
+      const kept = host && trimmed(host, "merge", g.filter((e) => e !== host), mp);
       result.remove.push(...g.map((e) => e.id));
-      result.add.push(...toEntities(mp, g[0].mode, ids));
+      result.add.push(...(kept ? [kept] : toEntities(mp, g[0].mode, ids)));
       merged += g.length;
     } catch {
       // Leave a group that can't be merged as it is.
