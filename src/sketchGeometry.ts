@@ -335,7 +335,12 @@ function trimmedOutline(e: SketchEntity): P[] {
   let result: P[] = [];
   try {
     let mp: MultiPolygon = [[baseOutline(e)]];
-    for (const t of e.trims ?? []) {
+    for (const [k, t] of (e.trims ?? []).entries()) {
+      if (t.op === "hull") {
+        const path = wrapPath([{ ...e, trims: e.trims!.slice(0, k) } as SketchEntity, ...t.shapes]);
+        if (path) mp = [[samplePath(path)]];
+        continue;
+      }
       const rings = t.shapes.map((s) => outline(s)).filter((r) => r.length >= 3);
       if (!rings.length) continue;
       const others: MultiPolygon = clipping.union(...(rings.map((r) => [[r]]) as [MultiPolygon, ...MultiPolygon[]]));
@@ -447,13 +452,13 @@ export interface Handle {
 const MERGED_KEY = /^t(\d+)\.(\d+)\/(.+)$/;
 
 /**
- * The dots to drag: the shape's own, then those of the shapes merged into it,
+ * The dots to drag: the shape's own, then those of the shapes merged into it (or wrapped with it),
  * which stay editable as themselves (their centres drag just them).
  */
 export function handles(e: SketchEntity): Handle[] {
   const all = ownHandles(e);
   (e.trims ?? []).forEach((t, k) => {
-    if (t.op !== "merge") return;
+    if (t.op !== "merge" && t.op !== "hull") return;
     t.shapes.forEach((m, j) => all.push(...handles(m).map((h) => ({ key: `t${k}.${j}/${h.key}`, kind: h.kind === "center" ? ("vertex" as const) : h.kind, p: h.p }))));
   });
   return all;
@@ -463,7 +468,7 @@ export function handles(e: SketchEntity): Handle[] {
 export function handleTarget(e: SketchEntity, key: string): { entity: SketchEntity; key: string } {
   const m = MERGED_KEY.exec(key);
   const t = m ? e.trims?.[Number(m[1])] : undefined;
-  const inner = t?.op === "merge" ? t.shapes[Number(m![2])] : undefined;
+  const inner = t?.op === "merge" || t?.op === "hull" ? t.shapes[Number(m![2])] : undefined;
   return inner ? handleTarget(inner, m![3]) : { entity: e, key };
 }
 
@@ -1109,4 +1114,174 @@ export function roundCorner(e: SketchEntity, i: number, size: number, bevel: boo
   pts.splice(i, 1, t1, t2);
   bends.splice(i, 1, round(Math.sign(toward) * sag), bends[i]);
   return { id: e.id, mode: e.mode, type: "polygon", points: pts, bends };
+}
+
+// ---- Wrapping (convex hull) --------------------------------------------------
+
+/** A point on a shape's outline, and the curve it lies on (a circle, or a Bézier by number and where along it). */
+type WrapSample = { p: P; circle?: { c: P; r: number }; bez?: { id: number; t: number } };
+
+/** The circle through three points: its centre, radius, start angle and the signed sweep from a to b through `via`. */
+function arcThrough(a: P, via: P, b: P): { c: P; r: number; a0: number; sweep: number } | null {
+  const d = 2 * (a[0] * (via[1] - b[1]) + via[0] * (b[1] - a[1]) + b[0] * (a[1] - via[1]));
+  if (Math.abs(d) < 1e-12) return null;
+  const sq = (p: P) => p[0] * p[0] + p[1] * p[1];
+  const c: P = [
+    (sq(a) * (via[1] - b[1]) + sq(via) * (b[1] - a[1]) + sq(b) * (a[1] - via[1])) / d,
+    (sq(a) * (b[0] - via[0]) + sq(via) * (a[0] - b[0]) + sq(b) * (via[0] - a[0])) / d,
+  ];
+  const ang = (p: P) => Math.atan2(p[1] - c[1], p[0] - c[0]);
+  const norm = (x: number) => ((x % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+  const a0 = ang(a);
+  let sweep = norm(ang(b) - a0);
+  if (norm(ang(via) - a0) > sweep) sweep -= 2 * Math.PI;
+  return { c, r: dist(a, c), a0, sweep };
+}
+
+const bezAt = ([a, c1, c2, b]: [P, P, P, P], t: number): P => {
+  const u = 1 - t;
+  return [0, 1].map((k) => u * u * u * a[k] + 3 * u * u * t * c1[k] + 3 * u * t * t * c2[k] + t * t * t * b[k]) as P;
+};
+
+/** The part of a cubic Bézier between t0 and t1 (either way round), as a Bézier of its own. */
+function subBezier(q: [P, P, P, P], t0: number, t1: number): [P, P, P, P] {
+  if (t0 > t1) return subBezier(q, t1, t0).reverse() as [P, P, P, P];
+  const lerp = (x: P, y: P, t: number): P => [x[0] + (y[0] - x[0]) * t, x[1] + (y[1] - x[1]) * t];
+  const split = ([a, b, c, d]: [P, P, P, P], t: number): [[P, P, P, P], [P, P, P, P]] => {
+    const [ab, bc, cd] = [lerp(a, b, t), lerp(b, c, t), lerp(c, d, t)];
+    const [abc, bcd] = [lerp(ab, bc, t), lerp(bc, cd, t)];
+    const m = lerp(abc, bcd, t);
+    return [
+      [a, ab, abc, m],
+      [m, bcd, cd, d],
+    ];
+  };
+  const left = split(q, t1)[0];
+  return t1 > 1e-12 ? split(left, t0 / t1)[1] : left;
+}
+
+/**
+ * One outline wrapped round shapes (and points), like a rubber band: their
+ * convex hull. Where it follows a shape's curve it keeps that exact arc (or a
+ * piece of its Bézier); between shapes it's straight, just touching curves
+ * (to within a twentieth of a degree). Null if there's nothing to wrap.
+ */
+export function wrapPath(parts: SketchEntity[]): Path | null {
+  const samples: WrapSample[] = [];
+  const curves: [P, P, P, P][] = [];
+  const STEP = (0.05 * Math.PI) / 180;
+  for (const part of parts) {
+    if (part.type === "point") samples.push({ p: [part.x, part.y] });
+    else if (part.type === "line") samples.push({ p: [part.x1, part.y1] }, { p: [part.x2, part.y2] });
+    else if (part.trims?.length) samples.push(...outline(part).map((p) => ({ p })));
+    else if (part.type === "ellipse") {
+      for (let i = 0; i < 720; i++) samples.push({ p: add([part.x, part.y], rot([part.rx * Math.cos((i / 720) * 2 * Math.PI), part.ry * Math.sin((i / 720) * 2 * Math.PI)], part.angle)) });
+    } else {
+      const paths = part.type === "stroke" ? strokePieces(part) : [entityPath(part)].filter((x): x is Path => !!x);
+      for (const path of paths) {
+        let cur = path.start;
+        for (const seg of path.segments) {
+          if (seg.kind === "line") samples.push({ p: cur });
+          else if (seg.kind === "arc") {
+            const g = arcThrough(cur, seg.via, seg.to);
+            if (!g) samples.push({ p: cur });
+            else {
+              const n = Math.max(2, Math.ceil(Math.abs(g.sweep) / STEP));
+              for (let k = 0; k <= n; k++) {
+                const t = g.a0 + (g.sweep * k) / n;
+                samples.push({ p: [g.c[0] + g.r * Math.cos(t), g.c[1] + g.r * Math.sin(t)], circle: { c: g.c, r: g.r } });
+              }
+            }
+          } else {
+            const id = curves.push([cur, seg.c1, seg.c2, seg.to]) - 1;
+            for (let k = 0; k <= 128; k++) samples.push({ p: bezAt(curves[id], k / 128), bez: { id, t: k / 128 } });
+          }
+          cur = seg.to;
+        }
+      }
+    }
+  }
+  if (samples.length < 3) return null;
+
+  // Convex hull, counter-clockwise (Andrew's monotone chain), keeping each point's curve.
+  const sorted = samples.slice().sort((a, b) => a.p[0] - b.p[0] || a.p[1] - b.p[1]);
+  const turn = (o: WrapSample, a: WrapSample, b: WrapSample) => (a.p[0] - o.p[0]) * (b.p[1] - o.p[1]) - (a.p[1] - o.p[1]) * (b.p[0] - o.p[0]);
+  const chain = (list: WrapSample[]) => {
+    const out: WrapSample[] = [];
+    for (const s of list) {
+      while (out.length >= 2 && turn(out[out.length - 2], out[out.length - 1], s) <= 1e-12) out.pop();
+      out.push(s);
+    }
+    return out.slice(0, -1);
+  };
+  const hull = [...chain(sorted), ...chain(sorted.slice().reverse())];
+  if (hull.length < 3) return null;
+
+  // Runs of hull points on the same circle or Bézier become one piece of it; the rest are corners.
+  type Item = { kind: "arc"; circle: { c: P; r: number }; pts: P[] } | { kind: "bez"; id: number; ts: number[]; pts: P[] } | { kind: "pt"; pts: P[] };
+  const sameCircle = (x: { c: P; r: number }, y: { c: P; r: number }) => dist(x.c, y.c) < 1e-7 && Math.abs(x.r - y.r) < 1e-7;
+  const items: Item[] = [];
+  for (const h of hull) {
+    const last = items[items.length - 1];
+    if (h.circle && last?.kind === "arc" && sameCircle(last.circle, h.circle)) last.pts.push(h.p);
+    else if (h.bez && last?.kind === "bez" && last.id === h.bez.id) (last.pts.push(h.p), last.ts.push(h.bez.t));
+    else items.push(h.circle ? { kind: "arc", circle: h.circle, pts: [h.p] } : h.bez ? { kind: "bez", id: h.bez.id, ts: [h.bez.t], pts: [h.p] } : { kind: "pt", pts: [h.p] });
+  }
+  // The run the hull started part-way through.
+  const [first, end] = [items[0], items[items.length - 1]];
+  if (items.length > 1 && first.kind === "arc" && end.kind === "arc" && sameCircle(first.circle, end.circle)) {
+    first.pts.unshift(...end.pts);
+    items.pop();
+  } else if (items.length > 1 && first.kind === "bez" && end.kind === "bez" && first.id === end.id) {
+    first.pts.unshift(...end.pts);
+    first.ts.unshift(...end.ts);
+    items.pop();
+  }
+  // Wrapped round one circle (everything else inside it): that circle.
+  if (items.length === 1 && items[0].kind === "arc") {
+    const { c, r } = items[0].circle;
+    return { start: [c[0] + r, c[1]], segments: [{ kind: "arc", via: [c[0], c[1] + r], to: [c[0] - r, c[1]] }, { kind: "arc", via: [c[0], c[1] - r], to: [c[0] + r, c[1]] }] };
+  }
+
+  const start = items[0].pts[0];
+  const segments: Segment[] = [];
+  let cur = start;
+  const lineTo = (p: P) => {
+    if (dist(cur, p) > 1e-9) segments.push({ kind: "line", to: p });
+    cur = p;
+  };
+  items.forEach((it, i) => {
+    lineTo(it.pts[0]);
+    const lastPt = it.pts[it.pts.length - 1];
+    if (it.kind === "arc" && it.pts.length >= 2) {
+      segments.push({ kind: "arc", via: it.pts[Math.floor(it.pts.length / 2)], to: lastPt });
+      cur = lastPt;
+    } else if (it.kind === "bez" && it.pts.length >= 2) {
+      const [, c1, c2] = subBezier(curves[it.id], it.ts[0], it.ts[it.ts.length - 1]);
+      segments.push({ kind: "bezier", c1, c2, to: lastPt });
+      cur = lastPt;
+    } else lineTo(lastPt);
+    if (i === items.length - 1) lineTo(start);
+  });
+  return { start, segments };
+}
+
+/**
+ * Drawing a line from `from`: the points where it would just touch a circle
+ * (tangent), on each circle and slot end in the drawing.
+ */
+export function tangentPoints(entities: SketchEntity[], from: P): P[] {
+  const out: P[] = [];
+  const circle = (c: P, r: number) => {
+    const d = dist(from, c);
+    if (r <= 0 || d <= r + 1e-9) return;
+    const at = Math.atan2(from[1] - c[1], from[0] - c[0]);
+    const spread = Math.acos(r / d);
+    for (const s of [-1, 1]) out.push([c[0] + r * Math.cos(at + s * spread), c[1] + r * Math.sin(at + s * spread)]);
+  };
+  for (const e of entities) {
+    if (e.type === "circle") circle([e.x, e.y], e.radius);
+    else if (e.type === "slot") (circle([e.x1, e.y1], e.radius), circle([e.x2, e.y2], e.radius));
+  }
+  return out;
 }

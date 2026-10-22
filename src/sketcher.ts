@@ -27,6 +27,7 @@ import {
   splinePieces,
   splitAt,
   strokePath,
+  tangentPoints,
   trimAt,
   type TrimResult,
   translateEntity,
@@ -297,6 +298,9 @@ export class SketchEditor {
     };
     consider([0, 0]);
     for (const e of this.host.entities()) if (!exclude?.has(e.id)) snapPoints(e).forEach(consider);
+    // The next edge of a polygon (or a line) just touching a circle: where it would meet it tangentially.
+    const from = (this.tool === "polygon" || this.tool === "line") && this.drawing.length ? this.drawing[this.drawing.length - 1] : null;
+    if (from) tangentPoints(this.host.entities(), from).forEach(consider);
     // Only the first point of a shape being drawn is a target (to close it), so new points can sit close to the last one.
     if (this.drawing.length) consider(this.drawing[0]);
     this.snappedTo = best;
@@ -494,6 +498,26 @@ export class SketchEditor {
     this.host.changed();
     if (items.length) this.host.menu(items, e.clientX, e.clientY);
     void p;
+  }
+
+  /**
+   * Wrap one outline round the selected shapes, like a rubber band: the first
+   * closed shape stays itself, with the others wrapped in (all still editable).
+   */
+  wrapSelected() {
+    const sel = this.host.entities().filter((x) => this.selected.has(x.id));
+    const host = sel.find((x) => isClosed(x) && x.type !== "stroke");
+    if (!host || sel.length < 2) return this.host.notify("Select a closed shape and at least one more shape (or a point) to wrap together.");
+    const others = sel.filter((x) => x !== host);
+    const wrapped: SketchEntity = { ...structuredClone(host), trims: [...(host.trims ?? []), { op: "hull", shapes: others.map((x) => ({ ...structuredClone(x), mode: "add" as const })) }] };
+    const gone = new Set(others.map((x) => x.id));
+    this.selected = new Set([host.id]);
+    this.host.commit((entities) => {
+      const kept = entities.filter((x) => !gone.has(x.id)).map((x) => (x.id === host.id ? wrapped : x));
+      entities.splice(0, entities.length, ...kept);
+    });
+    this.host.notify(`Wrapped ${sel.length} shapes in one outline. They're still editable, and "Separate" splits them again.`);
+    this.host.changed();
   }
 
   /** Merge the selected shapes wherever they overlap. */

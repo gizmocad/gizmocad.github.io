@@ -322,11 +322,13 @@ export type Point2 = [number, number];
 /**
  * A trim kept on a shape, so it stays editable as itself (a trimmed circle can
  * still be resized as a circle): "keep" only the part inside any of `shapes`,
- * "cut" away the part inside them, or "merge" them in. `shapes` are copies of
- * what it was trimmed against, as they were then.
+ * "cut" away the part inside them, "merge" them in, or "hull": wrap one
+ * outline round it and them (a convex hull, straight edges just touching any
+ * curves). `shapes` are copies of what it was trimmed against, as they were
+ * then; merged and wrapped ones stay editable there.
  */
 export interface SketchTrim {
-  op: "keep" | "cut" | "merge";
+  op: "keep" | "cut" | "merge" | "hull";
   shapes: SketchEntity[];
 }
 

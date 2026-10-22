@@ -63,6 +63,9 @@
 - **More sketch tools:** the **Corner** tool (F) rounds or bevels a corner where two straight edges meet (an exact arc). With shapes selected:
   a **mirrored copy** across the V or U axis (or a selected guide line), **repeat** them around the origin (or a selected point; a bolt circle) or in a row,
   and **offset** them outward or inward by a distance (circles, rectangles, slots and N-gons stay themselves; other shapes become exact lines and arcs).
+  **◠ Wrap** stretches one outline round the selected shapes like a rubber band: straight edges join them, just touching any curves
+  (a circle and a polygon blend smoothly; a circle and a point make a teardrop). The shapes stay editable inside it, and "Separate" splits them again.
+  Drawing a polygon or line, the next point snaps to where the edge would just touch a circle (tangent).
   **⤓ Project the model** brings in the model's outline where it crosses the sketch's plane (or the face the sketch lies on), holes as cuts, to build on or snap to.
 - **Sketch constraints:** with the Constrain tool (K), click one or two points, edges or circles and pick horizontal,
   vertical, parallel, perpendicular, equal, tangent, coincident or fixed, or a length, distance, diameter or angle

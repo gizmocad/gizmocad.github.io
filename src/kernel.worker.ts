@@ -36,7 +36,7 @@ import {
   type SketchEntity,
   type SketchParams,
 } from "./model";
-import { entityPath, gearPath, isProfile, outline, prismPoints, starPoints, strokePieces, type Path } from "./sketchGeometry";
+import { entityPath, gearPath, isProfile, outline, prismPoints, starPoints, strokePieces, wrapPath, type Path } from "./sketchGeometry";
 import type { BuildStep, Clash, ImportedSolid, ImportSource, KernelRequest, KernelResponse, MeshData, ModelStats, SketchLoop } from "./kernel";
 import { hedron } from "./hedron";
 import { CUSTOM_FONT, builtInFontUrl, fontFamily, isCustomFont } from "./fonts";
@@ -111,8 +111,14 @@ function entityDrawing(e: SketchEntity): Drawing | null {
 function trimmedDrawing(e: SketchEntity): Drawing | null {
   try {
     let d = entityDrawing({ ...e, trims: undefined } as SketchEntity);
-    for (const t of e.trims ?? []) {
+    for (const [k, t] of (e.trims ?? []).entries()) {
       if (!d) return null;
+      if (t.op === "hull") {
+        // Wrapped round it and the other shapes: built from the exact wrapped outline.
+        const path = wrapPath([{ ...e, trims: e.trims!.slice(0, k) } as SketchEntity, ...t.shapes]);
+        if (path) d = pathDrawing(path);
+        continue;
+      }
       let others: Drawing | null = null;
       for (const s of t.shapes) {
         const sd = entityDrawing(s);

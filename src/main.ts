@@ -3745,7 +3745,7 @@ const TOOLS: { value: SketchTool; label: string; key: string; title: string }[] 
   { value: "ellipse", label: "⬭ Ellipse", key: "E", title: "Ellipse: drag from the centre to a corner" },
   { value: "ngon", label: "⬡ N-gon", key: "N", title: "Regular polygon: drag from the centre to a corner" },
   { value: "slot", label: "⊂⊃ Slot", key: "S", title: "Slot: drag from one end to the other" },
-  { value: "polygon", label: "⬠ Polygon", key: "P", title: "Polygon: click points; close on the first point, double-click or Enter. Drag the orange edge dots to curve edges." },
+  { value: "polygon", label: "⬠ Polygon", key: "P", title: "Polygon: click points; close on the first point, double-click or Enter. Drag the orange edge dots to curve edges. The next point snaps to where an edge would just touch a circle (tangent)." },
   { value: "spline", label: "∿ Curve", key: "U", title: "Smooth curve through the points you click. Click the first point again to close it (or double-click / Enter). The dashed part shows how it closes. Put points closer together for tighter bends; hold Alt to place a point off the grid." },
   { value: "brush", label: "≋ Brush", key: "B", title: "Paint freehand: hold and drag. The stroke becomes a shape as wide as the brush." },
   { value: "trim", label: "✂ Trim", key: "T", title: "Click a guide line to cut it back to where it crosses. Click a shape's edge where it runs inside another shape to merge them (or trim it back, if one adds and one cuts); click the part sticking out to trim that off; click a shape's edge on one side of a guide line crossing it to cut that side away." },
@@ -3878,7 +3878,7 @@ function renderSketchPanel(panel: HTMLElement, s: SketchFeature, ed: SketchEdito
       const last = e.trims[n - 1];
       items.push(
         hint(`Trimmed ${n === 1 ? "once" : `${n} times`}: it keeps its own handles and sizes, and the trimmed edge stays where it was.`),
-        button(last.op === "merge" ? `Separate the ${last.shapes.length + 1} shapes again` : n === 1 ? "Undo the trim" : "Undo the last trim", () =>
+        button(last.op === "merge" || last.op === "hull" ? `Separate the ${last.shapes.length + 1} shapes again` : n === 1 ? "Undo the trim" : "Undo the last trim", () =>
           updateSketch((t) => {
             if (t.kind !== "sketch") return;
             const x = t.params.entities.find((y) => y.id === e.id);
@@ -3886,20 +3886,20 @@ function renderSketchPanel(panel: HTMLElement, s: SketchFeature, ed: SketchEdito
             if (!x || !undone) return;
             if (!x.trims?.length) delete x.trims;
             // Shapes merged in were taken out of the sketch: they come back as themselves.
-            if (undone.op === "merge") t.params.entities.push(...undone.shapes.map((m) => ({ ...m, id: newId(), mode: x.mode })));
+            if (undone.op === "merge" || undone.op === "hull") t.params.entities.push(...undone.shapes.map((m) => ({ ...m, id: newId(), mode: isClosed(m) ? x.mode : ("construction" as const) })));
           }),
         ),
       );
       // Shapes merged into it stay editable: their points and sizes, each under its own heading.
       e.trims.forEach((t, k) => {
-        if (t.op !== "merge") return;
+        if (t.op !== "merge" && t.op !== "hull") return;
         t.shapes.forEach((m, j) => {
           const update = (_id: string, mutate: (x: SketchEntity) => void) =>
             updateEntity(e.id, (x) => {
               const inner = x.trims?.[k]?.shapes[j];
               if (inner) mutate(inner);
             });
-          items.push(section(`Merged in: ${ENTITY_LABEL[m.type].toLowerCase()}`), ...entityFields(m, update, true));
+          items.push(section(`${t.op === "hull" ? "Wrapped in" : "Merged in"}: ${ENTITY_LABEL[m.type].toLowerCase()}`), ...entityFields(m, update, true));
         });
       });
     }
@@ -3911,7 +3911,9 @@ function renderSketchPanel(panel: HTMLElement, s: SketchFeature, ed: SketchEdito
     if (sel.length > 1) {
       const trim = button("✂ Trim overlaps", () => ed.trimSelected());
       trim.title = "Merge the selected shapes where they overlap, removing the lines inside";
-      actions.append(trim);
+      const wrap = button("◠ Wrap", () => ed.wrapSelected());
+      wrap.title = "One outline stretched round them all, like a rubber band: straight edges join them, just touching any curves (a circle and a point make a teardrop)";
+      actions.append(trim, wrap);
     }
     items.push(actions, ...shapeTools(ed, sel));
   }
